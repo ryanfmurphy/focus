@@ -260,6 +260,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     // ---- return handling ----
     func onReturn(_ reason: String) {
         guard !showing else { return }
+        // A session already running is left alone: the countdown is wall-clock
+        // based, so it just resumes after lock/sleep. If it expired while away,
+        // the timer's tick() runs timeUp (rate → chain) — either way the return
+        // must NOT interrupt or restart it. Only prompt when idle.
+        guard currentFocus == nil else { return }
         guard Date().timeIntervalSince(lastFired) >= cooldown else { return }
         promptForFocus(reason: reason)
         lastFired = Date()          // stamp AFTER dismissal
