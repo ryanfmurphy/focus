@@ -18,6 +18,17 @@ func mmss(_ seconds: Int) -> String {
 
 func isoNow() -> String { ISO8601DateFormatter().string(from: Date()) }
 
+// Timestamps are stored as ISO8601 UTC; the history window renders them in the
+// system's local time zone.
+private let isoParser = ISO8601DateFormatter()
+private let localTimeFormatter: DateFormatter = {
+    let f = DateFormatter()
+    f.locale = Locale(identifier: "en_US_POSIX")
+    f.dateFormat = "yyyy-MM-dd HH:mm"
+    f.timeZone = .current
+    return f
+}()
+
 // SQLite wants to know whether the bound string outlives the call; TRANSIENT
 // tells it to copy, so passing a temporary Swift string is safe.
 let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
@@ -416,11 +427,13 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         historyWindow?.makeKeyAndOrderFront(nil)
     }
 
-    // started_at is ISO8601 ("2026-08-07T00:12:03Z"); show date + HH:MM.
+    // started_at is ISO8601 UTC ("2026-08-07T00:12:03Z"); render it in local time.
     private func whenLabel(_ iso: String) -> String {
-        let date = iso.count >= 10 ? String(iso.prefix(10)) : iso
-        let time = iso.count >= 16 ? String(iso.dropFirst(11).prefix(5)) : ""
-        return time.isEmpty ? date : "\(date) \(time)"
+        if let date = isoParser.date(from: iso) {
+            return localTimeFormatter.string(from: date)
+        }
+        // Fallback: show the raw value if it doesn't parse.
+        return String(iso.prefix(16)).replacingOccurrences(of: "T", with: " ")
     }
 
     func numberOfRows(in tableView: NSTableView) -> Int { historyRows.count }
