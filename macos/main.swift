@@ -117,6 +117,24 @@ final class DB {
         sqlite3_step(stmt)
     }
 
+    /// Sessions never closed out (ended_at IS NULL), newest first — i.e. a
+    /// session that was live when the process died (uninstall/crash/reboot).
+    func openSessions() -> [ActiveSession] {
+        let sql = "SELECT id, started_at, minutes, focus FROM sessions WHERE ended_at IS NULL ORDER BY id DESC;"
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
+        defer { sqlite3_finalize(stmt) }
+        var rows: [ActiveSession] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let focus = sqlite3_column_text(stmt, 3).map { String(cString: $0) } ?? ""
+            rows.append(ActiveSession(id: sqlite3_column_int64(stmt, 0),
+                                      startedAt: sqlite3_column_text(stmt, 1).map { String(cString: $0) } ?? "",
+                                      minutes: Int(sqlite3_column_int(stmt, 2)),
+                                      focus: focus))
+        }
+        return rows
+    }
+
     /// Most recent sessions, newest first, for the history window.
     func recent(limit: Int = 500) -> [SessionRow] {
         let sql = """
@@ -191,6 +209,13 @@ struct QueueItem {
     let focus: String
 }
 
+struct ActiveSession {
+    let id: Int64
+    let startedAt: String
+    let minutes: Int
+    let focus: String
+}
+
 struct SessionRow {
     let startedAt: String
     let endedAt: String?
@@ -257,8 +282,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         }
         tick()
 
-        // Launching at login IS a return.
-        onReturn("launch")
+        // On launch, offer to resume a session that was live when the process
+        // last died (uninstall/crash/reboot); otherwise prompt as a return.
+        restoreOrPrompt()
     }
 
     // ---- return handling ----
@@ -272,6 +298,65 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         guard Date().timeIntervalSince(lastFired) >= cooldown else { return }
         promptForFocus(reason: reason)
         lastFired = Date()          // stamp AFTER dismissal
+    }
+
+    // ---- resume-after-restart ----
+    private func restoreOrPrompt() {
+        let open = db.openSessions()   // newest first
+
+        // Any older open rows are stale orphans from past deaths — sweep them.
+        for stale in open.dropFirst() {
+            db.endSession(id: stale.id, outcome: "interrupted", rating: nil)
+        }
+
+        guard let candidate = open.first,
+              let start = isoParser.date(from: candidate.startedAt) else {
+            // Nothing (or unparseable) to resume — clean up and prompt normally.
+            if let c = open.first { db.endSession(id: c.id, outcome: "interrupted", rating: nil) }
+            onReturn("launch")
+            return
+        }
+
+        let deadline = start.addingTimeInterval(Double(candidate.minutes) * 60)
+        if deadline > Date() {
+            offerResume(candidate, deadline: deadline)     // still time left
+        } else {
+            // Expired while away → treat as finished: adopt it and let tick()'s
+            // timeUp run the mandatory rating (outcome 'completed').
+            adopt(candidate, deadline: deadline)
+            tick()
+        }
+    }
+
+    private func offerResume(_ s: ActiveSession, deadline: Date) {
+        NSApp.activate(ignoringOtherApps: true)
+        showing = true
+        let remaining = Int(deadline.timeIntervalSinceNow.rounded())
+        let alert = makeAlert()
+        alert.messageText = "Resume focus?"
+        alert.informativeText = "\(s.focus)\n\n\(mmss(remaining)) remaining (of \(s.minutes) min)"
+        alert.addButton(withTitle: "Resume")            // .alertFirstButtonReturn
+        alert.addButton(withTitle: "Start new focus")   // .alertSecondButtonReturn
+        alert.window.level = .floating
+        alert.window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        let response = alert.runModal()
+        showing = false
+
+        if response == .alertFirstButtonReturn {
+            adopt(s, deadline: deadline)
+            tick()
+        } else {
+            db.endSession(id: s.id, outcome: "interrupted", rating: nil)
+            onReturn("launch")
+        }
+    }
+
+    /// Reload an existing (still-open) session row into memory — same row keeps
+    /// getting written, so history stays one row / one rating.
+    private func adopt(_ s: ActiveSession, deadline: Date) {
+        currentFocus = s.focus
+        self.deadline = deadline
+        sessionId = s.id
     }
 
     // "Set focus" is an explicit ad-hoc entry — it bypasses the queue.
