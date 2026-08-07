@@ -139,6 +139,10 @@ final class AppController: NSObject, NSApplicationDelegate {
         showing = true
         defer { showing = false }
 
+        // Changing focus while a session is running forces you to rate the
+        // outgoing one first (same as clearing or letting the timer finish).
+        rateAndEndCurrent(outcome: "superseded")
+
         NSApp.activate(ignoringOtherApps: true)
 
         let focusField = NSTextField(frame: NSRect(x: 0, y: 30, width: 300, height: 24))
@@ -172,10 +176,6 @@ final class AppController: NSObject, NSApplicationDelegate {
             minutes = Int(minutesField.stringValue.trimmingCharacters(in: .whitespaces)) ?? 0
         }
 
-        // Starting fresh while a session is open (changed focus mid-run) closes
-        // the old one as "superseded" — no rating for an abandoned session.
-        if let id = sessionId { db.endSession(id: id, outcome: "superseded", rating: nil) }
-
         currentFocus = answer
         deadline = Date().addingTimeInterval(Double(minutes) * 60)
         sessionId = db.startSession(reason: reason, minutes: minutes, focus: answer)
@@ -183,10 +183,15 @@ final class AppController: NSObject, NSApplicationDelegate {
     }
 
     @objc func clearFocus() {
-        if let id = sessionId { db.endSession(id: id, outcome: "cleared", rating: nil) }
-        currentFocus = nil
-        deadline = nil
-        sessionId = nil
+        guard !showing else { return }
+        if sessionId != nil {
+            showing = true
+            rateAndEndCurrent(outcome: "cleared")   // must rate before clearing
+            showing = false
+        } else {
+            currentFocus = nil
+            deadline = nil
+        }
         tick()
     }
 
@@ -217,16 +222,31 @@ final class AppController: NSObject, NSApplicationDelegate {
         sessionId = nil
         hudWindow.orderOut(nil)
 
-        NSApp.activate(ignoringOtherApps: true)
+        let rating = promptRating(focus: focus, title: "Time's up")
+        if let id = endedId { db.endSession(id: id, outcome: "completed", rating: rating) }
+    }
 
+    /// If a session is active, force a rating then close it out with `outcome`
+    /// and clear all session state. Caller must already hold `showing`.
+    private func rateAndEndCurrent(outcome: String) {
+        guard let id = sessionId, let focus = currentFocus else { return }
+        currentFocus = nil
+        deadline = nil
+        sessionId = nil
+        hudWindow.orderOut(nil)
+        let rating = promptRating(focus: focus, title: "Rate this session")
+        db.endSession(id: id, outcome: outcome, rating: rating)
+    }
+
+    /// Mandatory 1–10 rating modal — floating, no escape, loops until valid.
+    private func promptRating(focus: String, title: String) -> Int {
+        NSApp.activate(ignoringOtherApps: true)
         let ratingField = NSTextField(frame: NSRect(x: 0, y: 0, width: 80, height: 24))
         ratingField.placeholderString = "1–10"
-
-        // MANDATORY, just like the return-prompt: loop until a valid 1–10 rating.
         var rating = 0
         while rating < 1 || rating > 10 {
             let alert = NSAlert()
-            alert.messageText = "Time's up"
+            alert.messageText = title
             alert.informativeText = "Focus: \(focus)\n\nHow did this session go? Rate it 1–10:"
             alert.addButton(withTitle: "Save")
             alert.accessoryView = ratingField
@@ -236,8 +256,7 @@ final class AppController: NSObject, NSApplicationDelegate {
             alert.runModal()
             rating = Int(ratingField.stringValue.trimmingCharacters(in: .whitespaces)) ?? 0
         }
-
-        if let id = endedId { db.endSession(id: id, outcome: "completed", rating: rating) }
+        return rating
     }
 
     // ---- UI construction ----
