@@ -443,10 +443,25 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         let alert = makeAlert()
         alert.messageText = "Next focus"
         alert.informativeText = "\(item.focus)\n\n\(item.minutes) minutes"
-        alert.addButton(withTitle: "Start")
+        alert.addButton(withTitle: "Start")                  // .alertFirstButtonReturn
+        alert.addButton(withTitle: "Pre-empt with another…") // .alertSecondButtonReturn
         alert.window.level = .floating
         alert.window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        alert.runModal()
+        let response = alert.runModal()
+
+        if response == .alertSecondButtonReturn {
+            // Pre-empt: leave the queued item where it is (still the front, since
+            // we never removed it) and run an ad-hoc focus right now instead.
+            if let (focus, minutes) = askFocusAndMinutes(
+                title: "Pre-empt with a new focus",
+                info: "This runs now; the queued focus stays next in line.",
+                confirm: "Start", cancellable: true) {
+                beginSession(reason: "preempt", minutes: minutes, focus: focus)
+                return
+            }
+            // Cancelled the pre-empt → fall through and start the queued one.
+        }
+
         db.removeFromQueue(id: item.id)
         beginSession(reason: "queue", minutes: item.minutes, focus: item.focus)
     }
