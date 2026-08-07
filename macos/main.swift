@@ -11,6 +11,10 @@ import SQLite3
 
 let defaultMinutes = 25
 
+// A built-in macOS sound played when a timer finishes. Options live in
+// /System/Library/Sounds (e.g. Glass, Hero, Ping, Blow, Submarine, Tink).
+let timeUpSoundName = "Glass"
+
 func mmss(_ seconds: Int) -> String {
     let s = max(0, seconds)
     return String(format: "%d:%02d", s / 60, s % 60)
@@ -528,6 +532,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     private func timeUp(focus: String) {
         guard !showing else { return }   // a prompt is open; retry on the next tick
         showing = true
+
+        NSSound(named: timeUpSoundName)?.play()   // pleasant chime when time's up
 
         let endedId = sessionId
         currentFocus = nil
