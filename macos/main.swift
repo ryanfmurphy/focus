@@ -46,6 +46,16 @@ final class DB {
             outcome    TEXT           -- completed / cleared / superseded
         );
         """)
+        // FIFO queue of upcoming sessions. Front = lowest id; "add to end" is a
+        // plain insert; "pop off" deletes the lowest id.
+        exec("""
+        CREATE TABLE IF NOT EXISTS queue (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL,
+            minutes    INTEGER,
+            focus      TEXT
+        );
+        """)
     }
 
     private func exec(_ sql: String) { sqlite3_exec(db, sql, nil, nil, nil) }
@@ -107,6 +117,48 @@ final class DB {
         }
         return rows
     }
+
+    // MARK: - Queue
+
+    /// Append a focus to the end of the queue.
+    func enqueue(focus: String, minutes: Int) {
+        let sql = "INSERT INTO queue (created_at, minutes, focus) VALUES (?,?,?);"
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, isoNow(), -1, SQLITE_TRANSIENT)
+        sqlite3_bind_int(stmt, 2, Int32(minutes))
+        sqlite3_bind_text(stmt, 3, focus, -1, SQLITE_TRANSIENT)
+        sqlite3_step(stmt)
+    }
+
+    /// The next queued focus (front of the FIFO), or nil if the queue is empty.
+    func frontOfQueue() -> QueueItem? {
+        let sql = "SELECT id, minutes, focus FROM queue ORDER BY id ASC LIMIT 1;"
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return nil }
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        let focus = sqlite3_column_text(stmt, 2).map { String(cString: $0) } ?? ""
+        return QueueItem(id: sqlite3_column_int64(stmt, 0),
+                         minutes: Int(sqlite3_column_int(stmt, 1)),
+                         focus: focus)
+    }
+
+    func removeFromQueue(id: Int64) {
+        let sql = "DELETE FROM queue WHERE id=?;"
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_int64(stmt, 1, id)
+        sqlite3_step(stmt)
+    }
+}
+
+struct QueueItem {
+    let id: Int64
+    let minutes: Int
+    let focus: String
 }
 
 struct SessionRow {
@@ -178,6 +230,20 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
 
     @objc func changeFocus() { promptForFocus(reason: "manual") }
 
+    /// Queue a focus to run after the current/queued ones. Doesn't touch the
+    /// active session. Cancellable, since it's a voluntary action.
+    @objc func addNextFocus() {
+        guard !showing else { return }
+        showing = true
+        defer { showing = false }
+        if let (focus, minutes) = askFocusAndMinutes(
+            title: "Add next focus",
+            info: "Queue a focus to run after the current one.",
+            confirm: "Add to queue", cancellable: true) {
+            db.enqueue(focus: focus, minutes: minutes)
+        }
+    }
+
     private func promptForFocus(reason: String) {
         guard !showing else { return }
         showing = true
@@ -189,9 +255,40 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
 
         NSApp.activate(ignoringOtherApps: true)
 
+        // If something is queued, use it (non-editable confirm) instead of asking.
+        if let next = db.frontOfQueue() {
+            confirmQueued(next)
+            return
+        }
+
+        guard let (answer, minutes) = askFocusAndMinutes(
+            title: "Welcome back",
+            info: "What's your one focus right now, and for how long?",
+            confirm: "Start", cancellable: false) else { return }
+        beginSession(reason: reason, minutes: minutes, focus: answer)
+    }
+
+    /// Non-editable confirmation for the next queued focus. Pops it off and starts.
+    private func confirmQueued(_ item: QueueItem) {
+        let alert = NSAlert()
+        alert.messageText = "Next focus"
+        alert.informativeText = "\(item.focus)\n\n\(item.minutes) minutes"
+        alert.addButton(withTitle: "Start")
+        alert.window.level = .floating
+        alert.window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        alert.runModal()
+        db.removeFromQueue(id: item.id)
+        beginSession(reason: "queue", minutes: item.minutes, focus: item.focus)
+    }
+
+    /// Editable "focus + minutes" modal. Loops until valid; returns nil only if
+    /// `cancellable` and the user cancels.
+    private func askFocusAndMinutes(title: String, info: String, confirm: String,
+                                    cancellable: Bool) -> (String, Int)? {
+        NSApp.activate(ignoringOtherApps: true)
+
         let focusField = NSTextField(frame: NSRect(x: 0, y: 30, width: 300, height: 24))
         focusField.placeholderString = "e.g. Ship the focus pill"
-        focusField.stringValue = currentFocus ?? ""
 
         let minutesLabel = NSTextField(labelWithString: "Minutes:")
         minutesLabel.frame = NSRect(x: 0, y: 0, width: 60, height: 24)
@@ -203,26 +300,31 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         accessory.addSubview(minutesLabel)
         accessory.addSubview(minutesField)
 
-        // Loop until a non-empty focus AND valid minutes — no escape, no Skip.
-        var answer = ""
-        var minutes = 0
-        while answer.isEmpty || minutes <= 0 {
+        while true {
             let alert = NSAlert()
-            alert.messageText = "Welcome back"
-            alert.informativeText = "What's your one focus right now, and for how long?"
-            alert.addButton(withTitle: "Start")
+            alert.messageText = title
+            alert.informativeText = info
+            alert.addButton(withTitle: confirm)             // .alertFirstButtonReturn
+            if cancellable { alert.addButton(withTitle: "Cancel") }
             alert.accessoryView = accessory
             alert.window.level = .floating
             alert.window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
             alert.window.initialFirstResponder = focusField
-            alert.runModal()
-            answer = focusField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-            minutes = Int(minutesField.stringValue.trimmingCharacters(in: .whitespaces)) ?? 0
-        }
+            let response = alert.runModal()
 
-        currentFocus = answer
+            if cancellable && response == .alertSecondButtonReturn { return nil }
+
+            let answer = focusField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            let minutes = Int(minutesField.stringValue.trimmingCharacters(in: .whitespaces)) ?? 0
+            if !answer.isEmpty && minutes > 0 { return (answer, minutes) }
+            // otherwise invalid: loop and ask again
+        }
+    }
+
+    private func beginSession(reason: String, minutes: Int, focus: String) {
+        currentFocus = focus
         deadline = Date().addingTimeInterval(Double(minutes) * 60)
-        sessionId = db.startSession(reason: reason, minutes: minutes, focus: answer)
+        sessionId = db.startSession(reason: reason, minutes: minutes, focus: focus)
         tick()
     }
 
@@ -447,6 +549,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         statusItem.button?.title = "🎯"   // fixed icon; never changes, so it never relayouts
         let menu = NSMenu()
         menu.addItem(withTitle: "Set focus", action: #selector(changeFocus), keyEquivalent: "")
+        menu.addItem(withTitle: "Add Next Focus", action: #selector(addNextFocus), keyEquivalent: "")
         menu.addItem(withTitle: "Clear focus", action: #selector(clearFocus), keyEquivalent: "")
         menu.addItem(.separator())
         menu.addItem(withTitle: "See history", action: #selector(showHistory), keyEquivalent: "")
