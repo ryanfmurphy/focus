@@ -276,10 +276,14 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             forName: NSNotification.Name("com.apple.screenIsUnlocked"),
             object: nil, queue: .main) { [self] _ in onReturn("unlock") }
 
-        // Drive the countdown / HUD once a second.
-        uiTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+        // Drive the countdown / HUD once a second. Add it to the common run-loop
+        // modes so it keeps firing while the status menu is open or a modal is up
+        // (a default-mode timer would pause during menu/modal tracking).
+        let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
             self?.tick()
         }
+        RunLoop.main.add(timer, forMode: .common)
+        uiTimer = timer
         tick()
 
         // On launch, offer to resume a session that was live when the process
