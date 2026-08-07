@@ -221,6 +221,14 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     private var historyWindow: NSWindow?
     private var historyTable: NSTableView?
     private var historyRows: [SessionRow] = []
+    private lazy var alertIcon = emojiImage("🎯", size: 256)
+
+    // NSAlert's default icon is the (missing) app icon; force 🎯 on every modal.
+    private func makeAlert() -> NSAlert {
+        let alert = NSAlert()
+        alert.icon = alertIcon
+        return alert
+    }
 
     func applicationDidFinishLaunching(_ note: Notification) {
         // Give NSAlert a real icon (🎯) instead of the generic app icon.
@@ -319,7 +327,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
 
     /// Non-editable confirmation for the next queued focus. Pops it off and starts.
     private func confirmQueued(_ item: QueueItem) {
-        let alert = NSAlert()
+        let alert = makeAlert()
         alert.messageText = "Next focus"
         alert.informativeText = "\(item.focus)\n\n\(item.minutes) minutes"
         alert.addButton(withTitle: "Start")
@@ -350,7 +358,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         accessory.addSubview(minutesField)
 
         while true {
-            let alert = NSAlert()
+            let alert = makeAlert()
             alert.messageText = title
             alert.informativeText = info
             alert.addButton(withTitle: confirm)             // .alertFirstButtonReturn
@@ -549,7 +557,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         ratingField.placeholderString = "1–10"
         var rating = 0
         while rating < 1 || rating > 10 {
-            let alert = NSAlert()
+            let alert = makeAlert()
             alert.messageText = title
             alert.informativeText = "Focus: \(focus)\n\nHow did this session go? Rate it 1–10:"
             alert.addButton(withTitle: "Save")
