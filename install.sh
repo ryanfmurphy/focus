@@ -21,5 +21,5 @@ launchctl bootstrap "gui/$(id -u)" "$PLIST"
 echo "Done. The focus prompt should appear now (launch counts as a return),"
 echo "and thereafter on every login / wake / screen unlock."
 echo
-echo "Logs: ~/focus/log.tsv   |   stderr: /tmp/focus.err.log"
+echo "Data: ~/focus/focus.db   |   stderr: /tmp/focus.err.log"
 echo "Uninstall: ./uninstall.sh"

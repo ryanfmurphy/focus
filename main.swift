@@ -1,17 +1,13 @@
 import Cocoa
+import SQLite3
 
 // focus — pops a blocking "Welcome back, what's your focus?" modal whenever you
 // return to the Mac (login / fast-user-switch, wake, screen unlock). You set a
 // focus and a number of minutes. While a focus is active it's shown two ways:
 //   • an always-on-top floating pill in the top-right of the screen, and
 //   • a menu-bar item (with controls to change/clear the focus).
-// When the timer expires it pops a "time's up" alert. Logs each event.
-
-let logURL: URL = {
-    let dir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("focus")
-    try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-    return dir.appendingPathComponent("log.tsv")
-}()
+// When the timer expires it pops a MANDATORY modal that shows the focus and
+// makes you rate the session 1–10. Every session is recorded in a SQLite table.
 
 let defaultMinutes = 25
 
@@ -20,10 +16,77 @@ func mmss(_ seconds: Int) -> String {
     return String(format: "%d:%02d", s / 60, s % 60)
 }
 
+func isoNow() -> String { ISO8601DateFormatter().string(from: Date()) }
+
+// SQLite wants to know whether the bound string outlives the call; TRANSIENT
+// tells it to copy, so passing a temporary Swift string is safe.
+let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+
+// MARK: - Storage
+
+final class DB {
+    private var db: OpaquePointer?
+
+    init() {
+        let dir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("focus")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let path = dir.appendingPathComponent("focus.db").path
+        if sqlite3_open(path, &db) != SQLITE_OK {
+            FileHandle.standardError.write("focus: cannot open db at \(path)\n".data(using: .utf8)!)
+        }
+        exec("""
+        CREATE TABLE IF NOT EXISTS sessions (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            started_at TEXT NOT NULL,
+            ended_at   TEXT,
+            reason     TEXT,          -- what triggered the prompt: launch/wake/unlock/session/manual
+            minutes    INTEGER,       -- planned duration
+            focus      TEXT,
+            rating     INTEGER,       -- 1..10, only for completed sessions
+            outcome    TEXT           -- completed / cleared / superseded
+        );
+        """)
+    }
+
+    private func exec(_ sql: String) { sqlite3_exec(db, sql, nil, nil, nil) }
+
+    /// Insert a new in-progress session; returns its row id.
+    func startSession(reason: String, minutes: Int, focus: String) -> Int64? {
+        let sql = "INSERT INTO sessions (started_at, reason, minutes, focus) VALUES (?,?,?,?);"
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return nil }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, isoNow(), -1, SQLITE_TRANSIENT)
+        sqlite3_bind_text(stmt, 2, reason, -1, SQLITE_TRANSIENT)
+        sqlite3_bind_int(stmt, 3, Int32(minutes))
+        sqlite3_bind_text(stmt, 4, focus, -1, SQLITE_TRANSIENT)
+        guard sqlite3_step(stmt) == SQLITE_DONE else { return nil }
+        return sqlite3_last_insert_rowid(db)
+    }
+
+    /// Close out a session with an outcome and (optionally) a rating.
+    func endSession(id: Int64, outcome: String, rating: Int?) {
+        let sql = "UPDATE sessions SET ended_at=?, outcome=?, rating=? WHERE id=?;"
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, isoNow(), -1, SQLITE_TRANSIENT)
+        sqlite3_bind_text(stmt, 2, outcome, -1, SQLITE_TRANSIENT)
+        if let r = rating { sqlite3_bind_int(stmt, 3, Int32(r)) } else { sqlite3_bind_null(stmt, 3) }
+        sqlite3_bind_int64(stmt, 4, id)
+        sqlite3_step(stmt)
+    }
+}
+
+// MARK: - App
+
 final class AppController: NSObject, NSApplicationDelegate {
-    // ---- state ----
+    private let db = DB()
+
+    // ---- session state ----
     private var currentFocus: String?
     private var deadline: Date?
+    private var sessionId: Int64?
 
     // Debounce guards for the return-prompt (wake + unlock + session often fire
     // together). `showing` also stops any modal from stacking on another.
@@ -109,15 +172,21 @@ final class AppController: NSObject, NSApplicationDelegate {
             minutes = Int(minutesField.stringValue.trimmingCharacters(in: .whitespaces)) ?? 0
         }
 
+        // Starting fresh while a session is open (changed focus mid-run) closes
+        // the old one as "superseded" — no rating for an abandoned session.
+        if let id = sessionId { db.endSession(id: id, outcome: "superseded", rating: nil) }
+
         currentFocus = answer
         deadline = Date().addingTimeInterval(Double(minutes) * 60)
-        log(event: "start", reason: reason, minutes: minutes)
+        sessionId = db.startSession(reason: reason, minutes: minutes, focus: answer)
         tick()
     }
 
     @objc func clearFocus() {
+        if let id = sessionId { db.endSession(id: id, outcome: "cleared", rating: nil) }
         currentFocus = nil
         deadline = nil
+        sessionId = nil
         tick()
     }
 
@@ -129,8 +198,7 @@ final class AppController: NSObject, NSApplicationDelegate {
                 timeUp(focus: focus)
                 return
             }
-            let clock = mmss(remaining)
-            hudLabel.stringValue = "🎯 \(focus)    \(clock)"
+            hudLabel.stringValue = "🎯 \(focus)    \(mmss(remaining))"
             layoutHUD()
             hudWindow.orderFrontRegardless()
         } else {
@@ -139,22 +207,37 @@ final class AppController: NSObject, NSApplicationDelegate {
     }
 
     private func timeUp(focus: String) {
-        log(event: "timeup", reason: "timer", minutes: 0)   // log while focus still set
-        currentFocus = nil
-        deadline = nil
-        hudWindow.orderOut(nil)
-
-        guard !showing else { return }
+        guard !showing else { return }   // a prompt is open; retry on the next tick
         showing = true
         defer { showing = false }
+
+        let endedId = sessionId
+        currentFocus = nil
+        deadline = nil
+        sessionId = nil
+        hudWindow.orderOut(nil)
+
         NSApp.activate(ignoringOtherApps: true)
-        let alert = NSAlert()
-        alert.messageText = "Time's up"
-        alert.informativeText = "Your focus was:\n\n\(focus)"
-        alert.addButton(withTitle: "Done")
-        alert.window.level = .floating
-        alert.window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        alert.runModal()
+
+        let ratingField = NSTextField(frame: NSRect(x: 0, y: 0, width: 80, height: 24))
+        ratingField.placeholderString = "1–10"
+
+        // MANDATORY, just like the return-prompt: loop until a valid 1–10 rating.
+        var rating = 0
+        while rating < 1 || rating > 10 {
+            let alert = NSAlert()
+            alert.messageText = "Time's up"
+            alert.informativeText = "Focus: \(focus)\n\nHow did this session go? Rate it 1–10:"
+            alert.addButton(withTitle: "Save")
+            alert.accessoryView = ratingField
+            alert.window.level = .floating
+            alert.window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+            alert.window.initialFirstResponder = ratingField
+            alert.runModal()
+            rating = Int(ratingField.stringValue.trimmingCharacters(in: .whitespaces)) ?? 0
+        }
+
+        if let id = endedId { db.endSession(id: id, outcome: "completed", rating: rating) }
     }
 
     // ---- UI construction ----
@@ -214,22 +297,6 @@ final class AppController: NSObject, NSApplicationDelegate {
         let x = vf.maxX - w - 16
         let y = vf.maxY - h - 12
         hudWindow.setFrame(NSRect(x: x, y: y, width: w, height: h), display: true)
-    }
-
-    // ---- logging ----
-    private func log(event: String, reason: String, minutes: Int) {
-        let ts = ISO8601DateFormatter().string(from: Date())
-        let focus = (currentFocus ?? "")
-            .replacingOccurrences(of: "\t", with: " ")
-            .replacingOccurrences(of: "\n", with: " ")
-        let line = "\(ts)\t\(event)\t\(reason)\t\(minutes)\t\(focus)\n"
-        if let data = line.data(using: .utf8) {
-            if let handle = try? FileHandle(forWritingTo: logURL) {
-                handle.seekToEndOfFile(); handle.write(data); try? handle.close()
-            } else {
-                try? data.write(to: logURL)
-            }
-        }
     }
 }
 
