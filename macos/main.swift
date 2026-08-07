@@ -353,18 +353,30 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
                                     cancellable: Bool) -> (String, Int)? {
         NSApp.activate(ignoringOtherApps: true)
 
-        let focusField = NSTextField(frame: NSRect(x: 0, y: 30, width: 300, height: 24))
+        let focusField = NSTextField(frame: NSRect(x: 0, y: 88, width: 320, height: 24))
         focusField.placeholderString = "e.g. Ship the focus pill"
 
         let minutesLabel = NSTextField(labelWithString: "Minutes:")
-        minutesLabel.frame = NSRect(x: 0, y: 0, width: 60, height: 24)
-        let minutesField = NSTextField(frame: NSRect(x: 62, y: 0, width: 70, height: 24))
+        minutesLabel.frame = NSRect(x: 0, y: 56, width: 60, height: 24)
+        let minutesField = NSTextField(frame: NSRect(x: 62, y: 56, width: 70, height: 24))
         minutesField.stringValue = String(defaultMinutes)
 
-        let accessory = NSView(frame: NSRect(x: 0, y: 0, width: 300, height: 62))
+        let soundCheck = NSButton(checkboxWithTitle: "Play sound when time's up",
+                                  target: nil, action: nil)
+        soundCheck.frame = NSRect(x: 0, y: 28, width: 320, height: 20)
+        soundCheck.state = playSoundEnabled ? .on : .off
+
+        let pushoverCheck = NSButton(checkboxWithTitle: "Send Pushover notification",
+                                     target: nil, action: nil)
+        pushoverCheck.frame = NSRect(x: 0, y: 2, width: 320, height: 20)
+        pushoverCheck.state = pushoverEnabled ? .on : .off
+
+        let accessory = NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 112))
         accessory.addSubview(focusField)
         accessory.addSubview(minutesLabel)
         accessory.addSubview(minutesField)
+        accessory.addSubview(soundCheck)
+        accessory.addSubview(pushoverCheck)
 
         while true {
             let alert = makeAlert()
@@ -379,6 +391,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             let response = alert.runModal()
 
             if cancellable && response == .alertSecondButtonReturn { return nil }
+
+            // Persist the checkbox choices as the standing preference.
+            playSoundEnabled = soundCheck.state == .on
+            pushoverEnabled = pushoverCheck.state == .on
 
             let answer = focusField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
             let minutes = Int(minutesField.stringValue.trimmingCharacters(in: .whitespaces)) ?? 0
@@ -529,11 +545,54 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         }
     }
 
+    // ---- notify preferences (persisted) ----
+    private var playSoundEnabled: Bool {
+        get { UserDefaults.standard.object(forKey: "playSound") as? Bool ?? true }  // default on
+        set { UserDefaults.standard.set(newValue, forKey: "playSound") }
+    }
+    private var pushoverEnabled: Bool {
+        get { UserDefaults.standard.bool(forKey: "pushover") }                       // default off
+        set { UserDefaults.standard.set(newValue, forKey: "pushover") }
+    }
+
+    /// Fire-and-forget Pushover message. Credentials come from ~/focus/pushover.json
+    /// ({"token":"...","user":"..."}), so they stay out of the code/repo.
+    private func sendPushover(title: String, message: String) {
+        let credURL = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("focus/pushover.json")
+        guard let data = try? Data(contentsOf: credURL),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let token = json["token"] as? String,
+              let user = json["user"] as? String else {
+            FileHandle.standardError.write(
+                "focus: Pushover enabled but ~/focus/pushover.json is missing or invalid\n"
+                    .data(using: .utf8)!)
+            return
+        }
+        var req = URLRequest(url: URL(string: "https://api.pushover.net/1/messages.json")!)
+        req.httpMethod = "POST"
+        req.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        var comps = URLComponents()
+        comps.queryItems = [
+            URLQueryItem(name: "token", value: token),
+            URLQueryItem(name: "user", value: user),
+            URLQueryItem(name: "title", value: title),
+            URLQueryItem(name: "message", value: message),
+        ]
+        req.httpBody = comps.percentEncodedQuery?.data(using: .utf8)
+        URLSession.shared.dataTask(with: req) { _, response, error in
+            if let error = error {
+                FileHandle.standardError.write("focus: Pushover error: \(error)\n".data(using: .utf8)!)
+            }
+        }.resume()
+    }
+
     private func timeUp(focus: String) {
         guard !showing else { return }   // a prompt is open; retry on the next tick
         showing = true
 
-        NSSound(named: timeUpSoundName)?.play()   // pleasant chime when time's up
+        if playSoundEnabled { NSSound(named: timeUpSoundName)?.play() }
+        if pushoverEnabled { sendPushover(title: "Time's up", message: focus) }
 
         let endedId = sessionId
         currentFocus = nil
