@@ -86,6 +86,16 @@ final class DB {
             focus      TEXT
         );
         """)
+        // One row per "Add time" event, so a session extended N times has N rows
+        // (sessions.minutes is also bumped to the running total).
+        exec("""
+        CREATE TABLE IF NOT EXISTS time_additions (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id INTEGER NOT NULL,
+            added_at   TEXT NOT NULL,
+            minutes    INTEGER
+        );
+        """)
     }
 
     private func exec(_ sql: String) { sqlite3_exec(db, sql, nil, nil, nil) }
@@ -115,6 +125,28 @@ final class DB {
         if let r = rating { sqlite3_bind_int(stmt, 3, Int32(r)) } else { sqlite3_bind_null(stmt, 3) }
         sqlite3_bind_int64(stmt, 4, id)
         sqlite3_step(stmt)
+    }
+
+    /// Log an "Add time" event and bump the session's total minutes.
+    func addTime(sessionId: Int64, minutes: Int) {
+        var ins: OpaquePointer?
+        if sqlite3_prepare_v2(db, "INSERT INTO time_additions (session_id, added_at, minutes) VALUES (?,?,?);",
+                              -1, &ins, nil) == SQLITE_OK {
+            sqlite3_bind_int64(ins, 1, sessionId)
+            sqlite3_bind_text(ins, 2, isoNow(), -1, SQLITE_TRANSIENT)
+            sqlite3_bind_int(ins, 3, Int32(minutes))
+            sqlite3_step(ins)
+        }
+        sqlite3_finalize(ins)
+
+        var upd: OpaquePointer?
+        if sqlite3_prepare_v2(db, "UPDATE sessions SET minutes = minutes + ? WHERE id = ?;",
+                              -1, &upd, nil) == SQLITE_OK {
+            sqlite3_bind_int(upd, 1, Int32(minutes))
+            sqlite3_bind_int64(upd, 2, sessionId)
+            sqlite3_step(upd)
+        }
+        sqlite3_finalize(upd)
     }
 
     /// Sessions never closed out (ended_at IS NULL), newest first — i.e. a
@@ -799,18 +831,77 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         if playSoundEnabled { NSSound(named: timeUpSoundName)?.play() }
         if pushoverEnabled { sendPushover(title: "Time's up", message: focus) }
 
-        let endedId = sessionId
-        currentFocus = nil
-        deadline = nil
-        sessionId = nil
-        hudWindow.orderOut(nil)
+        hudWindow.orderOut(nil)   // hide the frozen-at-0:00 pill during the modal
 
-        let rating = promptRating(focus: focus, title: "Time's up")
-        if let id = endedId { db.endSession(id: id, outcome: "completed", rating: rating) }
+        switch promptTimeUp(focus: focus) {
+        case .addTime(let extra):
+            // Keep the SAME session going: log the addition, extend, resume.
+            if let id = sessionId { db.addTime(sessionId: id, minutes: extra) }
+            deadline = Date().addingTimeInterval(Double(extra) * 60)
+            showing = false
+            tick()
 
-        // Roll straight into the next session: having rated, set a new focus.
-        showing = false
-        promptForFocus(reason: "after-session")
+        case .rate(let rating):
+            let endedId = sessionId
+            currentFocus = nil
+            deadline = nil
+            sessionId = nil
+            if let id = endedId { db.endSession(id: id, outcome: "completed", rating: rating) }
+            // Roll straight into the next session: having rated, set a new focus.
+            showing = false
+            promptForFocus(reason: "after-session")
+        }
+    }
+
+    private enum TimeUpChoice { case rate(Int); case addTime(Int) }
+
+    /// Time's-up modal: rate 1–10 to finish, or add more time to keep going.
+    private func promptTimeUp(focus: String) -> TimeUpChoice {
+        NSApp.activate(ignoringOtherApps: true)
+        let ratingField = NSTextField(frame: NSRect(x: 0, y: 0, width: 80, height: 24))
+        ratingField.placeholderString = "1–10"
+        while true {
+            let alert = makeAlert()
+            alert.messageText = "Time's up"
+            alert.informativeText = "Focus: \(focus)\n\nRate it 1–10 to finish, or add more time:"
+            alert.addButton(withTitle: "Save")        // .alertFirstButtonReturn
+            alert.addButton(withTitle: "Add time…")   // .alertSecondButtonReturn
+            alert.accessoryView = ratingField
+            alert.window.level = .floating
+            alert.window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+            alert.window.initialFirstResponder = ratingField
+            let response = alert.runModal()
+
+            if response == .alertSecondButtonReturn {
+                if let extra = askMinutes(title: "Add time", info: "How many more minutes?", prefill: 5) {
+                    return .addTime(extra)
+                }
+                continue   // cancelled the add → back to the time's-up modal
+            }
+            let rating = Int(ratingField.stringValue.trimmingCharacters(in: .whitespaces)) ?? 0
+            if (1...10).contains(rating) { return .rate(rating) }
+            // invalid rating → loop
+        }
+    }
+
+    /// Small numeric prompt (cancellable). Returns minutes > 0, or nil if cancelled.
+    private func askMinutes(title: String, info: String, prefill: Int) -> Int? {
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 80, height: 24))
+        field.stringValue = String(prefill)
+        while true {
+            let alert = makeAlert()
+            alert.messageText = title
+            alert.informativeText = info
+            alert.addButton(withTitle: "Add")       // .alertFirstButtonReturn
+            alert.addButton(withTitle: "Cancel")    // .alertSecondButtonReturn
+            alert.accessoryView = field
+            alert.window.level = .floating
+            alert.window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+            alert.window.initialFirstResponder = field
+            let response = alert.runModal()
+            if response == .alertSecondButtonReturn { return nil }
+            if let m = Int(field.stringValue.trimmingCharacters(in: .whitespaces)), m > 0 { return m }
+        }
     }
 
     /// If a session is active, force a rating then close it out with `outcome`
