@@ -287,10 +287,14 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         if let next = db.frontOfQueue() { confirmQueued(next) }
     }
 
-    // Grey out "Next focus" when the queue is empty.
+    // Grey out "Next focus" when the queue is empty; relabel "Set focus" to make
+    // clear it aborts a running session.
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         if menuItem.action == #selector(nextFocus) {
             return db.frontOfQueue() != nil
+        }
+        if menuItem.action == #selector(changeFocus) {
+            menuItem.title = currentFocus != nil ? "Abort and set focus" : "Set focus"
         }
         return true
     }
