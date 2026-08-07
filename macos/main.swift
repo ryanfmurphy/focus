@@ -18,6 +18,21 @@ func mmss(_ seconds: Int) -> String {
 
 func isoNow() -> String { ISO8601DateFormatter().string(from: Date()) }
 
+// Render an emoji into an NSImage — used as the app icon so NSAlert modals show
+// 🎯 instead of the generic "unbundled binary" application icon.
+func emojiImage(_ emoji: String, size: CGFloat) -> NSImage {
+    let font = NSFont.systemFont(ofSize: size * 0.82)
+    let attrs: [NSAttributedString.Key: Any] = [.font: font]
+    let str = emoji as NSString
+    let textSize = str.size(withAttributes: attrs)
+    let image = NSImage(size: NSSize(width: size, height: size))
+    image.lockFocus()
+    str.draw(at: NSPoint(x: (size - textSize.width) / 2, y: (size - textSize.height) / 2),
+             withAttributes: attrs)
+    image.unlockFocus()
+    return image
+}
+
 // Timestamps are stored as ISO8601 UTC; the history window renders them in the
 // system's local time zone.
 private let isoParser = ISO8601DateFormatter()
@@ -208,6 +223,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     private var historyRows: [SessionRow] = []
 
     func applicationDidFinishLaunching(_ note: Notification) {
+        // Give NSAlert a real icon (🎯) instead of the generic app icon.
+        NSApp.applicationIconImage = emojiImage("🎯", size: 256)
         buildMainMenu()
         buildStatusItem()
         buildHUD()
