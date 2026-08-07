@@ -168,6 +168,14 @@ final class DB {
 
     // MARK: - Queue
 
+    /// Number of focuses currently waiting in the queue.
+    func queueCount() -> Int {
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM queue;", -1, &stmt, nil) == SQLITE_OK else { return 0 }
+        defer { sqlite3_finalize(stmt) }
+        return sqlite3_step(stmt) == SQLITE_ROW ? Int(sqlite3_column_int(stmt, 0)) : 0
+    }
+
     /// Append a focus to the end of the queue.
     func enqueue(focus: String, minutes: Int) {
         let sql = "INSERT INTO queue (created_at, minutes, focus) VALUES (?,?,?);"
@@ -384,6 +392,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         }
         if menuItem.action == #selector(changeFocus) {
             menuItem.title = currentFocus != nil ? "Abort and set focus" : "Set focus"
+        }
+        if menuItem.action == #selector(addNextFocus) {
+            menuItem.title = "Add to queue (\(db.queueCount()))"
         }
         return true
     }
@@ -772,7 +783,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         let menu = NSMenu()
         menu.addItem(withTitle: "Set focus", action: #selector(changeFocus), keyEquivalent: "")
         menu.addItem(withTitle: "Next focus", action: #selector(nextFocus), keyEquivalent: "")
-        menu.addItem(withTitle: "Add next focus", action: #selector(addNextFocus), keyEquivalent: "")
+        menu.addItem(withTitle: "Add to queue", action: #selector(addNextFocus), keyEquivalent: "")
         menu.addItem(withTitle: "Clear focus", action: #selector(clearFocus), keyEquivalent: "")
         menu.addItem(.separator())
         menu.addItem(withTitle: "See history", action: #selector(showHistory), keyEquivalent: "")
