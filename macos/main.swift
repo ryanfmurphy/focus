@@ -101,6 +101,7 @@ final class AppController: NSObject, NSApplicationDelegate {
     private var uiTimer: Timer?
 
     func applicationDidFinishLaunching(_ note: Notification) {
+        buildMainMenu()
         buildStatusItem()
         buildHUD()
 
@@ -214,7 +215,6 @@ final class AppController: NSObject, NSApplicationDelegate {
     private func timeUp(focus: String) {
         guard !showing else { return }   // a prompt is open; retry on the next tick
         showing = true
-        defer { showing = false }
 
         let endedId = sessionId
         currentFocus = nil
@@ -224,6 +224,10 @@ final class AppController: NSObject, NSApplicationDelegate {
 
         let rating = promptRating(focus: focus, title: "Time's up")
         if let id = endedId { db.endSession(id: id, outcome: "completed", rating: rating) }
+
+        // Roll straight into the next session: having rated, set a new focus.
+        showing = false
+        promptForFocus(reason: "after-session")
     }
 
     /// If a session is active, force a rating then close it out with `outcome`
@@ -260,6 +264,37 @@ final class AppController: NSObject, NSApplicationDelegate {
     }
 
     // ---- UI construction ----
+
+    // Without a main menu, an .accessory app never dispatches the standard
+    // editing key equivalents (⌘A/⌘C/⌘V/⌘X/⌘Z) to the text field's field editor,
+    // so copy/paste/select-all silently do nothing in our modals. Providing an
+    // Edit menu with the usual first-responder actions restores them.
+    private func buildMainMenu() {
+        let mainMenu = NSMenu()
+
+        let appItem = NSMenuItem()
+        mainMenu.addItem(appItem)
+        let appMenu = NSMenu()
+        appMenu.addItem(withTitle: "Quit focus",
+                        action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        appItem.submenu = appMenu
+
+        let editItem = NSMenuItem()
+        mainMenu.addItem(editItem)
+        let editMenu = NSMenu(title: "Edit")
+        editMenu.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
+        editMenu.addItem(withTitle: "Redo", action: Selector(("redo:")), keyEquivalent: "Z")
+        editMenu.addItem(.separator())
+        editMenu.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        editMenu.addItem(withTitle: "Select All",
+                         action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        editItem.submenu = editMenu
+
+        NSApp.mainMenu = mainMenu
+    }
+
     private func buildStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.button?.title = "🎯"   // fixed icon; never changes, so it never relayouts
