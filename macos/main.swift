@@ -76,6 +76,46 @@ final class DB {
         sqlite3_bind_int64(stmt, 4, id)
         sqlite3_step(stmt)
     }
+
+    /// Most recent sessions, newest first, for the history window.
+    func recent(limit: Int = 500) -> [SessionRow] {
+        let sql = """
+        SELECT started_at, ended_at, minutes, focus, rating, outcome
+        FROM sessions ORDER BY id DESC LIMIT ?;
+        """
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_int(stmt, 1, Int32(limit))
+
+        func text(_ col: Int32) -> String? {
+            guard let c = sqlite3_column_text(stmt, col) else { return nil }
+            return String(cString: c)
+        }
+
+        var rows: [SessionRow] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let rating: Int? = sqlite3_column_type(stmt, 4) == SQLITE_NULL
+                ? nil : Int(sqlite3_column_int(stmt, 4))
+            rows.append(SessionRow(
+                startedAt: text(0) ?? "",
+                endedAt: text(1),
+                minutes: Int(sqlite3_column_int(stmt, 2)),
+                focus: text(3) ?? "",
+                rating: rating,
+                outcome: text(5)))
+        }
+        return rows
+    }
+}
+
+struct SessionRow {
+    let startedAt: String
+    let endedAt: String?
+    let minutes: Int
+    let focus: String
+    let rating: Int?
+    let outcome: String?
 }
 
 // MARK: - App
@@ -99,6 +139,8 @@ final class AppController: NSObject, NSApplicationDelegate {
     private var hudWindow: NSWindow!
     private var hudLabel: NSTextField!
     private var uiTimer: Timer?
+    private var historyWindow: NSWindow?
+    private var historyText: NSTextView?
 
     func applicationDidFinishLaunching(_ note: Notification) {
         buildMainMenu()
@@ -194,6 +236,65 @@ final class AppController: NSObject, NSApplicationDelegate {
             deadline = nil
         }
         tick()
+    }
+
+    // ---- history ----
+    @objc func showHistory() {
+        let text = renderHistory(db.recent())
+
+        if historyWindow == nil {
+            let window = NSWindow(
+                contentRect: NSRect(x: 0, y: 0, width: 680, height: 460),
+                styleMask: [.titled, .closable, .resizable, .miniaturizable],
+                backing: .buffered, defer: false)
+            window.title = "Focus history"
+            window.isReleasedWhenClosed = false   // we keep & reuse it
+            window.center()
+
+            let scroll = NSScrollView(frame: window.contentView!.bounds)
+            scroll.autoresizingMask = [.width, .height]
+            scroll.hasVerticalScroller = true
+
+            let tv = NSTextView(frame: scroll.bounds)
+            tv.isEditable = false
+            tv.isRichText = false
+            tv.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
+            tv.textContainerInset = NSSize(width: 10, height: 10)
+            tv.autoresizingMask = [.width]
+            scroll.documentView = tv
+            window.contentView = scroll
+
+            historyWindow = window
+            historyText = tv
+        }
+
+        historyText?.string = text
+        NSApp.activate(ignoringOtherApps: true)
+        historyWindow?.makeKeyAndOrderFront(nil)
+    }
+
+    private func renderHistory(_ rows: [SessionRow]) -> String {
+        guard !rows.isEmpty else { return "No sessions yet." }
+
+        // started_at is ISO8601 ("2026-08-07T00:12:03Z"); show date + HH:MM.
+        func when(_ iso: String) -> String {
+            let date = iso.count >= 10 ? String(iso.prefix(10)) : iso
+            let time = iso.count >= 16 ? String(iso.dropFirst(11).prefix(5)) : ""
+            return "\(date) \(time)"
+        }
+
+        let header = String(format: "%-17@  %4@  %-6@  %-11@  %@",
+                            "When" as NSString, "Min" as NSString, "Rating" as NSString,
+                            "Outcome" as NSString, "Focus" as NSString)
+        var lines = [header, String(repeating: "─", count: 96)]
+        for r in rows {
+            let rating = r.rating.map { "\($0)/10" } ?? "—"
+            let outcome = r.outcome ?? (r.endedAt == nil ? "active" : "—")
+            lines.append(String(format: "%-17@  %4ld  %-6@  %-11@  %@",
+                                when(r.startedAt) as NSString, r.minutes,
+                                rating as NSString, outcome as NSString, r.focus as NSString))
+        }
+        return lines.joined(separator: "\n")
     }
 
     // ---- per-second update ----
@@ -299,8 +400,10 @@ final class AppController: NSObject, NSApplicationDelegate {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.button?.title = "🎯"   // fixed icon; never changes, so it never relayouts
         let menu = NSMenu()
-        menu.addItem(withTitle: "Change focus…", action: #selector(changeFocus), keyEquivalent: "")
+        menu.addItem(withTitle: "Set focus", action: #selector(changeFocus), keyEquivalent: "")
         menu.addItem(withTitle: "Clear focus", action: #selector(clearFocus), keyEquivalent: "")
+        menu.addItem(.separator())
+        menu.addItem(withTitle: "See history", action: #selector(showHistory), keyEquivalent: "")
         menu.addItem(.separator())
         menu.addItem(withTitle: "Quit focus", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         for item in menu.items where item.action != #selector(NSApplication.terminate(_:)) {
