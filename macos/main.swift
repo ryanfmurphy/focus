@@ -176,6 +176,22 @@ final class DB {
         return sqlite3_step(stmt) == SQLITE_ROW ? Int(sqlite3_column_int(stmt, 0)) : 0
     }
 
+    /// All queued focuses, front (next up) first.
+    func queueItems() -> [QueueItem] {
+        let sql = "SELECT id, minutes, focus FROM queue ORDER BY id ASC;"
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
+        defer { sqlite3_finalize(stmt) }
+        var rows: [QueueItem] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let focus = sqlite3_column_text(stmt, 2).map { String(cString: $0) } ?? ""
+            rows.append(QueueItem(id: sqlite3_column_int64(stmt, 0),
+                                  minutes: Int(sqlite3_column_int(stmt, 1)),
+                                  focus: focus))
+        }
+        return rows
+    }
+
     /// Append a focus to the end of the queue.
     func enqueue(focus: String, minutes: Int) {
         let sql = "INSERT INTO queue (created_at, minutes, focus) VALUES (?,?,?);"
@@ -258,6 +274,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     private var historyWindow: NSWindow?
     private var historyTable: NSTableView?
     private var historyRows: [SessionRow] = []
+    private var queueWindow: NSWindow?
+    private var queueTable: NSTableView?
+    private var queueRows: [QueueItem] = []
     private lazy var alertIcon = emojiImage("🎯", size: 256)
 
     // NSAlert's default icon is the (missing) app icon; force 🎯 on every modal.
@@ -596,6 +615,56 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         historyWindow?.makeKeyAndOrderFront(nil)
     }
 
+    @objc func showQueue() {
+        queueRows = db.queueItems()
+
+        if queueWindow == nil {
+            let window = NSWindow(
+                contentRect: NSRect(x: 0, y: 0, width: 460, height: 360),
+                styleMask: [.titled, .closable, .resizable, .miniaturizable],
+                backing: .buffered, defer: false)
+            window.title = "Focus queue"
+            window.isReleasedWhenClosed = false
+            window.center()
+
+            let scroll = NSScrollView(frame: window.contentView!.bounds)
+            scroll.autoresizingMask = [.width, .height]
+            scroll.hasVerticalScroller = true
+            scroll.borderType = .noBorder
+
+            let table = NSTableView()
+            table.dataSource = self
+            table.delegate = self
+            table.usesAlternatingRowBackgroundColors = true
+            table.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
+            table.rowHeight = 22
+            table.style = .inset
+
+            func addColumn(_ id: String, _ title: String, width: CGFloat, min: CGFloat,
+                           align: NSTextAlignment = .left) {
+                let col = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(id))
+                col.title = title
+                col.width = width
+                col.minWidth = min
+                col.headerCell.alignment = align
+                table.addTableColumn(col)
+            }
+            addColumn("pos", "#", width: 36, min: 30, align: .right)
+            addColumn("min", "Min", width: 48, min: 40, align: .right)
+            addColumn("focus", "Focus (next up first)", width: 320, min: 150)
+
+            scroll.documentView = table
+            window.contentView = scroll
+
+            queueWindow = window
+            queueTable = table
+        }
+
+        queueTable?.reloadData()
+        NSApp.activate(ignoringOtherApps: true)
+        queueWindow?.makeKeyAndOrderFront(nil)
+    }
+
     // started_at is ISO8601 UTC ("2026-08-07T00:12:03Z"); render it in local time.
     private func whenLabel(_ iso: String) -> String {
         if let date = isoParser.date(from: iso) {
@@ -605,10 +674,27 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         return String(iso.prefix(16)).replacingOccurrences(of: "T", with: " ")
     }
 
-    func numberOfRows(in tableView: NSTableView) -> Int { historyRows.count }
+    func numberOfRows(in tableView: NSTableView) -> Int {
+        tableView === queueTable ? queueRows.count : historyRows.count
+    }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-        guard let id = tableColumn?.identifier.rawValue, row < historyRows.count else { return nil }
+        guard let id = tableColumn?.identifier.rawValue else { return nil }
+
+        if tableView === queueTable {
+            guard row < queueRows.count else { return nil }
+            let q = queueRows[row]
+            let text: String
+            var align: NSTextAlignment = .left
+            switch id {
+            case "pos": text = "\(row + 1)"; align = .right
+            case "min": text = "\(q.minutes)"; align = .right
+            default:    text = q.focus
+            }
+            return historyCell(tableView, id: id, text: text, align: align)
+        }
+
+        guard row < historyRows.count else { return nil }
         let r = historyRows[row]
         let text: String
         var align: NSTextAlignment = .left
@@ -802,6 +888,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         menu.addItem(withTitle: "Clear focus", action: #selector(clearFocus), keyEquivalent: "")
         menu.addItem(.separator())
         menu.addItem(withTitle: "See history", action: #selector(showHistory), keyEquivalent: "")
+        menu.addItem(withTitle: "See queue", action: #selector(showQueue), keyEquivalent: "")
         menu.addItem(.separator())
         menu.addItem(withTitle: "Quit focus", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         for item in menu.items where item.action != #selector(NSApplication.terminate(_:)) {
