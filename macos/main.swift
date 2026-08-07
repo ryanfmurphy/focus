@@ -172,7 +172,8 @@ struct SessionRow {
 
 // MARK: - App
 
-final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTableViewDelegate {
+final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSource,
+                           NSTableViewDelegate, NSMenuItemValidation {
     private let db = DB()
 
     // ---- session state ----
@@ -228,7 +229,26 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         lastFired = Date()          // stamp AFTER dismissal
     }
 
-    @objc func changeFocus() { promptForFocus(reason: "manual") }
+    // "Set focus" is an explicit ad-hoc entry — it bypasses the queue.
+    @objc func changeFocus() { promptForFocus(reason: "manual", useQueue: false) }
+
+    // "Next focus" jumps to the next queued item (disabled when the queue is empty).
+    @objc func nextFocus() {
+        guard !showing, db.frontOfQueue() != nil else { return }
+        showing = true
+        defer { showing = false }
+        rateAndEndCurrent(outcome: "superseded")   // rate the current one first
+        NSApp.activate(ignoringOtherApps: true)
+        if let next = db.frontOfQueue() { confirmQueued(next) }
+    }
+
+    // Grey out "Next focus" when the queue is empty.
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.action == #selector(nextFocus) {
+            return db.frontOfQueue() != nil
+        }
+        return true
+    }
 
     /// Queue a focus to run after the current/queued ones. Doesn't touch the
     /// active session. Cancellable, since it's a voluntary action.
@@ -244,7 +264,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         }
     }
 
-    private func promptForFocus(reason: String) {
+    private func promptForFocus(reason: String, useQueue: Bool = true) {
         guard !showing else { return }
         showing = true
         defer { showing = false }
@@ -255,8 +275,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
 
         NSApp.activate(ignoringOtherApps: true)
 
-        // If something is queued, use it (non-editable confirm) instead of asking.
-        if let next = db.frontOfQueue() {
+        // Auto-starts (return / after-session) use a queued focus if present;
+        // "Set focus" passes useQueue:false to force an ad-hoc editable entry.
+        if useQueue, let next = db.frontOfQueue() {
             confirmQueued(next)
             return
         }
@@ -549,6 +570,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         statusItem.button?.title = "🎯"   // fixed icon; never changes, so it never relayouts
         let menu = NSMenu()
         menu.addItem(withTitle: "Set focus", action: #selector(changeFocus), keyEquivalent: "")
+        menu.addItem(withTitle: "Next focus", action: #selector(nextFocus), keyEquivalent: "")
         menu.addItem(withTitle: "Add Next Focus", action: #selector(addNextFocus), keyEquivalent: "")
         menu.addItem(withTitle: "Clear focus", action: #selector(clearFocus), keyEquivalent: "")
         menu.addItem(.separator())
