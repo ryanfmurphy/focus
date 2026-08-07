@@ -571,7 +571,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         let menu = NSMenu()
         menu.addItem(withTitle: "Set focus", action: #selector(changeFocus), keyEquivalent: "")
         menu.addItem(withTitle: "Next focus", action: #selector(nextFocus), keyEquivalent: "")
-        menu.addItem(withTitle: "Add Next Focus", action: #selector(addNextFocus), keyEquivalent: "")
+        menu.addItem(withTitle: "Add next focus", action: #selector(addNextFocus), keyEquivalent: "")
         menu.addItem(withTitle: "Clear focus", action: #selector(clearFocus), keyEquivalent: "")
         menu.addItem(.separator())
         menu.addItem(withTitle: "See history", action: #selector(showHistory), keyEquivalent: "")
