@@ -1,4 +1,5 @@
-# compiled binary
+# compiled binary (macOS)
+/macos/focus
 focus
 
 # local data
@@ -6,3 +7,11 @@ focus
 *.db-journal
 *.db-wal
 log.tsv
+
+# iOS / Xcode
+ios/*.xcodeproj
+ios/DerivedData/
+ios/build/
+*.xcuserstate
+xcuserdata/
+.DS_Store
