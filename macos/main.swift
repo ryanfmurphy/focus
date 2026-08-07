@@ -873,7 +873,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             let response = alert.runModal()
 
             if response == .alertSecondButtonReturn {
-                if let extra = askMinutes(title: "Add time", info: "How many more minutes?", prefill: 5) {
+                if let extra = askMinutes() {
                     return .addTime(extra)
                 }
                 continue   // cancelled the add → back to the time's-up modal
@@ -884,14 +884,14 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         }
     }
 
-    /// Small numeric prompt (cancellable). Returns minutes > 0, or nil if cancelled.
-    private func askMinutes(title: String, info: String, prefill: Int) -> Int? {
+    /// "Add time" minutes prompt (cancellable). Returns minutes > 0, or nil if cancelled.
+    private func askMinutes() -> Int? {
         let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 80, height: 24))
-        field.stringValue = String(prefill)
+        field.stringValue = "5"
         while true {
             let alert = makeAlert()
-            alert.messageText = title
-            alert.informativeText = info
+            alert.messageText = "Add time"
+            alert.informativeText = "How many more minutes?"
             alert.addButton(withTitle: "Add")       // .alertFirstButtonReturn
             alert.addButton(withTitle: "Cancel")    // .alertSecondButtonReturn
             alert.accessoryView = field
