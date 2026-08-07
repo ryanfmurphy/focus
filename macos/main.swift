@@ -120,7 +120,7 @@ struct SessionRow {
 
 // MARK: - App
 
-final class AppController: NSObject, NSApplicationDelegate {
+final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSource, NSTableViewDelegate {
     private let db = DB()
 
     // ---- session state ----
@@ -140,7 +140,8 @@ final class AppController: NSObject, NSApplicationDelegate {
     private var hudLabel: NSTextField!
     private var uiTimer: Timer?
     private var historyWindow: NSWindow?
-    private var historyText: NSTextView?
+    private var historyTable: NSTableView?
+    private var historyRows: [SessionRow] = []
 
     func applicationDidFinishLaunching(_ note: Notification) {
         buildMainMenu()
@@ -240,7 +241,7 @@ final class AppController: NSObject, NSApplicationDelegate {
 
     // ---- history ----
     @objc func showHistory() {
-        let text = renderHistory(db.recent())
+        historyRows = db.recent()
 
         if historyWindow == nil {
             let window = NSWindow(
@@ -254,47 +255,92 @@ final class AppController: NSObject, NSApplicationDelegate {
             let scroll = NSScrollView(frame: window.contentView!.bounds)
             scroll.autoresizingMask = [.width, .height]
             scroll.hasVerticalScroller = true
+            scroll.borderType = .noBorder
 
-            let tv = NSTextView(frame: scroll.bounds)
-            tv.isEditable = false
-            tv.isRichText = false
-            tv.font = NSFont.monospacedSystemFont(ofSize: 12, weight: .regular)
-            tv.textContainerInset = NSSize(width: 10, height: 10)
-            tv.autoresizingMask = [.width]
-            scroll.documentView = tv
+            let table = NSTableView()
+            table.dataSource = self
+            table.delegate = self
+            table.usesAlternatingRowBackgroundColors = true
+            table.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
+            table.rowHeight = 22
+            table.allowsColumnResizing = true
+            table.style = .inset
+
+            func addColumn(_ id: String, _ title: String, width: CGFloat, min: CGFloat,
+                           align: NSTextAlignment = .left) {
+                let col = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(id))
+                col.title = title
+                col.width = width
+                col.minWidth = min
+                col.headerCell.alignment = align
+                table.addTableColumn(col)
+            }
+            addColumn("when", "Started", width: 140, min: 120)
+            addColumn("min", "Min", width: 48, min: 40, align: .right)
+            addColumn("rating", "Rating", width: 60, min: 50, align: .right)
+            addColumn("outcome", "Outcome", width: 95, min: 70)
+            addColumn("focus", "Focus", width: 300, min: 150)   // flexible last column
+
+            scroll.documentView = table
             window.contentView = scroll
 
             historyWindow = window
-            historyText = tv
+            historyTable = table
         }
 
-        historyText?.string = text
+        historyTable?.reloadData()
         NSApp.activate(ignoringOtherApps: true)
         historyWindow?.makeKeyAndOrderFront(nil)
     }
 
-    private func renderHistory(_ rows: [SessionRow]) -> String {
-        guard !rows.isEmpty else { return "No sessions yet." }
+    // started_at is ISO8601 ("2026-08-07T00:12:03Z"); show date + HH:MM.
+    private func whenLabel(_ iso: String) -> String {
+        let date = iso.count >= 10 ? String(iso.prefix(10)) : iso
+        let time = iso.count >= 16 ? String(iso.dropFirst(11).prefix(5)) : ""
+        return time.isEmpty ? date : "\(date) \(time)"
+    }
 
-        // started_at is ISO8601 ("2026-08-07T00:12:03Z"); show date + HH:MM.
-        func when(_ iso: String) -> String {
-            let date = iso.count >= 10 ? String(iso.prefix(10)) : iso
-            let time = iso.count >= 16 ? String(iso.dropFirst(11).prefix(5)) : ""
-            return "\(date) \(time)"
-        }
+    func numberOfRows(in tableView: NSTableView) -> Int { historyRows.count }
 
-        let header = String(format: "%-17@  %4@  %-6@  %-11@  %@",
-                            "When" as NSString, "Min" as NSString, "Rating" as NSString,
-                            "Outcome" as NSString, "Focus" as NSString)
-        var lines = [header, String(repeating: "─", count: 96)]
-        for r in rows {
-            let rating = r.rating.map { "\($0)/10" } ?? "—"
-            let outcome = r.outcome ?? (r.endedAt == nil ? "active" : "—")
-            lines.append(String(format: "%-17@  %4ld  %-6@  %-11@  %@",
-                                when(r.startedAt) as NSString, r.minutes,
-                                rating as NSString, outcome as NSString, r.focus as NSString))
+    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        guard let id = tableColumn?.identifier.rawValue, row < historyRows.count else { return nil }
+        let r = historyRows[row]
+        let text: String
+        var align: NSTextAlignment = .left
+        switch id {
+        case "when":    text = whenLabel(r.startedAt)
+        case "min":     text = "\(r.minutes)"; align = .right
+        case "rating":  text = r.rating.map { "\($0)/10" } ?? "—"; align = .right
+        case "outcome": text = r.outcome ?? (r.endedAt == nil ? "active" : "—")
+        default:        text = r.focus
         }
-        return lines.joined(separator: "\n")
+        return historyCell(tableView, id: id, text: text, align: align)
+    }
+
+    private func historyCell(_ table: NSTableView, id: String, text: String,
+                             align: NSTextAlignment) -> NSTableCellView {
+        let identifier = NSUserInterfaceItemIdentifier(id)
+        let cell: NSTableCellView
+        if let reused = table.makeView(withIdentifier: identifier, owner: self) as? NSTableCellView {
+            cell = reused
+        } else {
+            cell = NSTableCellView()
+            cell.identifier = identifier
+            let tf = NSTextField(labelWithString: "")
+            tf.translatesAutoresizingMaskIntoConstraints = false
+            tf.lineBreakMode = .byTruncatingTail
+            tf.font = NSFont.systemFont(ofSize: 12)
+            cell.addSubview(tf)
+            cell.textField = tf
+            NSLayoutConstraint.activate([
+                tf.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 4),
+                tf.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -4),
+                tf.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+            ])
+        }
+        cell.textField?.stringValue = text
+        cell.textField?.alignment = align
+        return cell
     }
 
     // ---- per-second update ----
