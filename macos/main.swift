@@ -482,7 +482,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             // Complete the existing record as interrupted, recording elapsed minutes.
             db.markInterrupted(id: id, elapsedMinutes: elapsed)
             // Queue a fresh copy for the remaining time to resume next.
-            db.enqueueFront(focus: curFocus + " (continued)", minutes: remaining)
+            db.enqueueFront(focus: continuedName(curFocus), minutes: remaining)
         }
         beginSession(reason: preempting ? "preempt" : "manual", minutes: minutes, focus: focus)
     }
@@ -632,6 +632,20 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             if !answer.isEmpty && minutes > 0 { return (answer, minutes) }
             // otherwise invalid: loop and ask again
         }
+    }
+
+    /// Next "(continued)" name: "X" → "X (continued)" → "X (continued 2)" → "X (continued 3)"…
+    private func continuedName(_ focus: String) -> String {
+        let pattern = "^(.*?)\\s*\\(continued(?: (\\d+))?\\)$"
+        let ns = focus as NSString
+        if let re = try? NSRegularExpression(pattern: pattern),
+           let m = re.firstMatch(in: focus, range: NSRange(location: 0, length: ns.length)) {
+            let base = ns.substring(with: m.range(at: 1))
+            let current = m.range(at: 2).location != NSNotFound
+                ? (Int(ns.substring(with: m.range(at: 2))) ?? 1) : 1
+            return "\(base) (continued \(current + 1))"
+        }
+        return "\(focus) (continued)"
     }
 
     private func beginSession(reason: String, minutes: Int, focus: String) {
