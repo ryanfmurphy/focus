@@ -180,6 +180,45 @@ final class DB {
         return rows
     }
 
+    /// Completed sessions with no rating yet (deferred), oldest first.
+    func unratedCompleted() -> [ActiveSession] {
+        let sql = """
+        SELECT id, started_at, minutes, focus FROM sessions
+        WHERE outcome = 'completed' AND rating IS NULL
+        ORDER BY started_at ASC, id ASC;
+        """
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
+        defer { sqlite3_finalize(stmt) }
+        var rows: [ActiveSession] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let focus = sqlite3_column_text(stmt, 3).map { String(cString: $0) } ?? ""
+            rows.append(ActiveSession(id: sqlite3_column_int64(stmt, 0),
+                                      startedAt: sqlite3_column_text(stmt, 1).map { String(cString: $0) } ?? "",
+                                      minutes: Int(sqlite3_column_int(stmt, 2)),
+                                      focus: focus))
+        }
+        return rows
+    }
+
+    func unratedCount() -> Int {
+        var stmt: OpaquePointer?
+        let sql = "SELECT COUNT(*) FROM sessions WHERE outcome = 'completed' AND rating IS NULL;"
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return 0 }
+        defer { sqlite3_finalize(stmt) }
+        return sqlite3_step(stmt) == SQLITE_ROW ? Int(sqlite3_column_int(stmt, 0)) : 0
+    }
+
+    /// Set a rating on an already-completed session (used by "Rate unrated sessions").
+    func setRating(id: Int64, rating: Int) {
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "UPDATE sessions SET rating=? WHERE id=?;", -1, &stmt, nil) == SQLITE_OK else { return }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_int(stmt, 1, Int32(rating))
+        sqlite3_bind_int64(stmt, 2, id)
+        sqlite3_step(stmt)
+    }
+
     /// Most recent sessions, newest first, for the history window.
     func recent(limit: Int = 500) -> [SessionRow] {
         let sql = """
@@ -509,6 +548,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         if menuItem.action == #selector(addNextFocus) {
             menuItem.title = "Add to queue (\(db.queueCount()))"
         }
+        if menuItem.action == #selector(rateUnrated) {
+            let n = db.unratedCount()
+            menuItem.title = "Rate unrated sessions (\(n))"
+            return n > 0
+        }
         return true
     }
 
@@ -810,6 +854,19 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         queueWindow?.makeKeyAndOrderFront(nil)
     }
 
+    // Loop through the deferred (unrated, completed) sessions oldest-first and
+    // ask for a rating on each.
+    @objc func rateUnrated() {
+        guard !showing else { return }
+        showing = true
+        defer { showing = false }
+        for s in db.unratedCompleted() {
+            let label = "\(whenLabel(s.startedAt)) · \(s.focus)"
+            let rating = promptRating(focus: label, title: "Rate session")
+            db.setRating(id: s.id, rating: rating)
+        }
+    }
+
     // started_at is ISO8601 UTC ("2026-08-07T00:12:03Z"); render it in local time.
     private func whenLabel(_ iso: String) -> String {
         if let date = isoParser.date(from: iso) {
@@ -949,6 +1006,19 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         if pushoverEnabled { sendPushover(title: "Time's up", message: focus) }
 
         hudWindow.orderOut(nil)   // hide the frozen-at-0:00 pill during the modal
+
+        // Hands-free: complete without a rating (defer it to "Rate unrated
+        // sessions") and roll straight into the next queued focus.
+        if autoProceedEnabled {
+            let endedId = sessionId
+            currentFocus = nil
+            deadline = nil
+            sessionId = nil
+            if let id = endedId { db.endSession(id: id, outcome: "completed", rating: nil) }
+            showing = false
+            promptForFocus(reason: "after-session")
+            return
+        }
 
         switch promptTimeUp(focus: focus) {
         case .addTime(let extra):
@@ -1097,6 +1167,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         menu.addItem(.separator())
         menu.addItem(withTitle: "See history", action: #selector(showHistory), keyEquivalent: "")
         menu.addItem(withTitle: "See queue", action: #selector(showQueue), keyEquivalent: "")
+        menu.addItem(withTitle: "Rate unrated sessions", action: #selector(rateUnrated), keyEquivalent: "")
         menu.addItem(.separator())
         menu.addItem(withTitle: "Quit focus", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         for item in menu.items where item.action != #selector(NSApplication.terminate(_:)) {
