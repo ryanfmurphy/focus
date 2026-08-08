@@ -689,6 +689,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         sessionStart = Date()
         deadline = Date().addingTimeInterval(Double(minutes) * 60)
         sessionId = db.startSession(reason: reason, minutes: minutes, focus: focus)
+        if pushoverEnabled { sendPushover(title: "Focus started", message: "\(focus) — \(minutes) min") }
         tick()
     }
 
