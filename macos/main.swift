@@ -360,6 +360,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     private var deadline: Date?
     private var sessionId: Int64?
     private var sessionStart: Date?   // when the current session began (for elapsed time)
+    private var sessionMinutes: Int?  // planned duration of the current session (incl. added time)
 
     // Debounce guards for the return-prompt (wake + unlock + session often fire
     // together). `showing` also stops any modal from stacking on another.
@@ -490,6 +491,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         self.deadline = deadline
         sessionId = s.id
         sessionStart = isoParser.date(from: s.startedAt) ?? Date()
+        sessionMinutes = s.minutes
     }
 
     // "Set focus" is an explicit ad-hoc entry — it bypasses the queue.
@@ -731,6 +733,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     private func beginSession(reason: String, minutes: Int, focus: String) {
         currentFocus = focus
         sessionStart = Date()
+        sessionMinutes = minutes
         deadline = Date().addingTimeInterval(Double(minutes) * 60)
         sessionId = db.startSession(reason: reason, minutes: minutes, focus: focus)
         if pushoverEnabled { sendPushover(title: "Focus started", message: "\(focus) — \(minutes) min") }
@@ -861,7 +864,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         showing = true
         defer { showing = false }
         for s in db.unratedCompleted() {
-            let label = "\(whenLabel(s.startedAt)) · \(s.focus)"
+            let label = "\(whenLabel(s.startedAt)) · \(s.focus) · \(s.minutes) min"
             let rating = promptRating(focus: label, title: "Rate session")
             db.setRating(id: s.id, rating: rating)
         }
@@ -1020,10 +1023,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             return
         }
 
-        switch promptTimeUp(focus: focus) {
+        switch promptTimeUp(focus: focus, minutes: sessionMinutes ?? 0) {
         case .addTime(let extra):
             // Keep the SAME session going: log the addition, extend, resume.
             if let id = sessionId { db.addTime(sessionId: id, minutes: extra) }
+            sessionMinutes = (sessionMinutes ?? 0) + extra
             deadline = Date().addingTimeInterval(Double(extra) * 60)
             showing = false
             tick()
@@ -1043,14 +1047,14 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     private enum TimeUpChoice { case rate(Int); case addTime(Int) }
 
     /// Time's-up modal: rate 1–10 to finish, or add more time to keep going.
-    private func promptTimeUp(focus: String) -> TimeUpChoice {
+    private func promptTimeUp(focus: String, minutes: Int) -> TimeUpChoice {
         NSApp.activate(ignoringOtherApps: true)
         let ratingField = NSTextField(frame: NSRect(x: 0, y: 0, width: 80, height: 24))
         ratingField.placeholderString = "1–10"
         while true {
             let alert = makeAlert()
             alert.messageText = "Time's up"
-            alert.informativeText = "Focus: \(focus)\n\nRate it 1–10 to finish, or add more time:"
+            alert.informativeText = "Focus: \(focus)\n\(minutes) min\n\nRate it 1–10 to finish, or add more time:"
             alert.addButton(withTitle: "Save")        // .alertFirstButtonReturn
             alert.addButton(withTitle: "Add time…")   // .alertSecondButtonReturn
             alert.accessoryView = ratingField
