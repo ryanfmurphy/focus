@@ -236,6 +236,22 @@ final class DB {
         sqlite3_step(stmt)
     }
 
+    /// Insert at the FRONT of the queue (used when pre-empting the current focus).
+    /// Ordering is by id ASC, so give it an id below the current minimum.
+    func enqueueFront(focus: String, minutes: Int) {
+        let sql = """
+        INSERT INTO queue (id, created_at, minutes, focus)
+        VALUES ((SELECT COALESCE(MIN(id), 1) - 1 FROM queue), ?, ?, ?);
+        """
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, isoNow(), -1, SQLITE_TRANSIENT)
+        sqlite3_bind_int(stmt, 2, Int32(minutes))
+        sqlite3_bind_text(stmt, 3, focus, -1, SQLITE_TRANSIENT)
+        sqlite3_step(stmt)
+    }
+
     /// The next queued focus (front of the FIFO), or nil if the queue is empty.
     func frontOfQueue() -> QueueItem? {
         let sql = "SELECT id, minutes, focus FROM queue ORDER BY id ASC LIMIT 1;"
@@ -423,7 +439,35 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     }
 
     // "Set focus" is an explicit ad-hoc entry — it bypasses the queue.
-    @objc func changeFocus() { promptForFocus(reason: "manual", useQueue: false) }
+    // Idle → "Set focus" (ad-hoc, bypasses queue). Active → "Pre-empt": re-queue
+    // the current focus (with its remaining time) to the FRONT and run a new one
+    // now — the same idea as pre-empting a focus that's about to begin, but for
+    // the one already running.
+    @objc func changeFocus() {
+        guard !showing else { return }
+        showing = true
+        defer { showing = false }
+
+        NSApp.activate(ignoringOtherApps: true)
+
+        let preempting = sessionId != nil
+        let title = preempting ? "Pre-empt with a new focus" : "Set focus"
+        let info = preempting
+            ? "This runs now; the current focus goes to the front of the queue."
+            : "What's your one focus right now, and for how long?"
+
+        // Pre-empt is voluntary → cancellable (cancel leaves the current session
+        // untouched). Idle "Set focus" stays mandatory.
+        guard let (focus, minutes) = askFocusAndMinutes(
+            title: title, info: info, confirm: "Start", cancellable: preempting) else { return }
+
+        if preempting, let id = sessionId, let curFocus = currentFocus, let dl = deadline {
+            let remaining = max(1, Int((dl.timeIntervalSinceNow / 60).rounded()))
+            db.endSession(id: id, outcome: "requeued", rating: nil)   // no rating: not finished
+            db.enqueueFront(focus: curFocus, minutes: remaining)
+        }
+        beginSession(reason: preempting ? "preempt" : "manual", minutes: minutes, focus: focus)
+    }
 
     // "Next focus" jumps to the next queued item (disabled when the queue is empty).
     @objc func nextFocus() {
@@ -442,7 +486,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             return db.frontOfQueue() != nil
         }
         if menuItem.action == #selector(changeFocus) {
-            menuItem.title = currentFocus != nil ? "Abort and set focus" : "Set focus"
+            menuItem.title = currentFocus != nil ? "Pre-empt" : "Set focus"
         }
         if menuItem.action == #selector(addNextFocus) {
             menuItem.title = "Add to queue (\(db.queueCount()))"
@@ -464,7 +508,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         }
     }
 
-    private func promptForFocus(reason: String, useQueue: Bool = true) {
+    private func promptForFocus(reason: String) {
         guard !showing else { return }
         showing = true
         defer { showing = false }
@@ -475,9 +519,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
 
         NSApp.activate(ignoringOtherApps: true)
 
-        // Auto-starts (return / after-session) use a queued focus if present;
-        // "Set focus" passes useQueue:false to force an ad-hoc editable entry.
-        if useQueue, let next = db.frontOfQueue() {
+        // Auto-starts (return / after-session) use a queued focus if present.
+        if let next = db.frontOfQueue() {
             confirmQueued(next)
             return
         }
