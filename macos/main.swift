@@ -494,7 +494,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         defer { showing = false }
         rateAndEndCurrent(outcome: "superseded")   // rate the current one first
         NSApp.activate(ignoringOtherApps: true)
-        if let next = db.frontOfQueue() { confirmQueued(next) }
+        if let next = db.frontOfQueue() { confirmQueued(next, autoEligible: false) }
     }
 
     // Grey out "Next focus" when the queue is empty; relabel "Set focus" to make
@@ -538,8 +538,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         NSApp.activate(ignoringOtherApps: true)
 
         // Auto-starts (return / after-session) use a queued focus if present.
+        // Only the after-session chain is eligible for hands-free auto-proceed.
         if let next = db.frontOfQueue() {
-            confirmQueued(next)
+            confirmQueued(next, autoEligible: reason == "after-session")
             return
         }
 
@@ -551,7 +552,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     }
 
     /// Non-editable confirmation for the next queued focus. Pops it off and starts.
-    private func confirmQueued(_ item: QueueItem) {
+    /// When `autoEligible` and the auto-proceed preference is on, a 10s countdown
+    /// auto-starts it (as if "Start" were clicked).
+    private func confirmQueued(_ item: QueueItem, autoEligible: Bool) {
         let alert = makeAlert()
         alert.messageText = "Next focus"
         alert.informativeText = "\(item.focus)\n\n\(item.minutes) minutes"
@@ -559,7 +562,33 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         alert.addButton(withTitle: "Pre-empt with another…") // .alertSecondButtonReturn
         alert.window.level = .floating
         alert.window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+
+        var autoTimer: Timer?
+        if autoEligible && autoProceedEnabled {
+            let label = NSTextField(wrappingLabelWithString: "")
+            label.frame = NSRect(x: 0, y: 0, width: 340, height: 34)
+            label.alignment = .center
+            label.font = NSFont.systemFont(ofSize: 12)
+            alert.accessoryView = label
+            var remaining = 10
+            label.stringValue = "Will automatically proceed with this focus in \(remaining) seconds."
+            // .common mode so it fires while the modal is up; stopModal with the
+            // first-button code ends runModal exactly as a "Start" click would.
+            let timer = Timer(timeInterval: 1, repeats: true) { t in
+                remaining -= 1
+                if remaining <= 0 {
+                    t.invalidate()
+                    NSApp.stopModal(withCode: .alertFirstButtonReturn)
+                } else {
+                    label.stringValue = "Will automatically proceed with this focus in \(remaining) second\(remaining == 1 ? "" : "s")."
+                }
+            }
+            RunLoop.main.add(timer, forMode: .common)
+            autoTimer = timer
+        }
+
         let response = alert.runModal()
+        autoTimer?.invalidate()
 
         if response == .alertSecondButtonReturn {
             // Pre-empt: leave the queued item where it is (still the front, since
@@ -584,30 +613,36 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
                                     cancellable: Bool) -> (String, Int)? {
         NSApp.activate(ignoringOtherApps: true)
 
-        let focusField = NSTextField(frame: NSRect(x: 0, y: 88, width: 320, height: 24))
+        let focusField = NSTextField(frame: NSRect(x: 0, y: 114, width: 320, height: 24))
         focusField.placeholderString = "e.g. Ship the focus pill"
 
         let minutesLabel = NSTextField(labelWithString: "Minutes:")
-        minutesLabel.frame = NSRect(x: 0, y: 56, width: 60, height: 24)
-        let minutesField = NSTextField(frame: NSRect(x: 62, y: 56, width: 70, height: 24))
+        minutesLabel.frame = NSRect(x: 0, y: 82, width: 60, height: 24)
+        let minutesField = NSTextField(frame: NSRect(x: 62, y: 82, width: 70, height: 24))
         minutesField.stringValue = String(defaultMinutes)
 
         let soundCheck = NSButton(checkboxWithTitle: "Play sound when time's up",
                                   target: nil, action: nil)
-        soundCheck.frame = NSRect(x: 0, y: 28, width: 320, height: 20)
+        soundCheck.frame = NSRect(x: 0, y: 54, width: 320, height: 20)
         soundCheck.state = playSoundEnabled ? .on : .off
 
         let pushoverCheck = NSButton(checkboxWithTitle: "Send Pushover notification",
                                      target: nil, action: nil)
-        pushoverCheck.frame = NSRect(x: 0, y: 2, width: 320, height: 20)
+        pushoverCheck.frame = NSRect(x: 0, y: 28, width: 320, height: 20)
         pushoverCheck.state = pushoverEnabled ? .on : .off
 
-        let accessory = NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 112))
+        let autoProceedCheck = NSButton(checkboxWithTitle: "Auto-proceed with next queued task",
+                                        target: nil, action: nil)
+        autoProceedCheck.frame = NSRect(x: 0, y: 2, width: 320, height: 20)
+        autoProceedCheck.state = autoProceedEnabled ? .on : .off
+
+        let accessory = NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 138))
         accessory.addSubview(focusField)
         accessory.addSubview(minutesLabel)
         accessory.addSubview(minutesField)
         accessory.addSubview(soundCheck)
         accessory.addSubview(pushoverCheck)
+        accessory.addSubview(autoProceedCheck)
 
         while true {
             let alert = makeAlert()
@@ -626,6 +661,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             // Persist the checkbox choices as the standing preference.
             playSoundEnabled = soundCheck.state == .on
             pushoverEnabled = pushoverCheck.state == .on
+            autoProceedEnabled = autoProceedCheck.state == .on
 
             let answer = focusField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
             let minutes = Int(minutesField.stringValue.trimmingCharacters(in: .whitespaces)) ?? 0
@@ -866,6 +902,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     private var pushoverEnabled: Bool {
         get { UserDefaults.standard.bool(forKey: "pushover") }                       // default off
         set { UserDefaults.standard.set(newValue, forKey: "pushover") }
+    }
+    private var autoProceedEnabled: Bool {
+        get { UserDefaults.standard.bool(forKey: "autoProceed") }                    // default off
+        set { UserDefaults.standard.set(newValue, forKey: "autoProceed") }
     }
 
     /// Fire-and-forget Pushover message. Credentials come from ~/focus/pushover.json
