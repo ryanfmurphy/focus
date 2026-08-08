@@ -325,6 +325,8 @@ final class DB {
         sqlite3_bind_int64(stmt, 1, id)
         sqlite3_step(stmt)
     }
+
+    func clearQueue() { sqlite3_exec(db, "DELETE FROM queue;", nil, nil, nil) }
 }
 
 struct QueueItem {
@@ -549,6 +551,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         }
         if menuItem.action == #selector(addNextFocus) {
             menuItem.title = "Add to queue (\(db.queueCount()))"
+        }
+        if menuItem.action == #selector(clearQueue) {
+            return db.queueCount() > 0
         }
         if menuItem.action == #selector(rateUnrated) {
             let n = db.unratedCount()
@@ -855,6 +860,23 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         queueTable?.reloadData()
         NSApp.activate(ignoringOtherApps: true)
         queueWindow?.makeKeyAndOrderFront(nil)
+    }
+
+    @objc func clearQueue() {
+        guard !showing else { return }
+        let count = db.queueCount()
+        guard count > 0 else { return }
+        showing = true
+        defer { showing = false }
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = makeAlert()
+        alert.messageText = "Clear queue?"
+        alert.informativeText = "Remove all \(count) queued focus\(count == 1 ? "" : "es")? This can't be undone."
+        alert.addButton(withTitle: "Clear queue")   // .alertFirstButtonReturn
+        alert.addButton(withTitle: "Cancel")
+        alert.window.level = .floating
+        alert.window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        if alert.runModal() == .alertFirstButtonReturn { db.clearQueue() }
     }
 
     // Loop through the deferred (unrated, completed) sessions oldest-first and
@@ -1171,6 +1193,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         menu.addItem(.separator())
         menu.addItem(withTitle: "See history", action: #selector(showHistory), keyEquivalent: "")
         menu.addItem(withTitle: "See queue", action: #selector(showQueue), keyEquivalent: "")
+        menu.addItem(withTitle: "Clear queue", action: #selector(clearQueue), keyEquivalent: "")
         menu.addItem(withTitle: "Rate unrated sessions", action: #selector(rateUnrated), keyEquivalent: "")
         menu.addItem(.separator())
         menu.addItem(withTitle: "Quit focus", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
