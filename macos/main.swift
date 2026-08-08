@@ -127,6 +127,19 @@ final class DB {
         sqlite3_step(stmt)
     }
 
+    /// Close a session as "interrupted", recording how many minutes it actually
+    /// ran (overwriting the planned minutes). No rating.
+    func markInterrupted(id: Int64, elapsedMinutes: Int) {
+        let sql = "UPDATE sessions SET ended_at=?, outcome='interrupted', minutes=? WHERE id=?;"
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, isoNow(), -1, SQLITE_TRANSIENT)
+        sqlite3_bind_int(stmt, 2, Int32(elapsedMinutes))
+        sqlite3_bind_int64(stmt, 3, id)
+        sqlite3_step(stmt)
+    }
+
     /// Log an "Add time" event and bump the session's total minutes.
     func addTime(sessionId: Int64, minutes: Int) {
         var ins: OpaquePointer?
@@ -307,6 +320,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     private var currentFocus: String?
     private var deadline: Date?
     private var sessionId: Int64?
+    private var sessionStart: Date?   // when the current session began (for elapsed time)
 
     // Debounce guards for the return-prompt (wake + unlock + session often fire
     // together). `showing` also stops any modal from stacking on another.
@@ -436,6 +450,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         currentFocus = s.focus
         self.deadline = deadline
         sessionId = s.id
+        sessionStart = isoParser.date(from: s.startedAt) ?? Date()
     }
 
     // "Set focus" is an explicit ad-hoc entry — it bypasses the queue.
@@ -463,8 +478,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
 
         if preempting, let id = sessionId, let curFocus = currentFocus, let dl = deadline {
             let remaining = max(1, Int((dl.timeIntervalSinceNow / 60).rounded()))
-            db.endSession(id: id, outcome: "requeued", rating: nil)   // no rating: not finished
-            db.enqueueFront(focus: curFocus, minutes: remaining)
+            let elapsed = max(0, Int((Date().timeIntervalSince(sessionStart ?? Date()) / 60).rounded()))
+            // Complete the existing record as interrupted, recording elapsed minutes.
+            db.markInterrupted(id: id, elapsedMinutes: elapsed)
+            // Queue a fresh copy for the remaining time to resume next.
+            db.enqueueFront(focus: curFocus + " (continued)", minutes: remaining)
         }
         beginSession(reason: preempting ? "preempt" : "manual", minutes: minutes, focus: focus)
     }
@@ -618,6 +636,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
 
     private func beginSession(reason: String, minutes: Int, focus: String) {
         currentFocus = focus
+        sessionStart = Date()
         deadline = Date().addingTimeInterval(Double(minutes) * 60)
         sessionId = db.startSession(reason: reason, minutes: minutes, focus: focus)
         tick()
@@ -1017,7 +1036,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         statusItem.button?.title = "🎯"   // fixed icon; never changes, so it never relayouts
         let menu = NSMenu()
         menu.addItem(withTitle: "Set focus", action: #selector(changeFocus), keyEquivalent: "")
-        menu.addItem(withTitle: "Next focus", action: #selector(nextFocus), keyEquivalent: "")
+        menu.addItem(withTitle: "Skip to next", action: #selector(nextFocus), keyEquivalent: "")
         menu.addItem(withTitle: "Add to queue", action: #selector(addNextFocus), keyEquivalent: "")
         menu.addItem(withTitle: "Clear focus", action: #selector(clearFocus), keyEquivalent: "")
         menu.addItem(.separator())
