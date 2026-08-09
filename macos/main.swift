@@ -265,6 +265,14 @@ final class DB {
         return rows
     }
 
+    /// Total number of recorded sessions (for the history menu label).
+    func sessionCount() -> Int {
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM sessions;", -1, &stmt, nil) == SQLITE_OK else { return 0 }
+        defer { sqlite3_finalize(stmt) }
+        return sqlite3_step(stmt) == SQLITE_ROW ? Int(sqlite3_column_int(stmt, 0)) : 0
+    }
+
     // MARK: - Queue
 
     /// Number of focuses currently waiting in the queue.
@@ -577,6 +585,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         }
         if menuItem.action == #selector(changeFocus) {
             menuItem.title = currentFocus != nil ? "Pre-empt task" : "Set focus"
+        }
+        if menuItem.action == #selector(showHistory) {
+            menuItem.title = "See history (\(db.sessionCount()))"
         }
         if menuItem.action == #selector(showQueue) {
             menuItem.title = "See queue (\(db.queueCount()))"
