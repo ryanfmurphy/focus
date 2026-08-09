@@ -84,9 +84,9 @@ based on state):
 | **Abort task** | session active | Rate it, mark interrupted (records elapsed minutes), advance |
 | **Pre-empt task** | session active | Interrupt the current one (its remaining time is re-queued to the front as "… (continued)") and start a new focus now |
 | **Set focus** | idle | Start an ad-hoc focus (same item as Pre-empt task, relabeled) |
-| **Add to queue (N)** | always | Append a focus to the end of the queue (N = current length) |
+| **Add to queue** | always | Append a focus to the end of the queue |
 | **See history** | always | Table of past sessions (time · duration · rating · outcome · focus · note) |
-| **See queue** | always | Table of pending queued focuses, next-up first |
+| **See queue (N)** | always | Table of pending queued focuses, next-up first (N = current length) |
 | **Clear queue** | queue non-empty | Empty the queue (with confirmation) |
 | **Rate unrated sessions (N)** | N > 0 | Loop through deferred/unrated completed sessions oldest-first and rate each |
 | **Quit focus** | always | Quit the app |
