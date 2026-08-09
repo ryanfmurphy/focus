@@ -73,13 +73,13 @@ final class DB {
             minutes    INTEGER,       -- planned duration
             focus      TEXT,
             rating     INTEGER,       -- 1..10, only for completed sessions
-            outcome    TEXT,          -- completed / interrupted (NULL while active)
+            status     TEXT,          -- completed / interrupted (NULL while active)
             note       TEXT           -- optional note written when rating
         );
         """)
-        // Migration for DBs created before `note` existed (errors harmlessly if
-        // the column is already there).
+        // Migrations for older DBs (each errors harmlessly if already applied).
         exec("ALTER TABLE sessions ADD COLUMN note TEXT;")
+        exec("ALTER TABLE sessions RENAME COLUMN outcome TO status;")
         // FIFO queue of upcoming sessions. Front = lowest id; "add to end" is a
         // plain insert; "pop off" deletes the lowest id.
         exec("""
@@ -124,14 +124,14 @@ final class DB {
         else { sqlite3_bind_text(stmt, idx, note, -1, SQLITE_TRANSIENT) }
     }
 
-    /// Close out a session with an outcome, (optionally) a rating, and a note.
-    func endSession(id: Int64, outcome: String, rating: Int?, note: String = "") {
-        let sql = "UPDATE sessions SET ended_at=?, outcome=?, rating=?, note=? WHERE id=?;"
+    /// Close out a session with a status, (optionally) a rating, and a note.
+    func endSession(id: Int64, status: String, rating: Int?, note: String = "") {
+        let sql = "UPDATE sessions SET ended_at=?, status=?, rating=?, note=? WHERE id=?;"
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
         defer { sqlite3_finalize(stmt) }
         sqlite3_bind_text(stmt, 1, isoNow(), -1, SQLITE_TRANSIENT)
-        sqlite3_bind_text(stmt, 2, outcome, -1, SQLITE_TRANSIENT)
+        sqlite3_bind_text(stmt, 2, status, -1, SQLITE_TRANSIENT)
         if let r = rating { sqlite3_bind_int(stmt, 3, Int32(r)) } else { sqlite3_bind_null(stmt, 3) }
         bindNote(stmt, 4, note)
         sqlite3_bind_int64(stmt, 5, id)
@@ -141,7 +141,7 @@ final class DB {
     /// Close a session as "interrupted", recording how many minutes it actually
     /// ran (overwriting the planned minutes), with an optional rating/note.
     func markInterrupted(id: Int64, elapsedMinutes: Int, rating: Int? = nil, note: String = "") {
-        let sql = "UPDATE sessions SET ended_at=?, outcome='interrupted', minutes=?, rating=?, note=? WHERE id=?;"
+        let sql = "UPDATE sessions SET ended_at=?, status='interrupted', minutes=?, rating=?, note=? WHERE id=?;"
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
         defer { sqlite3_finalize(stmt) }
@@ -197,7 +197,7 @@ final class DB {
     func unratedCompleted() -> [ActiveSession] {
         let sql = """
         SELECT id, started_at, minutes, focus FROM sessions
-        WHERE outcome = 'completed' AND rating IS NULL
+        WHERE status = 'completed' AND rating IS NULL
         ORDER BY started_at ASC, id ASC;
         """
         var stmt: OpaquePointer?
@@ -216,7 +216,7 @@ final class DB {
 
     func unratedCount() -> Int {
         var stmt: OpaquePointer?
-        let sql = "SELECT COUNT(*) FROM sessions WHERE outcome = 'completed' AND rating IS NULL;"
+        let sql = "SELECT COUNT(*) FROM sessions WHERE status = 'completed' AND rating IS NULL;"
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return 0 }
         defer { sqlite3_finalize(stmt) }
         return sqlite3_step(stmt) == SQLITE_ROW ? Int(sqlite3_column_int(stmt, 0)) : 0
@@ -236,7 +236,7 @@ final class DB {
     /// Most recent sessions, newest first, for the history window.
     func recent(limit: Int = 500) -> [SessionRow] {
         let sql = """
-        SELECT started_at, ended_at, minutes, focus, rating, outcome, note
+        SELECT started_at, ended_at, minutes, focus, rating, status, note
         FROM sessions ORDER BY id DESC LIMIT ?;
         """
         var stmt: OpaquePointer?
@@ -259,7 +259,7 @@ final class DB {
                 minutes: Int(sqlite3_column_int(stmt, 2)),
                 focus: text(3) ?? "",
                 rating: rating,
-                outcome: text(5),
+                status: text(5),
                 note: text(6)))
         }
         return rows
@@ -371,7 +371,7 @@ struct SessionRow {
     let minutes: Int
     let focus: String
     let rating: Int?
-    let outcome: String?
+    let status: String?
     let note: String?
 }
 
@@ -465,13 +465,13 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
 
         // Any older open rows are stale orphans from past deaths — sweep them.
         for stale in open.dropFirst() {
-            db.endSession(id: stale.id, outcome: "interrupted", rating: nil)
+            db.endSession(id: stale.id, status: "interrupted", rating: nil)
         }
 
         guard let candidate = open.first,
               let start = isoParser.date(from: candidate.startedAt) else {
             // Nothing (or unparseable) to resume — clean up and prompt normally.
-            if let c = open.first { db.endSession(id: c.id, outcome: "interrupted", rating: nil) }
+            if let c = open.first { db.endSession(id: c.id, status: "interrupted", rating: nil) }
             onReturn("launch")
             return
         }
@@ -481,7 +481,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             offerResume(candidate, deadline: deadline)     // still time left
         } else {
             // Expired while away → treat as finished: adopt it and let tick()'s
-            // timeUp run the mandatory rating (outcome 'completed').
+            // timeUp run the mandatory rating (status 'completed').
             adopt(candidate, deadline: deadline)
             tick()
         }
@@ -505,7 +505,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             adopt(s, deadline: deadline)
             tick()
         } else {
-            db.endSession(id: s.id, outcome: "interrupted", rating: nil)
+            db.endSession(id: s.id, status: "interrupted", rating: nil)
             onReturn("launch")
         }
     }
@@ -823,7 +823,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             addColumn("when", "Started", width: 140, min: 120)
             addColumn("min", "Min", width: 48, min: 40, align: .right)
             addColumn("rating", "Rating", width: 60, min: 50, align: .right)
-            addColumn("outcome", "Outcome", width: 95, min: 70)
+            addColumn("status", "Status", width: 95, min: 70)
             addColumn("focus", "Focus", width: 240, min: 150)
             addColumn("note", "Note", width: 220, min: 100)   // flexible last column
 
@@ -956,7 +956,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         case "when":    text = whenLabel(r.startedAt)
         case "min":     text = "\(r.minutes)"; align = .right
         case "rating":  text = r.rating.map { "\($0)/10" } ?? "—"; align = .right
-        case "outcome": text = r.outcome ?? (r.endedAt == nil ? "active" : "—")
+        case "status":  text = r.status ?? (r.endedAt == nil ? "active" : "—")
         case "note":    text = r.note ?? ""
         default:        text = r.focus
         }
@@ -1067,7 +1067,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             currentFocus = nil
             deadline = nil
             sessionId = nil
-            if let id = endedId { db.endSession(id: id, outcome: "completed", rating: nil) }
+            if let id = endedId { db.endSession(id: id, status: "completed", rating: nil) }
             showing = false
             promptForFocus(reason: "after-session")
             return
@@ -1087,7 +1087,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             currentFocus = nil
             deadline = nil
             sessionId = nil
-            if let id = endedId { db.endSession(id: id, outcome: "completed", rating: rating, note: note) }
+            if let id = endedId { db.endSession(id: id, status: "completed", rating: rating, note: note) }
             // Roll straight into the next session: having rated, set a new focus.
             showing = false
             promptForFocus(reason: "after-session")
@@ -1157,7 +1157,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         sessionMinutes = nil
         hudWindow.orderOut(nil)
         let (rating, note) = promptRating(focus: focus, title: "Rate this session")
-        db.endSession(id: id, outcome: "completed", rating: rating, note: note)
+        db.endSession(id: id, status: "completed", rating: rating, note: note)
     }
 
     /// A rating (1–10) field over an optional note field, for the rating modals.
