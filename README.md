@@ -85,7 +85,7 @@ based on state):
 | **Pre-empt task** | session active | Interrupt the current one (its remaining time is re-queued to the front as "… (continued)") and start a new focus now |
 | **Set focus** | idle | Start an ad-hoc focus (same item as Pre-empt task, relabeled) |
 | **Add to queue** | always | Append a focus to the end of the queue |
-| **See history (N)** | always | Table of past sessions (time · duration · rating · outcome · focus · note); N = total recorded |
+| **See history (N)** | always | Table of past sessions (time · duration · rating · status · focus · note); N = total recorded |
 | **See queue (N)** | always | Table of pending queued focuses, next-up first (N = current length) |
 | **Clear queue** | queue non-empty | Empty the queue (with confirmation) |
 | **Rate unrated sessions (N)** | N > 0 | Loop through deferred/unrated completed sessions oldest-first and rate each |
@@ -137,15 +137,15 @@ rebuilds the binary and reloads the agent.
 
 - **`sessions`** — one row per focus session: `started_at`, `ended_at`, `reason`
   (what triggered it), `minutes` (planned duration; for interrupted sessions,
-  the actual elapsed minutes), `focus`, `rating` (1–10, nullable), `outcome`,
+  the actual elapsed minutes), `focus`, `rating` (1–10, nullable), `status`,
   `note` (optional free text entered when rating).
 - **`queue`** — pending focuses (`created_at`, `minutes`, `focus`); FIFO by `id`.
 - **`time_additions`** — one row per "Add time" event (`session_id`, `added_at`,
   `minutes`); the session's total `minutes` is also bumped.
 
-**Outcomes:** `completed` (finished/rated, or deferred with null rating) and
+**Status values:** `completed` (finished/rated, or deferred with null rating) and
 `interrupted` (aborted, pre-empted, or swept on next launch after a crash); a
-`NULL` outcome means the session is still in progress (shown as "active").
+`NULL` status means the session is still in progress (shown as "active").
 (Older databases may also contain the retired `superseded`/`cleared` values.)
 
 ## Session lifecycle
