@@ -780,7 +780,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
 
         if historyWindow == nil {
             let window = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 680, height: 460),
+                contentRect: NSRect(x: 0, y: 0, width: 900, height: 560),
                 styleMask: [.titled, .closable, .resizable, .miniaturizable],
                 backing: .buffered, defer: false)
             window.title = "Focus history"
