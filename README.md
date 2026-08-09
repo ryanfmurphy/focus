@@ -149,20 +149,17 @@ rebuilds the binary and reloads the agent.
 `NULL` status means the session is still in progress (shown as "active").
 (Older databases may also contain the retired `superseded`/`cleared` values.)
 
-## Session lifecycle
+## Session lifecycle & resilience
 
-1. A session starts (return prompt, queue, "Set focus", pre-empt, or auto-advance).
-2. The pill + menu-bar countdown run until the deadline.
-3. At time's up: chime/notify, then **rate** (or **add time**). With auto-proceed
-   on, rating is deferred and the next queued focus auto-starts.
-4. Finishing chains straight into the next focus — the front of the queue if
-   there is one, otherwise a fresh prompt.
+Finishing one focus **chains straight into the next** — the front of the queue if
+something's queued, otherwise a fresh prompt — so you can flow session to session
+(hands-free with auto-proceed on).
 
-**Survives interruption:** the timer is wall-clock based, so lock/sleep/close-lid
-don't disturb a running session — returning won't re-prompt while one is active.
-If the *process* dies mid-session (crash, reboot, reinstall), the next launch
-offers to **resume** it (or start new); if its time already elapsed while away,
-it's completed and sent to the rating queue.
+The timer is wall-clock based, so lock / sleep / closing the lid don't disturb a
+running session, and returning won't re-prompt while one is active. If the
+*process* itself dies mid-session (crash, reboot, reinstall), the next launch
+offers to **resume** it (or start fresh); if its time elapsed while away, it's
+completed and sent to the rating queue.
 
 ## Configuration
 
