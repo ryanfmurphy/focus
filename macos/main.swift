@@ -375,6 +375,19 @@ struct SessionRow {
     let note: String?
 }
 
+// An NSTableView that supports ⌘C — it forwards the selection to `onCopy`
+// (NSTableView has no copy: of its own).
+final class CopyableTableView: NSTableView {
+    var onCopy: ((IndexSet) -> Void)?
+
+    @objc func copy(_ sender: Any?) { onCopy?(selectedRowIndexes) }
+
+    override func validateUserInterfaceItem(_ item: NSValidatedUserInterfaceItem) -> Bool {
+        if item.action == #selector(copy(_:)) { return !selectedRowIndexes.isEmpty }
+        return super.validateUserInterfaceItem(item)
+    }
+}
+
 // MARK: - App
 
 final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSource,
@@ -824,14 +837,16 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             scroll.hasVerticalScroller = true
             scroll.borderType = .noBorder
 
-            let table = NSTableView()
+            let table = CopyableTableView()
             table.dataSource = self
             table.delegate = self
             table.usesAlternatingRowBackgroundColors = true
             table.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
             table.rowHeight = 22
             table.allowsColumnResizing = true
+            table.allowsMultipleSelection = true   // Shift/⌘-click to select a range
             table.style = .inset
+            table.onCopy = { [weak self] indexes in self?.copyHistoryRows(indexes) }
 
             func addColumn(_ id: String, _ title: String, width: CGFloat, min: CGFloat,
                            align: NSTextAlignment = .left) {
@@ -859,6 +874,32 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         historyTable?.reloadData()
         NSApp.activate(ignoringOtherApps: true)
         historyWindow?.makeKeyAndOrderFront(nil)
+    }
+
+    // Copy the selected history rows to the clipboard as CSV (with a header).
+    private func copyHistoryRows(_ indexes: IndexSet) {
+        guard !indexes.isEmpty else { return }
+        var lines = ["Started,Minutes,Rating,Status,Focus,Note"]
+        for i in indexes where i < historyRows.count {
+            let r = historyRows[i]
+            let fields = [
+                whenLabel(r.startedAt),
+                "\(r.minutes)",
+                r.rating.map { "\($0)" } ?? "",
+                r.status ?? (r.endedAt == nil ? "active" : ""),
+                r.focus,
+                r.note ?? "",
+            ].map(csvEscape)
+            lines.append(fields.joined(separator: ","))
+        }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(lines.joined(separator: "\n"), forType: .string)
+    }
+
+    // Quote a CSV field if it contains a comma, quote, or newline (doubling quotes).
+    private func csvEscape(_ s: String) -> String {
+        guard s.contains(",") || s.contains("\"") || s.contains("\n") else { return s }
+        return "\"" + s.replacingOccurrences(of: "\"", with: "\"\"") + "\""
     }
 
     @objc func showQueue() {
