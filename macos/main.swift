@@ -578,8 +578,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         if menuItem.action == #selector(changeFocus) {
             menuItem.title = currentFocus != nil ? "Pre-empt task" : "Set focus"
         }
-        if menuItem.action == #selector(addNextFocus) {
-            menuItem.title = "Add to queue (\(db.queueCount()))"
+        if menuItem.action == #selector(showQueue) {
+            menuItem.title = "See queue (\(db.queueCount()))"
         }
         if menuItem.action == #selector(clearQueue) {
             return db.queueCount() > 0
