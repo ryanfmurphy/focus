@@ -143,9 +143,10 @@ rebuilds the binary and reloads the agent.
 - **`time_additions`** — one row per "Add time" event (`session_id`, `added_at`,
   `minutes`); the session's total `minutes` is also bumped.
 
-**Outcomes:** `completed` (finished/rated, or deferred with null rating),
-`interrupted` (aborted or pre-empted), `superseded` (replaced mid-run), plus
-sessions left open by a crash are swept to `interrupted` on next launch.
+**Outcomes:** `completed` (finished/rated, or deferred with null rating) and
+`interrupted` (aborted, pre-empted, or swept on next launch after a crash); a
+`NULL` outcome means the session is still in progress (shown as "active").
+(Older databases may also contain the retired `superseded`/`cleared` values.)
 
 ## Session lifecycle
 

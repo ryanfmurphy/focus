@@ -73,7 +73,7 @@ final class DB {
             minutes    INTEGER,       -- planned duration
             focus      TEXT,
             rating     INTEGER,       -- 1..10, only for completed sessions
-            outcome    TEXT,          -- completed / cleared / superseded
+            outcome    TEXT,          -- completed / interrupted (NULL while active)
             note       TEXT           -- optional note written when rating
         );
         """)
@@ -558,7 +558,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     @objc func completeTask() {
         guard !showing, sessionId != nil else { return }
         showing = true
-        rateAndEndCurrent(outcome: "completed")   // rate + end as completed
+        rateAndComplete()   // rate + end as completed
         showing = false
         promptForFocus(reason: "after-session")
     }
@@ -622,9 +622,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         showing = true
         defer { showing = false }
 
-        // Changing focus while a session is running forces you to rate the
-        // outgoing one first (same as clearing or letting the timer finish).
-        rateAndEndCurrent(outcome: "superseded")
+        // promptForFocus only runs with no active session (callers guard on or
+        // clear it first), so there's nothing to rate/close here.
 
         NSApp.activate(ignoringOtherApps: true)
 
@@ -1147,16 +1146,18 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         }
     }
 
-    /// If a session is active, force a rating then close it out with `outcome`
-    /// and clear all session state. Caller must already hold `showing`.
-    private func rateAndEndCurrent(outcome: String) {
+    /// Force a rating, then close the current session out as completed and clear
+    /// its state. Caller must already hold `showing`.
+    private func rateAndComplete() {
         guard let id = sessionId, let focus = currentFocus else { return }
         currentFocus = nil
         deadline = nil
         sessionId = nil
+        sessionStart = nil
+        sessionMinutes = nil
         hudWindow.orderOut(nil)
         let (rating, note) = promptRating(focus: focus, title: "Rate this session")
-        db.endSession(id: id, outcome: outcome, rating: rating, note: note)
+        db.endSession(id: id, outcome: "completed", rating: rating, note: note)
     }
 
     /// A rating (1–10) field over an optional note field, for the rating modals.
