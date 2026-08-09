@@ -554,6 +554,27 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         beginSession(reason: preempting ? "preempt" : "manual", minutes: minutes, focus: focus)
     }
 
+    // Prompt for minutes and add them to the running session — same as choosing
+    // "Add time" at time's up, but available any time from the menu.
+    @objc func addTimeToCurrent() {
+        guard !showing, sessionId != nil else { return }
+        showing = true
+        defer { showing = false }
+        if let extra = askMinutes() { extendSession(by: extra) }
+    }
+
+    /// Log an "Add time" event, bump the planned total, and extend the deadline.
+    /// Extends from whichever is later — now or the current deadline — so it adds
+    /// the full `extra` when the timer's already up, or on top of remaining time.
+    private func extendSession(by extra: Int) {
+        guard let id = sessionId else { return }
+        db.addTime(sessionId: id, minutes: extra)
+        sessionMinutes = (sessionMinutes ?? 0) + extra
+        let base = max(Date(), deadline ?? Date())
+        deadline = base.addingTimeInterval(Double(extra) * 60)
+        tick()
+    }
+
     // Finish the current task: mark completed, rate it, then advance to the next.
     @objc func completeTask() {
         guard !showing, sessionId != nil else { return }
@@ -580,7 +601,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         // Complete / Abort / Pre-empt act on a running session.
-        if menuItem.action == #selector(completeTask) || menuItem.action == #selector(abortTask) {
+        if menuItem.action == #selector(completeTask) || menuItem.action == #selector(abortTask)
+            || menuItem.action == #selector(addTimeToCurrent) {
             return currentFocus != nil
         }
         if menuItem.action == #selector(changeFocus) {
@@ -1076,11 +1098,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         switch promptTimeUp(focus: focus, minutes: sessionMinutes ?? 0) {
         case .addTime(let extra):
             // Keep the SAME session going: log the addition, extend, resume.
-            if let id = sessionId { db.addTime(sessionId: id, minutes: extra) }
-            sessionMinutes = (sessionMinutes ?? 0) + extra
-            deadline = Date().addingTimeInterval(Double(extra) * 60)
+            extendSession(by: extra)
             showing = false
-            tick()
 
         case .rate(let rating, let note):
             let endedId = sessionId
@@ -1230,6 +1249,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         let menu = NSMenu()
         menu.addItem(withTitle: "Complete task", action: #selector(completeTask), keyEquivalent: "")
         menu.addItem(withTitle: "Abort task", action: #selector(abortTask), keyEquivalent: "")
+        menu.addItem(withTitle: "Add time to current", action: #selector(addTimeToCurrent), keyEquivalent: "")
         menu.addItem(withTitle: "Pre-empt task", action: #selector(changeFocus), keyEquivalent: "")
         menu.addItem(withTitle: "Add to queue", action: #selector(addNextFocus), keyEquivalent: "")
         menu.addItem(.separator())
