@@ -1288,11 +1288,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.button?.title = "🎯"   // fixed icon; never changes, so it never relayouts
         let menu = NSMenu()
+        menu.addItem(withTitle: "Add to queue", action: #selector(addNextFocus), keyEquivalent: "")
         menu.addItem(withTitle: "Complete task", action: #selector(completeTask), keyEquivalent: "")
         menu.addItem(withTitle: "Abort task", action: #selector(abortTask), keyEquivalent: "")
         menu.addItem(withTitle: "Add time to current", action: #selector(addTimeToCurrent), keyEquivalent: "")
         menu.addItem(withTitle: "Pre-empt task", action: #selector(changeFocus), keyEquivalent: "")
-        menu.addItem(withTitle: "Add to queue", action: #selector(addNextFocus), keyEquivalent: "")
         menu.addItem(.separator())
         menu.addItem(withTitle: "See history", action: #selector(showHistory), keyEquivalent: "")
         menu.addItem(withTitle: "See queue", action: #selector(showQueue), keyEquivalent: "")
