@@ -530,24 +530,36 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         beginSession(reason: preempting ? "preempt" : "manual", minutes: minutes, focus: focus)
     }
 
-    // "Next focus" jumps to the next queued item (disabled when the queue is empty).
-    @objc func nextFocus() {
-        guard !showing, db.frontOfQueue() != nil else { return }
+    // Finish the current task: mark completed, rate it, then advance to the next.
+    @objc func completeTask() {
+        guard !showing, sessionId != nil else { return }
         showing = true
-        defer { showing = false }
-        rateAndEndCurrent(outcome: "superseded")   // rate the current one first
-        NSApp.activate(ignoringOtherApps: true)
-        if let next = db.frontOfQueue() { confirmQueued(next, autoEligible: false) }
+        rateAndEndCurrent(outcome: "completed")   // rate + end as completed
+        showing = false
+        promptForFocus(reason: "after-session")
     }
 
-    // Grey out "Next focus" when the queue is empty; relabel "Set focus" to make
-    // clear it aborts a running session.
+    // Abort the current task: mark interrupted (record elapsed), skip the rating,
+    // then advance to the next (queued or improvised).
+    @objc func abortTask() {
+        guard !showing, let id = sessionId else { return }
+        showing = true
+        let elapsed = max(0, Int((Date().timeIntervalSince(sessionStart ?? Date()) / 60).rounded()))
+        db.markInterrupted(id: id, elapsedMinutes: elapsed)
+        currentFocus = nil; deadline = nil; sessionId = nil
+        sessionStart = nil; sessionMinutes = nil
+        hudWindow.orderOut(nil)
+        showing = false
+        promptForFocus(reason: "after-session")
+    }
+
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
-        if menuItem.action == #selector(nextFocus) {
-            return db.frontOfQueue() != nil
+        // Complete / Abort / Pre-empt act on a running session.
+        if menuItem.action == #selector(completeTask) || menuItem.action == #selector(abortTask) {
+            return currentFocus != nil
         }
         if menuItem.action == #selector(changeFocus) {
-            menuItem.title = currentFocus != nil ? "Pre-empt" : "Set focus"
+            menuItem.title = currentFocus != nil ? "Pre-empt task" : "Set focus"
         }
         if menuItem.action == #selector(addNextFocus) {
             menuItem.title = "Add to queue (\(db.queueCount()))"
@@ -742,19 +754,6 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         deadline = Date().addingTimeInterval(Double(minutes) * 60)
         sessionId = db.startSession(reason: reason, minutes: minutes, focus: focus)
         if pushoverEnabled { sendPushover(title: "Focus started", message: "\(focus) — \(minutes) min") }
-        tick()
-    }
-
-    @objc func clearFocus() {
-        guard !showing else { return }
-        if sessionId != nil {
-            showing = true
-            rateAndEndCurrent(outcome: "cleared")   // must rate before clearing
-            showing = false
-        } else {
-            currentFocus = nil
-            deadline = nil
-        }
         tick()
     }
 
@@ -1186,10 +1185,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.button?.title = "🎯"   // fixed icon; never changes, so it never relayouts
         let menu = NSMenu()
-        menu.addItem(withTitle: "Set focus", action: #selector(changeFocus), keyEquivalent: "")
-        menu.addItem(withTitle: "Skip to next", action: #selector(nextFocus), keyEquivalent: "")
+        menu.addItem(withTitle: "Complete task", action: #selector(completeTask), keyEquivalent: "")
+        menu.addItem(withTitle: "Abort task", action: #selector(abortTask), keyEquivalent: "")
+        menu.addItem(withTitle: "Pre-empt task", action: #selector(changeFocus), keyEquivalent: "")
         menu.addItem(withTitle: "Add to queue", action: #selector(addNextFocus), keyEquivalent: "")
-        menu.addItem(withTitle: "Clear focus", action: #selector(clearFocus), keyEquivalent: "")
         menu.addItem(.separator())
         menu.addItem(withTitle: "See history", action: #selector(showHistory), keyEquivalent: "")
         menu.addItem(withTitle: "See queue", action: #selector(showQueue), keyEquivalent: "")
