@@ -25,7 +25,8 @@ There's also an early **iPhone** port (SwiftUI + Live Activity) scaffolded under
   plus a `🎯` menu-bar item.
 - **Timer** — counts down (wall-clock based, so it survives sleep/lock); at zero
   it chimes, optionally sends a phone notification, and asks you to rate the
-  session 1–10. You can **add more time** instead of finishing.
+  session 1–10 (with an optional free-text **note**). You can **add more time**
+  instead of finishing.
 - **A queue** — line up future focuses; each session start pulls the next queued
   item (a confirm screen), or asks you to improvise if the queue is empty.
 - **Pre-empt / complete / abort** — interrupt the running task in the way that
@@ -80,7 +81,7 @@ based on state):
 | Item | When | What it does |
 |------|------|--------------|
 | **Complete task** | session active | Mark completed, rate 1–10, advance to the next focus |
-| **Abort task** | session active | Mark interrupted (records elapsed minutes), **skip rating**, advance |
+| **Abort task** | session active | Rate it, mark interrupted (records elapsed minutes), advance |
 | **Pre-empt task** | session active | Interrupt the current one (its remaining time is re-queued to the front as "… (continued)") and start a new focus now |
 | **Set focus** | idle | Start an ad-hoc focus (same item as Pre-empt task, relabeled) |
 | **Add to queue (N)** | always | Append a focus to the end of the queue (N = current length) |
@@ -136,7 +137,8 @@ rebuilds the binary and reloads the agent.
 
 - **`sessions`** — one row per focus session: `started_at`, `ended_at`, `reason`
   (what triggered it), `minutes` (planned duration; for interrupted sessions,
-  the actual elapsed minutes), `focus`, `rating` (1–10, nullable), `outcome`.
+  the actual elapsed minutes), `focus`, `rating` (1–10, nullable), `outcome`,
+  `note` (optional free text entered when rating).
 - **`queue`** — pending focuses (`created_at`, `minutes`, `focus`); FIFO by `id`.
 - **`time_additions`** — one row per "Add time" event (`session_id`, `added_at`,
   `minutes`); the session's total `minutes` is also bumped.
