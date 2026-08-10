@@ -90,15 +90,16 @@ based on state):
 | **See queue (N)** | always | Table of pending queued focuses, next-up first (N = current length) |
 | **Clear queue** | queue non-empty | Empty the queue (with confirmation) |
 | **Rate unrated sessions (N)** | N > 0 | Loop through deferred/unrated completed sessions oldest-first and rate each |
+| **Settings** | always | Toggle the three global preference checkboxes without starting a session |
 | **Quit focus** | always | Quit the app |
 
 The countdown keeps updating even while the menu is open.
 
 ## Preferences (checkboxes on the start prompt)
 
-Three checkboxes appear on the "start a focus" modal. They're **global, persisted
-preferences** (stored in `UserDefaults`), not per-session — the last state you
-set applies to every future timer:
+Three checkboxes appear on the "start a focus" modal (and in the **Settings**
+dialog). They're **global, persisted preferences** (stored in `UserDefaults`),
+not per-session — the last state you set applies to every future timer:
 
 - **Play sound when time's up** *(default on)* — plays the `Glass` chime at zero.
 - **Send Pushover notification** *(default off)* — sends a push at session start
