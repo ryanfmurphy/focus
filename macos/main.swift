@@ -288,7 +288,8 @@ final class DB {
     /// Most recent sessions, newest first, for the history window.
     func recent(limit: Int = 500) -> [SessionRow] {
         let sql = """
-        SELECT started_at, ended_at, minutes, focus, rating, status, note
+        SELECT started_at, ended_at, minutes, focus, rating, status, note,
+               open_minutes_start, open_minutes_end
         FROM sessions ORDER BY id DESC LIMIT ?;
         """
         var stmt: OpaquePointer?
@@ -301,18 +302,21 @@ final class DB {
             return String(cString: c)
         }
 
+        func intOrNil(_ col: Int32) -> Int? {
+            sqlite3_column_type(stmt, col) == SQLITE_NULL ? nil : Int(sqlite3_column_int(stmt, col))
+        }
         var rows: [SessionRow] = []
         while sqlite3_step(stmt) == SQLITE_ROW {
-            let rating: Int? = sqlite3_column_type(stmt, 4) == SQLITE_NULL
-                ? nil : Int(sqlite3_column_int(stmt, 4))
             rows.append(SessionRow(
                 startedAt: text(0) ?? "",
                 endedAt: text(1),
                 minutes: Int(sqlite3_column_int(stmt, 2)),
                 focus: text(3) ?? "",
-                rating: rating,
+                rating: intOrNil(4),
                 status: text(5),
-                note: text(6)))
+                note: text(6),
+                openMinutesStart: intOrNil(7),
+                openMinutesEnd: intOrNil(8)))
         }
         return rows
     }
@@ -431,6 +435,8 @@ struct SessionRow {
     let rating: Int?
     let status: String?
     let note: String?
+    let openMinutesStart: Int?
+    let openMinutesEnd: Int?
 }
 
 // An NSTableView that supports ⌘C — it forwards the selection to `onCopy`
@@ -961,6 +967,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             addColumn("rating", "Rating", width: 60, min: 50, align: .right)
             addColumn("status", "Status", width: 95, min: 70)
             addColumn("focus", "Focus", width: 240, min: 150)
+            addColumn("openstart", "Open (start)", width: 84, min: 70, align: .right)
+            addColumn("openend", "Open (end)", width: 84, min: 70, align: .right)
             addColumn("note", "Note", width: 220, min: 100)   // flexible last column
 
             scroll.documentView = table
@@ -978,7 +986,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     // Copy the selected history rows to the clipboard as TSV (with a header).
     private func copyHistoryRows(_ indexes: IndexSet) {
         guard !indexes.isEmpty else { return }
-        var lines = ["Started\tMinutes\tRating\tStatus\tFocus\tNote"]
+        var lines = ["Started\tMinutes\tRating\tStatus\tFocus\tOpen (start)\tOpen (end)\tNote"]
         for i in indexes where i < historyRows.count {
             let r = historyRows[i]
             let fields = [
@@ -987,6 +995,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
                 r.rating.map { "\($0)" } ?? "",
                 r.status ?? (r.endedAt == nil ? "active" : ""),
                 r.focus,
+                r.openMinutesStart.map { "\($0)" } ?? "",
+                r.openMinutesEnd.map { "\($0)" } ?? "",
                 r.note ?? "",
             ].map(tsvClean)
             lines.append(fields.joined(separator: "\t"))
@@ -1133,12 +1143,14 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         let text: String
         var align: NSTextAlignment = .left
         switch id {
-        case "when":    text = whenLabel(r.startedAt)
-        case "min":     text = "\(r.minutes)"; align = .right
-        case "rating":  text = r.rating.map { "\($0)/10" } ?? "—"; align = .right
-        case "status":  text = r.status ?? (r.endedAt == nil ? "active" : "—")
-        case "note":    text = r.note ?? ""
-        default:        text = r.focus
+        case "when":      text = whenLabel(r.startedAt)
+        case "min":       text = "\(r.minutes)"; align = .right
+        case "rating":    text = r.rating.map { "\($0)/10" } ?? "—"; align = .right
+        case "status":    text = r.status ?? (r.endedAt == nil ? "active" : "—")
+        case "openstart": text = r.openMinutesStart.map { "\($0)m" } ?? "—"; align = .right
+        case "openend":   text = r.openMinutesEnd.map { "\($0)m" } ?? "—"; align = .right
+        case "note":      text = r.note ?? ""
+        default:          text = r.focus
         }
         return historyCell(tableView, id: id, text: text, align: align)
     }
