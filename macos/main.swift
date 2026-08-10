@@ -537,7 +537,6 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     private var queueTable: NSTableView?
     private var queueRows: [QueueItem] = []
     private var queueEstimates: [(start: Date, finish: Date)] = []
-    private let queueDragType = NSPasteboard.PasteboardType("com.murftown.focus.queue-row")
     private lazy var alertIcon = emojiImage("🎯", size: 256)
 
     // NSAlert's default icon is the (missing) app icon; force 🎯 on every modal.
@@ -787,6 +786,15 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             let n = db.unratedCount()
             menuItem.title = "Rate unrated sessions (\(n))"
             return n > 0
+        }
+        // Queue right-click move items: enable based on the clicked row's position.
+        if menuItem.action == #selector(moveQueueItemUp) || menuItem.action == #selector(moveQueueItemToTop) {
+            let r = queueTable?.clickedRow ?? -1
+            return r > 0
+        }
+        if menuItem.action == #selector(moveQueueItemDown) || menuItem.action == #selector(moveQueueItemToBottom) {
+            let r = queueTable?.clickedRow ?? -1
+            return r >= 0 && r < queueRows.count - 1
         }
         return true
     }
@@ -1109,10 +1117,15 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             table.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
             table.rowHeight = 22
             table.style = .inset
-            // Drag a row onto a gap between rows to re-order the queue.
-            table.registerForDraggedTypes([queueDragType])
-            table.setDraggingSourceOperationMask(.move, forLocal: true)
-            table.draggingDestinationFeedbackStyle = .gap
+            // Right-click a row to re-order it within the queue.
+            let rowMenu = NSMenu()
+            rowMenu.addItem(withTitle: "Move up", action: #selector(moveQueueItemUp), keyEquivalent: "")
+            rowMenu.addItem(withTitle: "Move down", action: #selector(moveQueueItemDown), keyEquivalent: "")
+            rowMenu.addItem(.separator())
+            rowMenu.addItem(withTitle: "Move to top", action: #selector(moveQueueItemToTop), keyEquivalent: "")
+            rowMenu.addItem(withTitle: "Move to bottom", action: #selector(moveQueueItemToBottom), keyEquivalent: "")
+            for mi in rowMenu.items { mi.target = self }
+            table.menu = rowMenu
 
             func addColumn(_ id: String, _ title: String, width: CGFloat, min: CGFloat,
                            align: NSTextAlignment = .left) {
@@ -1184,74 +1197,26 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         tableView === queueTable ? queueRows.count : historyRows.count
     }
 
-    // ---- queue drag-to-reorder (queue table only) ----
-    // Providing a pasteboard writer is what makes rows draggable; carry the source
-    // row index so acceptDrop can compute the move.
-    func tableView(_ tableView: NSTableView, pasteboardWriterForRow row: Int) -> NSPasteboardWriting? {
-        guard tableView === queueTable else { return nil }
-        let item = NSPasteboardItem()
-        item.setString(String(row), forType: queueDragType)
-        return item
-    }
+    // ---- queue reordering (right-click menu on the queue table) ----
+    @objc func moveQueueItemUp()      { moveClickedQueueRow { $0 - 1 } }
+    @objc func moveQueueItemDown()    { moveClickedQueueRow { $0 + 1 } }
+    @objc func moveQueueItemToTop()   { moveClickedQueueRow { _ in 0 } }
+    @objc func moveQueueItemToBottom(){ moveClickedQueueRow { _ in Int.max } }
 
-    // Drag the whole row, not just the clicked cell. Composite each cell view's
-    // own snapshot at its column offset (cell views are plain text labels and
-    // snapshot reliably, unlike the layer-backed row view).
-    func tableView(_ tableView: NSTableView, draggingSession session: NSDraggingSession,
-                   willBeginAt screenPoint: NSPoint, forRowIndexes rowIndexes: IndexSet) {
-        guard tableView === queueTable else { return }
-        let rows = Array(rowIndexes)
-        session.enumerateDraggingItems(options: [], for: tableView,
-                                       classes: [NSPasteboardItem.self], searchOptions: [:]) { item, index, _ in
-            guard index < rows.count else { return }
-            let row = rows[index]
-            let rowRect = tableView.rect(ofRow: row)
-            guard rowRect.width > 1, rowRect.height > 1 else { return }
-            let image = NSImage(size: rowRect.size)
-            image.lockFocus()
-            for col in 0..<tableView.numberOfColumns {
-                guard let cell = tableView.view(atColumn: col, row: row, makeIfNecessary: true),
-                      let rep = cell.bitmapImageRepForCachingDisplay(in: cell.bounds) else { continue }
-                cell.cacheDisplay(in: cell.bounds, to: rep)
-                let x = tableView.frameOfCell(atColumn: col, row: row).minX - rowRect.minX
-                rep.draw(at: NSPoint(x: x, y: 0))
-            }
-            image.unlockFocus()
-            // Keep AppKit's vertical placement (already correct/under the cursor)
-            // and only widen the item to the full row — recomputing the frame from
-            // rect(ofRow:) uses flipped Y and makes the image fly in from a corner.
-            var frame = item.draggingFrame
-            frame.origin.x = rowRect.minX
-            frame.size = rowRect.size
-            item.setDraggingFrame(frame, contents: image)
-        }
-    }
-
-    // Reorder is always "between rows": if the cursor is over the middle of a row
-    // (proposed .on), retarget to the gap above it so the insertion cue shows
-    // consistently. Always a move within the queue.
-    func tableView(_ tableView: NSTableView, validateDrop info: NSDraggingInfo,
-                   proposedRow row: Int, proposedDropOperation dropOperation: NSTableView.DropOperation) -> NSDragOperation {
-        guard tableView === queueTable else { return [] }
-        if dropOperation == .on { tableView.setDropRow(row, dropOperation: .above) }
-        return .move
-    }
-
-    func tableView(_ tableView: NSTableView, acceptDrop info: NSDraggingInfo,
-                   row: Int, dropOperation: NSTableView.DropOperation) -> Bool {
-        guard tableView === queueTable,
-              let s = info.draggingPasteboard.pasteboardItems?.first?.string(forType: queueDragType),
-              let src = Int(s), src >= 0, src < queueRows.count else { return false }
-        // Reorder the ids: remove the dragged one, insert at the drop gap (which
-        // shifts down by one when the source was above it), then persist.
+    /// Move the right-clicked queue row to a new index (computed from its current
+    /// one), then persist the new order and refresh.
+    private func moveClickedQueueRow(_ destination: (Int) -> Int) {
+        guard let table = queueTable else { return }
+        let src = table.clickedRow
+        guard src >= 0, src < queueRows.count else { return }
+        let target = min(max(destination(src), 0), queueRows.count - 1)
+        guard target != src else { return }
         var ids = queueRows.map { $0.id }
         let moved = ids.remove(at: src)
-        let dest = min(max(src < row ? row - 1 : row, 0), ids.count)
-        ids.insert(moved, at: dest)
+        ids.insert(moved, at: target)
         db.reorderQueue(ids: ids)
         reloadQueueData()
-        queueTable?.reloadData()
-        return true
+        table.reloadData()
     }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
