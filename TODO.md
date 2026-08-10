@@ -1,0 +1,4 @@
+- Create a Settings menu option that brings up the 3 checkboxes that are already chosen when setting up a session
+- Make Pre-empt have 2 options instead of just 1
+    - Split before and after into 2 separate sessions (current behavior)
+    - Remove session that is there before. Move entire session back to the queue including all minutes. Don't include (continue X) at the end

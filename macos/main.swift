@@ -74,12 +74,14 @@ final class DB {
             focus      TEXT,
             rating     INTEGER,       -- 1..10, only for completed sessions
             status     TEXT,          -- completed / interrupted (NULL while active)
-            note       TEXT           -- optional note written when rating
+            note       TEXT,          -- optional note written when rating
+            original_session_id INTEGER  -- root of a pre-empt→continued chain (NULL if this is the original)
         );
         """)
         // Migrations for older DBs (each errors harmlessly if already applied).
         exec("ALTER TABLE sessions ADD COLUMN note TEXT;")
         exec("ALTER TABLE sessions RENAME COLUMN outcome TO status;")
+        exec("ALTER TABLE sessions ADD COLUMN original_session_id INTEGER;")
         // FIFO queue of upcoming sessions. Front = lowest id; "add to end" is a
         // plain insert; "pop off" deletes the lowest id.
         exec("""
@@ -87,9 +89,11 @@ final class DB {
             id         INTEGER PRIMARY KEY AUTOINCREMENT,
             created_at TEXT NOT NULL,
             minutes    INTEGER,
-            focus      TEXT
+            focus      TEXT,
+            original_session_id INTEGER  -- carries the chain root onto the resumed session
         );
         """)
+        exec("ALTER TABLE queue ADD COLUMN original_session_id INTEGER;")
         // One row per "Add time" event, so a session extended N times has N rows
         // (sessions.minutes is also bumped to the running total).
         exec("""
@@ -115,8 +119,8 @@ final class DB {
     private func exec(_ sql: String) { sqlite3_exec(db, sql, nil, nil, nil) }
 
     /// Insert a new in-progress session; returns its row id.
-    func startSession(reason: String, minutes: Int, focus: String) -> Int64? {
-        let sql = "INSERT INTO sessions (started_at, reason, minutes, focus) VALUES (?,?,?,?);"
+    func startSession(reason: String, minutes: Int, focus: String, originalSessionId: Int64?) -> Int64? {
+        let sql = "INSERT INTO sessions (started_at, reason, minutes, focus, original_session_id) VALUES (?,?,?,?,?);"
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return nil }
         defer { sqlite3_finalize(stmt) }
@@ -124,6 +128,7 @@ final class DB {
         sqlite3_bind_text(stmt, 2, reason, -1, SQLITE_TRANSIENT)
         sqlite3_bind_int(stmt, 3, Int32(minutes))
         sqlite3_bind_text(stmt, 4, focus, -1, SQLITE_TRANSIENT)
+        if let o = originalSessionId { sqlite3_bind_int64(stmt, 5, o) } else { sqlite3_bind_null(stmt, 5) }
         guard sqlite3_step(stmt) == SQLITE_DONE else { return nil }
         return sqlite3_last_insert_rowid(db)
     }
@@ -201,17 +206,18 @@ final class DB {
     /// Sessions never closed out (ended_at IS NULL), newest first — i.e. a
     /// session that was live when the process died (uninstall/crash/reboot).
     func openSessions() -> [ActiveSession] {
-        let sql = "SELECT id, started_at, minutes, focus FROM sessions WHERE ended_at IS NULL ORDER BY id DESC;"
+        let sql = "SELECT id, started_at, minutes, focus, original_session_id FROM sessions WHERE ended_at IS NULL ORDER BY id DESC;"
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
         defer { sqlite3_finalize(stmt) }
         var rows: [ActiveSession] = []
         while sqlite3_step(stmt) == SQLITE_ROW {
             let focus = sqlite3_column_text(stmt, 3).map { String(cString: $0) } ?? ""
+            let orig = sqlite3_column_type(stmt, 4) == SQLITE_NULL ? nil : sqlite3_column_int64(stmt, 4)
             rows.append(ActiveSession(id: sqlite3_column_int64(stmt, 0),
                                       startedAt: sqlite3_column_text(stmt, 1).map { String(cString: $0) } ?? "",
                                       minutes: Int(sqlite3_column_int(stmt, 2)),
-                                      focus: focus))
+                                      focus: focus, originalSessionId: orig))
         }
         return rows
     }
@@ -219,7 +225,7 @@ final class DB {
     /// Completed sessions with no rating yet (deferred), oldest first.
     func unratedCompleted() -> [ActiveSession] {
         let sql = """
-        SELECT id, started_at, minutes, focus FROM sessions
+        SELECT id, started_at, minutes, focus, original_session_id FROM sessions
         WHERE status = 'completed' AND rating IS NULL
         ORDER BY started_at ASC, id ASC;
         """
@@ -229,10 +235,11 @@ final class DB {
         var rows: [ActiveSession] = []
         while sqlite3_step(stmt) == SQLITE_ROW {
             let focus = sqlite3_column_text(stmt, 3).map { String(cString: $0) } ?? ""
+            let orig = sqlite3_column_type(stmt, 4) == SQLITE_NULL ? nil : sqlite3_column_int64(stmt, 4)
             rows.append(ActiveSession(id: sqlite3_column_int64(stmt, 0),
                                       startedAt: sqlite3_column_text(stmt, 1).map { String(cString: $0) } ?? "",
                                       minutes: Int(sqlite3_column_int(stmt, 2)),
-                                      focus: focus))
+                                      focus: focus, originalSessionId: orig))
         }
         return rows
     }
@@ -308,16 +315,17 @@ final class DB {
 
     /// All queued focuses, front (next up) first.
     func queueItems() -> [QueueItem] {
-        let sql = "SELECT id, minutes, focus FROM queue ORDER BY id ASC;"
+        let sql = "SELECT id, minutes, focus, original_session_id FROM queue ORDER BY id ASC;"
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
         defer { sqlite3_finalize(stmt) }
         var rows: [QueueItem] = []
         while sqlite3_step(stmt) == SQLITE_ROW {
             let focus = sqlite3_column_text(stmt, 2).map { String(cString: $0) } ?? ""
+            let orig = sqlite3_column_type(stmt, 3) == SQLITE_NULL ? nil : sqlite3_column_int64(stmt, 3)
             rows.append(QueueItem(id: sqlite3_column_int64(stmt, 0),
                                   minutes: Int(sqlite3_column_int(stmt, 1)),
-                                  focus: focus))
+                                  focus: focus, originalSessionId: orig))
         }
         return rows
     }
@@ -336,10 +344,11 @@ final class DB {
 
     /// Insert at the FRONT of the queue (used when pre-empting the current focus).
     /// Ordering is by id ASC, so give it an id below the current minimum.
-    func enqueueFront(focus: String, minutes: Int) {
+    /// `originalSessionId` carries the chain root onto the eventual resumed session.
+    func enqueueFront(focus: String, minutes: Int, originalSessionId: Int64?) {
         let sql = """
-        INSERT INTO queue (id, created_at, minutes, focus)
-        VALUES ((SELECT COALESCE(MIN(id), 1) - 1 FROM queue), ?, ?, ?);
+        INSERT INTO queue (id, created_at, minutes, focus, original_session_id)
+        VALUES ((SELECT COALESCE(MIN(id), 1) - 1 FROM queue), ?, ?, ?, ?);
         """
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
@@ -347,20 +356,22 @@ final class DB {
         sqlite3_bind_text(stmt, 1, isoNow(), -1, SQLITE_TRANSIENT)
         sqlite3_bind_int(stmt, 2, Int32(minutes))
         sqlite3_bind_text(stmt, 3, focus, -1, SQLITE_TRANSIENT)
+        if let o = originalSessionId { sqlite3_bind_int64(stmt, 4, o) } else { sqlite3_bind_null(stmt, 4) }
         sqlite3_step(stmt)
     }
 
     /// The next queued focus (front of the FIFO), or nil if the queue is empty.
     func frontOfQueue() -> QueueItem? {
-        let sql = "SELECT id, minutes, focus FROM queue ORDER BY id ASC LIMIT 1;"
+        let sql = "SELECT id, minutes, focus, original_session_id FROM queue ORDER BY id ASC LIMIT 1;"
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return nil }
         defer { sqlite3_finalize(stmt) }
         guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
         let focus = sqlite3_column_text(stmt, 2).map { String(cString: $0) } ?? ""
+        let orig = sqlite3_column_type(stmt, 3) == SQLITE_NULL ? nil : sqlite3_column_int64(stmt, 3)
         return QueueItem(id: sqlite3_column_int64(stmt, 0),
                          minutes: Int(sqlite3_column_int(stmt, 1)),
-                         focus: focus)
+                         focus: focus, originalSessionId: orig)
     }
 
     func removeFromQueue(id: Int64) {
@@ -379,6 +390,7 @@ struct QueueItem {
     let id: Int64
     let minutes: Int
     let focus: String
+    let originalSessionId: Int64?
 }
 
 struct ActiveSession {
@@ -386,6 +398,7 @@ struct ActiveSession {
     let startedAt: String
     let minutes: Int
     let focus: String
+    let originalSessionId: Int64?
 }
 
 struct SessionRow {
@@ -423,6 +436,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     private var sessionId: Int64?
     private var sessionStart: Date?   // when the current session began (for elapsed time)
     private var sessionMinutes: Int?  // planned duration of the current session (incl. added time)
+    private var sessionOriginalId: Int64?  // chain root if this session continues an interrupted one
 
     // Debounce guards for the return-prompt (wake + unlock + session often fire
     // together). `showing` also stops any modal from stacking on another.
@@ -554,6 +568,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         sessionId = s.id
         sessionStart = isoParser.date(from: s.startedAt) ?? Date()
         sessionMinutes = s.minutes
+        sessionOriginalId = s.originalSessionId
     }
 
     // "Set focus" is an explicit ad-hoc entry — it bypasses the queue.
@@ -586,8 +601,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             let elapsed = max(0, Int((Date().timeIntervalSince(sessionStart ?? Date()) / 60).rounded()))
             // Complete the existing record as interrupted, recording elapsed minutes.
             db.markInterrupted(id: id, elapsedMinutes: elapsed)
-            // Queue a fresh copy for the remaining time to resume next.
-            db.enqueueFront(focus: continuedName(curFocus), minutes: remaining)
+            // Queue a fresh copy for the remaining time to resume next, carrying
+            // the chain root (this session's original, or itself if it's the root).
+            db.enqueueFront(focus: continuedName(curFocus), minutes: remaining,
+                            originalSessionId: sessionOriginalId ?? id)
         }
         beginSession(reason: preempting ? "preempt" : "manual", minutes: minutes, focus: focus)
         if preempting { db.recordPreempt(preemptedSessionId: preemptedId, newSessionId: sessionId) }
@@ -630,7 +647,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         showing = true
         let elapsed = max(0, Int((Date().timeIntervalSince(sessionStart ?? Date()) / 60).rounded()))
         currentFocus = nil; deadline = nil; sessionId = nil
-        sessionStart = nil; sessionMinutes = nil
+        sessionStart = nil; sessionMinutes = nil; sessionOriginalId = nil
         hudWindow.orderOut(nil)
         let (rating, note) = promptRating(focus: "\(focus) · \(elapsed) min", title: "Rate this session")
         db.markInterrupted(id: id, elapsedMinutes: elapsed, rating: rating, note: note)
@@ -757,7 +774,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         }
 
         db.removeFromQueue(id: item.id)
-        beginSession(reason: "queue", minutes: item.minutes, focus: item.focus)
+        beginSession(reason: "queue", minutes: item.minutes, focus: item.focus,
+                     originalSessionId: item.originalSessionId)
     }
 
     /// Editable "focus + minutes" modal. Loops until valid; returns nil only if
@@ -837,12 +855,14 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         return "\(focus) (continued)"
     }
 
-    private func beginSession(reason: String, minutes: Int, focus: String) {
+    private func beginSession(reason: String, minutes: Int, focus: String, originalSessionId: Int64? = nil) {
         currentFocus = focus
         sessionStart = Date()
         sessionMinutes = minutes
+        sessionOriginalId = originalSessionId
         deadline = Date().addingTimeInterval(Double(minutes) * 60)
-        sessionId = db.startSession(reason: reason, minutes: minutes, focus: focus)
+        sessionId = db.startSession(reason: reason, minutes: minutes, focus: focus,
+                                    originalSessionId: originalSessionId)
         if pushoverEnabled { sendPushover(title: "Focus started", message: "\(focus) — \(minutes) min") }
         tick()
     }
@@ -1243,6 +1263,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         sessionId = nil
         sessionStart = nil
         sessionMinutes = nil
+        sessionOriginalId = nil
         hudWindow.orderOut(nil)
         let (rating, note) = promptRating(focus: focus, title: "Rate this session")
         db.endSession(id: id, status: "completed", rating: rating, note: note)
