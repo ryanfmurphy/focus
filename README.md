@@ -88,7 +88,7 @@ based on state):
 | **Set focus** | idle | Start an ad-hoc focus (same item as Pre-empt this task, relabeled) |
 | **Pre-empt next task** | always | Add a new focus to the **front** of the queue (jumps ahead of whatever's queued next) without disturbing the running session; also logs a pre-empt |
 | **See history (N)** | always | Table of past sessions (time · duration · rating · status · focus · start/end popup-open · note); N = total recorded |
-| **See queue (N)** | always | Table of pending queued focuses, next-up first (N = current length) |
+| **See queue (N)** | always | Table of pending queued focuses, next-up first; drag rows to re-order (N = current length) |
 | **Clear queue** | queue non-empty | Empty the queue (with confirmation) |
 | **Rate unrated sessions (N)** | N > 0 | Loop through deferred/unrated completed sessions oldest-first and rate each |
 | **Show current task** | always | Checkbox — toggles the floating corner pill on/off (persisted). Menu-bar icon and all timing/logging are unaffected |
@@ -149,7 +149,9 @@ rebuilds the binary and reloads the agent.
   than overwrite; `NULL` when a session was closed without any popup, e.g.
   auto-proceed or a launch-time sweep). Planned durations are entered in whole
   minutes but stored as seconds (×60), and shown as `M:SS` in the history window.
-- **`queue`** — pending focuses (`created_at`, `seconds`, `focus`); FIFO by `id`.
+- **`queue`** — pending focuses (`created_at`, `seconds`, `focus`, `position`);
+  ordered by `position` (drag rows in the queue window to re-order). "Add to
+  queue" appends (max position + 1); a front pre-empt inserts at min − 1.
 - **`time_additions`** — one row per "Add time" event (`session_id`, `added_at`,
   `seconds`); the session's total `seconds` is also bumped.
 - **`preempts`** — one row per pre-empt (`at`, `preempted_session_id`,

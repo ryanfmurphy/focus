@@ -109,10 +109,15 @@ final class DB {
             created_at TEXT NOT NULL,
             seconds    INTEGER,
             focus      TEXT,
-            original_session_id INTEGER  -- carries the chain root onto the resumed session
+            original_session_id INTEGER, -- carries the chain root onto the resumed session
+            position   INTEGER           -- explicit sort order (lower = nearer the front)
         );
         """)
         exec("ALTER TABLE queue ADD COLUMN original_session_id INTEGER;")
+        // Explicit ordering column (was implicitly id ASC). Seed it from id so the
+        // current order is preserved, then order by it everywhere.
+        exec("ALTER TABLE queue ADD COLUMN position INTEGER;")
+        exec("UPDATE queue SET position = id WHERE position IS NULL;")
         // One row per "Add time" event, so a session extended N times has N rows
         // (sessions.seconds is also bumped to the running total).
         exec("""
@@ -371,7 +376,7 @@ final class DB {
 
     /// All queued focuses, front (next up) first.
     func queueItems() -> [QueueItem] {
-        let sql = "SELECT id, seconds, focus, original_session_id FROM queue ORDER BY id ASC;"
+        let sql = "SELECT id, seconds, focus, original_session_id FROM queue ORDER BY position ASC, id ASC;"
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
         defer { sqlite3_finalize(stmt) }
@@ -386,9 +391,9 @@ final class DB {
         return rows
     }
 
-    /// Append a focus to the end of the queue.
+    /// Append a focus to the end of the queue (position = current max + 1).
     func enqueue(focus: String, seconds: Int) {
-        let sql = "INSERT INTO queue (created_at, seconds, focus) VALUES (?,?,?);"
+        let sql = "INSERT INTO queue (created_at, seconds, focus, position) VALUES (?,?,?, (SELECT COALESCE(MAX(position), 0) + 1 FROM queue));"
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
         defer { sqlite3_finalize(stmt) }
@@ -398,13 +403,13 @@ final class DB {
         sqlite3_step(stmt)
     }
 
-    /// Insert at the FRONT of the queue (used when pre-empting the current focus).
-    /// Ordering is by id ASC, so give it an id below the current minimum.
-    /// `originalSessionId` carries the chain root onto the eventual resumed session.
+    /// Insert at the FRONT of the queue (used when pre-empting the current focus):
+    /// position = current min - 1. `originalSessionId` carries the chain root onto
+    /// the eventual resumed session.
     func enqueueFront(focus: String, seconds: Int, originalSessionId: Int64?) {
         let sql = """
-        INSERT INTO queue (id, created_at, seconds, focus, original_session_id)
-        VALUES ((SELECT COALESCE(MIN(id), 1) - 1 FROM queue), ?, ?, ?, ?);
+        INSERT INTO queue (created_at, seconds, focus, original_session_id, position)
+        VALUES (?, ?, ?, ?, (SELECT COALESCE(MIN(position), 0) - 1 FROM queue));
         """
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
@@ -416,9 +421,27 @@ final class DB {
         sqlite3_step(stmt)
     }
 
+    /// Persist a new front-to-back order: `ids` in the desired order get
+    /// position 0, 1, 2, … in one transaction.
+    func reorderQueue(ids: [Int64]) {
+        exec("BEGIN;")
+        let sql = "UPDATE queue SET position = ? WHERE id = ?;"
+        var stmt: OpaquePointer?
+        if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK {
+            for (index, id) in ids.enumerated() {
+                sqlite3_bind_int(stmt, 1, Int32(index))
+                sqlite3_bind_int64(stmt, 2, id)
+                sqlite3_step(stmt)
+                sqlite3_reset(stmt)
+            }
+        }
+        sqlite3_finalize(stmt)
+        exec("COMMIT;")
+    }
+
     /// The next queued focus (front of the FIFO), or nil if the queue is empty.
     func frontOfQueue() -> QueueItem? {
-        let sql = "SELECT id, seconds, focus, original_session_id FROM queue ORDER BY id ASC LIMIT 1;"
+        let sql = "SELECT id, seconds, focus, original_session_id FROM queue ORDER BY position ASC, id ASC LIMIT 1;"
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return nil }
         defer { sqlite3_finalize(stmt) }
@@ -514,6 +537,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     private var queueTable: NSTableView?
     private var queueRows: [QueueItem] = []
     private var queueEstimates: [(start: Date, finish: Date)] = []
+    private let queueDragType = NSPasteboard.PasteboardType("com.murftown.focus.queue-row")
     private lazy var alertIcon = emojiImage("🎯", size: 256)
 
     // NSAlert's default icon is the (missing) app icon; force 🎯 on every modal.
@@ -1046,12 +1070,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
          .replacingOccurrences(of: "\r", with: " ")
     }
 
-    @objc func showQueue() {
+    // Reload queue rows and recompute the estimated schedule (front to back).
+    private func reloadQueueData() {
         queueRows = db.queueItems()
-
-        // Estimated schedule: start from when the current session finishes (its
-        // deadline, if one is running and still ahead), else now, then chain each
-        // queued item's duration.
+        // Start from when the current session finishes (its deadline, if one is
+        // running and still ahead), else now, then chain each queued item's duration.
         var cursor = Date()
         if let dl = deadline, dl > cursor { cursor = dl }
         queueEstimates = queueRows.map { item in
@@ -1060,6 +1083,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             cursor = finish
             return (start, finish)
         }
+    }
+
+    @objc func showQueue() {
+        reloadQueueData()
 
         if queueWindow == nil {
             let window = NSWindow(
@@ -1082,6 +1109,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             table.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
             table.rowHeight = 22
             table.style = .inset
+            // Drag a row onto a gap between rows to re-order the queue.
+            table.registerForDraggedTypes([queueDragType])
+            table.setDraggingSourceOperationMask(.move, forLocal: true)
+            table.draggingDestinationFeedbackStyle = .gap
 
             func addColumn(_ id: String, _ title: String, width: CGFloat, min: CGFloat,
                            align: NSTextAlignment = .left) {
@@ -1151,6 +1182,39 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
 
     func numberOfRows(in tableView: NSTableView) -> Int {
         tableView === queueTable ? queueRows.count : historyRows.count
+    }
+
+    // ---- queue drag-to-reorder (queue table only) ----
+    // Providing a pasteboard writer is what makes rows draggable; carry the source
+    // row index so acceptDrop can compute the move.
+    func tableView(_ tableView: NSTableView, pasteboardWriterForRow row: Int) -> NSPasteboardWriting? {
+        guard tableView === queueTable else { return nil }
+        let item = NSPasteboardItem()
+        item.setString(String(row), forType: queueDragType)
+        return item
+    }
+
+    // Only allow dropping into the gap between rows (reorder), not onto a row.
+    func tableView(_ tableView: NSTableView, validateDrop info: NSDraggingInfo,
+                   proposedRow row: Int, proposedDropOperation dropOperation: NSTableView.DropOperation) -> NSDragOperation {
+        (tableView === queueTable && dropOperation == .above) ? .move : []
+    }
+
+    func tableView(_ tableView: NSTableView, acceptDrop info: NSDraggingInfo,
+                   row: Int, dropOperation: NSTableView.DropOperation) -> Bool {
+        guard tableView === queueTable,
+              let s = info.draggingPasteboard.pasteboardItems?.first?.string(forType: queueDragType),
+              let src = Int(s), src >= 0, src < queueRows.count else { return false }
+        // Reorder the ids: remove the dragged one, insert at the drop gap (which
+        // shifts down by one when the source was above it), then persist.
+        var ids = queueRows.map { $0.id }
+        let moved = ids.remove(at: src)
+        let dest = min(max(src < row ? row - 1 : row, 0), ids.count)
+        ids.insert(moved, at: dest)
+        db.reorderQueue(ids: ids)
+        reloadQueueData()
+        queueTable?.reloadData()
+        return true
     }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
