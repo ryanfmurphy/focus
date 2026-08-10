@@ -1195,20 +1195,19 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     }
 
     // Drag the whole row, not just the clicked cell: replace each dragging item's
-    // image with a snapshot of its full row view.
+    // image with a PDF snapshot of the row's full width from the table view (PDF
+    // renders the text reliably regardless of layer backing).
     func tableView(_ tableView: NSTableView, draggingSession session: NSDraggingSession,
                    willBeginAt screenPoint: NSPoint, forRowIndexes rowIndexes: IndexSet) {
         guard tableView === queueTable else { return }
         let rows = Array(rowIndexes)
         session.enumerateDraggingItems(options: [], for: tableView,
                                        classes: [NSPasteboardItem.self], searchOptions: [:]) { item, index, _ in
-            guard index < rows.count,
-                  let rowView = tableView.rowView(atRow: rows[index], makeIfNecessary: true),
-                  let rep = rowView.bitmapImageRepForCachingDisplay(in: rowView.bounds) else { return }
-            rowView.cacheDisplay(in: rowView.bounds, to: rep)
-            let image = NSImage(size: rowView.bounds.size)
-            image.addRepresentation(rep)
-            item.setDraggingFrame(tableView.rect(ofRow: rows[index]), contents: image)
+            guard index < rows.count else { return }
+            let rowRect = tableView.rect(ofRow: rows[index])
+            guard rowRect.width > 0, rowRect.height > 0,
+                  let image = NSImage(data: tableView.dataWithPDF(inside: rowRect)) else { return }
+            item.setDraggingFrame(rowRect, contents: image)
         }
     }
 
