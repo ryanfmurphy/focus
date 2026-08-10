@@ -974,8 +974,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             addColumn("rating", "Rating", width: 60, min: 50, align: .right)
             addColumn("status", "Status", width: 95, min: 70)
             addColumn("focus", "Focus", width: 240, min: 150)
-            addColumn("openstart", "Open (start)", width: 84, min: 70, align: .right)
-            addColumn("openend", "Open (end)", width: 84, min: 70, align: .right)
+            addColumn("openstart", "Start popup open", width: 110, min: 90, align: .right)
+            addColumn("openend", "End popup open", width: 110, min: 90, align: .right)
             addColumn("note", "Note", width: 220, min: 100)   // flexible last column
 
             scroll.documentView = table
@@ -993,7 +993,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     // Copy the selected history rows to the clipboard as TSV (with a header).
     private func copyHistoryRows(_ indexes: IndexSet) {
         guard !indexes.isEmpty else { return }
-        var lines = ["Started\tMinutes\tRating\tStatus\tFocus\tOpen start (s)\tOpen end (s)\tNote"]
+        var lines = ["Started\tMinutes\tRating\tStatus\tFocus\tStart popup open (s)\tEnd popup open (s)\tNote"]
         for i in indexes where i < historyRows.count {
             let r = historyRows[i]
             let fields = [

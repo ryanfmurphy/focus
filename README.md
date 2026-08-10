@@ -87,7 +87,7 @@ based on state):
 | **Pre-empt this task** | session active | Interrupt the current one (its remaining time is re-queued to the front as "… (continued)") and start a new focus now |
 | **Set focus** | idle | Start an ad-hoc focus (same item as Pre-empt this task, relabeled) |
 | **Pre-empt next task** | always | Add a new focus to the **front** of the queue (jumps ahead of whatever's queued next) without disturbing the running session; also logs a pre-empt |
-| **See history (N)** | always | Table of past sessions (time · duration · rating · status · focus · popup-open start/end · note); N = total recorded |
+| **See history (N)** | always | Table of past sessions (time · duration · rating · status · focus · start/end popup-open · note); N = total recorded |
 | **See queue (N)** | always | Table of pending queued focuses, next-up first (N = current length) |
 | **Clear queue** | queue non-empty | Empty the queue (with confirmation) |
 | **Rate unrated sessions (N)** | N > 0 | Loop through deferred/unrated completed sessions oldest-first and rate each |
