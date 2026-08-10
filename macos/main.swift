@@ -724,9 +724,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         if let extra = askMinutes() { extendSession(by: extra) }
     }
 
-    /// Log an "Add time" event, bump the planned total, and extend the deadline.
-    /// Extends from whichever is later — now or the current deadline — so it adds
+    /// Log an "Add time" event, bump the planned total, and shift the deadline.
+    /// Adjusts from whichever is later — now or the current deadline — so it applies
     /// the full `extra` when the timer's already up, or on top of remaining time.
+    /// `extra` may be negative to subtract time (the deadline moves earlier).
     private func extendSession(by extra: Int) {
         guard let id = sessionId else { return }
         db.addTime(sessionId: id, seconds: extra)
@@ -1475,15 +1476,15 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         }
     }
 
-    /// "Add time" minutes prompt (cancellable). The field takes whole minutes but
-    /// the returned value is in seconds (×60), or nil if cancelled.
+    /// "Add time" minutes prompt (cancellable). The field takes whole minutes
+    /// (negative to subtract) and returns seconds (×60), or nil if cancelled.
     private func askMinutes() -> Int? {
         let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 80, height: 24))
         field.stringValue = "5"
         while true {
             let alert = makeAlert()
             alert.messageText = "Add time"
-            alert.informativeText = "How many more minutes?"
+            alert.informativeText = "How many minutes? (negative to subtract)"
             alert.addButton(withTitle: "Add")       // .alertFirstButtonReturn
             alert.addButton(withTitle: "Cancel")    // .alertSecondButtonReturn
             alert.accessoryView = field
@@ -1492,7 +1493,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             alert.window.initialFirstResponder = field
             let response = alert.runModal()
             if response == .alertSecondButtonReturn { return nil }
-            if let m = Int(field.stringValue.trimmingCharacters(in: .whitespaces)), m > 0 { return m * 60 }
+            // Any non-zero whole number: positive adds time, negative subtracts.
+            if let m = Int(field.stringValue.trimmingCharacters(in: .whitespaces)), m != 0 { return m * 60 }
         }
     }
 
