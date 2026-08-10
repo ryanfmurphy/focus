@@ -84,8 +84,8 @@ based on state):
 | **Complete task** | session active | Mark completed, rate 1–10, advance to the next focus |
 | **Abort task** | session active | Rate it, mark interrupted (records elapsed minutes), advance |
 | **Add time to current** | session active | Add N minutes to the running session (same as "Add time" at time's up) |
-| **Pre-empt task** | session active | Interrupt the current one (its remaining time is re-queued to the front as "… (continued)") and start a new focus now |
-| **Set focus** | idle | Start an ad-hoc focus (same item as Pre-empt task, relabeled) |
+| **Pre-empt this task** | session active | Interrupt the current one (its remaining time is re-queued to the front as "… (continued)") and start a new focus now |
+| **Set focus** | idle | Start an ad-hoc focus (same item as Pre-empt this task, relabeled) |
 | **See history (N)** | always | Table of past sessions (time · duration · rating · status · focus · note); N = total recorded |
 | **See queue (N)** | always | Table of pending queued focuses, next-up first (N = current length) |
 | **Clear queue** | queue non-empty | Empty the queue (with confirmation) |

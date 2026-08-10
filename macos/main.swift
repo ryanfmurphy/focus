@@ -671,7 +671,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             return currentFocus != nil
         }
         if menuItem.action == #selector(changeFocus) {
-            menuItem.title = currentFocus != nil ? "Pre-empt task" : "Set focus"
+            menuItem.title = currentFocus != nil ? "Pre-empt this task" : "Set focus"
         }
         if menuItem.action == #selector(showHistory) {
             menuItem.title = "See history (\(db.sessionCount()))"
@@ -1443,7 +1443,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         menu.addItem(withTitle: "Complete task", action: #selector(completeTask), keyEquivalent: "")
         menu.addItem(withTitle: "Abort task", action: #selector(abortTask), keyEquivalent: "")
         menu.addItem(withTitle: "Add time to current", action: #selector(addTimeToCurrent), keyEquivalent: "")
-        menu.addItem(withTitle: "Pre-empt task", action: #selector(changeFocus), keyEquivalent: "")
+        menu.addItem(withTitle: "Pre-empt this task", action: #selector(changeFocus), keyEquivalent: "")
         menu.addItem(.separator())
         menu.addItem(withTitle: "See history", action: #selector(showHistory), keyEquivalent: "")
         menu.addItem(withTitle: "See queue", action: #selector(showQueue), keyEquivalent: "")
