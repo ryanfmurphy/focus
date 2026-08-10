@@ -792,20 +792,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         let minutesField = NSTextField(frame: NSRect(x: 62, y: 82, width: 70, height: 24))
         minutesField.stringValue = String(defaultMinutes)
 
-        let soundCheck = NSButton(checkboxWithTitle: "Play sound when time's up",
-                                  target: nil, action: nil)
+        let (soundCheck, pushoverCheck, autoProceedCheck) = preferenceCheckboxes()
         soundCheck.frame = NSRect(x: 0, y: 54, width: 320, height: 20)
-        soundCheck.state = playSoundEnabled ? .on : .off
-
-        let pushoverCheck = NSButton(checkboxWithTitle: "Send Pushover notification",
-                                     target: nil, action: nil)
         pushoverCheck.frame = NSRect(x: 0, y: 28, width: 320, height: 20)
-        pushoverCheck.state = pushoverEnabled ? .on : .off
-
-        let autoProceedCheck = NSButton(checkboxWithTitle: "Auto-proceed with next queued task",
-                                        target: nil, action: nil)
         autoProceedCheck.frame = NSRect(x: 0, y: 2, width: 320, height: 20)
-        autoProceedCheck.state = autoProceedEnabled ? .on : .off
 
         let accessory = NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 138))
         accessory.addSubview(focusField)
@@ -830,9 +820,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             if cancellable && response == .alertSecondButtonReturn { return nil }
 
             // Persist the checkbox choices as the standing preference.
-            playSoundEnabled = soundCheck.state == .on
-            pushoverEnabled = pushoverCheck.state == .on
-            autoProceedEnabled = autoProceedCheck.state == .on
+            persistPreferences(soundCheck, pushoverCheck, autoProceedCheck)
 
             let answer = focusField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
             let minutes = Int(minutesField.stringValue.trimmingCharacters(in: .whitespaces)) ?? 0
@@ -1130,6 +1118,52 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         set { UserDefaults.standard.set(newValue, forKey: "autoProceed") }
     }
 
+    /// The three preference checkboxes, initialized from the stored values. Shared
+    /// by the session-start modal and the Settings dialog so they stay in sync.
+    private func preferenceCheckboxes() -> (sound: NSButton, pushover: NSButton, auto: NSButton) {
+        let sound = NSButton(checkboxWithTitle: "Play sound when time's up", target: nil, action: nil)
+        sound.state = playSoundEnabled ? .on : .off
+        let pushover = NSButton(checkboxWithTitle: "Send Pushover notification", target: nil, action: nil)
+        pushover.state = pushoverEnabled ? .on : .off
+        let auto = NSButton(checkboxWithTitle: "Auto-proceed with next queued task", target: nil, action: nil)
+        auto.state = autoProceedEnabled ? .on : .off
+        return (sound, pushover, auto)
+    }
+
+    private func persistPreferences(_ sound: NSButton, _ pushover: NSButton, _ auto: NSButton) {
+        playSoundEnabled = sound.state == .on
+        pushoverEnabled = pushover.state == .on
+        autoProceedEnabled = auto.state == .on
+    }
+
+    // Standalone Settings dialog for the three global preferences.
+    @objc func showSettings() {
+        guard !showing else { return }
+        showing = true
+        defer { showing = false }
+        NSApp.activate(ignoringOtherApps: true)
+
+        let (sound, pushover, auto) = preferenceCheckboxes()
+        sound.frame = NSRect(x: 0, y: 52, width: 320, height: 20)
+        pushover.frame = NSRect(x: 0, y: 26, width: 320, height: 20)
+        auto.frame = NSRect(x: 0, y: 0, width: 320, height: 20)
+        let accessory = NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 72))
+        accessory.addSubview(sound)
+        accessory.addSubview(pushover)
+        accessory.addSubview(auto)
+
+        let alert = makeAlert()
+        alert.messageText = "Settings"
+        alert.informativeText = "These apply to every session."
+        alert.addButton(withTitle: "Done")
+        alert.accessoryView = accessory
+        alert.window.level = .floating
+        alert.window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        alert.runModal()
+
+        persistPreferences(sound, pushover, auto)
+    }
+
     /// Fire-and-forget Pushover message. Credentials come from ~/focus/pushover.json
     /// ({"token":"...","user":"..."}), so they stay out of the code/repo.
     private func sendPushover(title: String, message: String) {
@@ -1348,6 +1382,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         menu.addItem(withTitle: "Clear queue", action: #selector(clearQueue), keyEquivalent: "")
         menu.addItem(withTitle: "Rate unrated sessions", action: #selector(rateUnrated), keyEquivalent: "")
         menu.addItem(.separator())
+        menu.addItem(withTitle: "Settings", action: #selector(showSettings), keyEquivalent: "")
         menu.addItem(withTitle: "Quit focus", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         for item in menu.items where item.action != #selector(NSApplication.terminate(_:)) {
             item.target = self
