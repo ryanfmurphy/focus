@@ -819,31 +819,23 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
                                     cancellable: Bool) -> (String, Int)? {
         NSApp.activate(ignoringOtherApps: true)
 
-        let focusField = NSTextField(frame: NSRect(x: 0, y: 114, width: 320, height: 24))
+        let focusField = NSTextField(frame: NSRect(x: 0, y: 34, width: 320, height: 24))
         focusField.placeholderString = "e.g. Ship the focus pill"
 
         let minutesLabel = NSTextField(labelWithString: "Minutes:")
-        minutesLabel.frame = NSRect(x: 0, y: 82, width: 60, height: 24)
-        let minutesField = NSTextField(frame: NSRect(x: 62, y: 82, width: 70, height: 24))
+        minutesLabel.frame = NSRect(x: 0, y: 2, width: 60, height: 24)
+        let minutesField = NSTextField(frame: NSRect(x: 62, y: 2, width: 70, height: 24))
         minutesField.stringValue = String(defaultMinutes)
 
-        let (soundCheck, pushoverCheck, autoProceedCheck) = preferenceCheckboxes()
-        soundCheck.frame = NSRect(x: 0, y: 54, width: 320, height: 20)
-        pushoverCheck.frame = NSRect(x: 0, y: 28, width: 320, height: 20)
-        autoProceedCheck.frame = NSRect(x: 0, y: 2, width: 320, height: 20)
-
         let elapsed = NSTextField(labelWithString: "")
-        elapsed.frame = NSRect(x: 0, y: 140, width: 320, height: 18)
+        elapsed.frame = NSRect(x: 0, y: 62, width: 320, height: 18)
         elapsed.font = NSFont.systemFont(ofSize: 11)
         elapsed.textColor = .secondaryLabelColor
 
-        let accessory = NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 160))
+        let accessory = NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 84))
         accessory.addSubview(focusField)
         accessory.addSubview(minutesLabel)
         accessory.addSubview(minutesField)
-        accessory.addSubview(soundCheck)
-        accessory.addSubview(pushoverCheck)
-        accessory.addSubview(autoProceedCheck)
         accessory.addSubview(elapsed)
 
         let elapsedTimer = startElapsedTimer(elapsed)
@@ -862,9 +854,6 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             let response = alert.runModal()
 
             if cancellable && response == .alertSecondButtonReturn { return nil }
-
-            // Persist the checkbox choices as the standing preference.
-            persistPreferences(soundCheck, pushoverCheck, autoProceedCheck)
 
             let answer = focusField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
             let minutes = Int(minutesField.stringValue.trimmingCharacters(in: .whitespaces)) ?? 0

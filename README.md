@@ -96,11 +96,11 @@ based on state):
 
 The countdown keeps updating even while the menu is open.
 
-## Preferences (checkboxes on the start prompt)
+## Preferences (Settings dialog)
 
-Three checkboxes appear on the "start a focus" modal (and in the **Settings**
-dialog). They're **global, persisted preferences** (stored in `UserDefaults`),
-not per-session — the last state you set applies to every future timer:
+Three checkboxes live in the **Settings** dialog. They're **global, persisted
+preferences** (stored in `UserDefaults`), not per-session — the last state you
+set applies to every future timer:
 
 - **Play sound when time's up** *(default on)* — plays the `Glass` chime at zero.
 - **Send Pushover notification** *(default off)* — sends a push at session start
