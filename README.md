@@ -143,6 +143,9 @@ rebuilds the binary and reloads the agent.
 - **`queue`** — pending focuses (`created_at`, `minutes`, `focus`); FIFO by `id`.
 - **`time_additions`** — one row per "Add time" event (`session_id`, `added_at`,
   `minutes`); the session's total `minutes` is also bumped.
+- **`preempts`** — one row per pre-empt (`at`, `preempted_session_id`,
+  `new_session_id`); `preempted_session_id` is `NULL` when nothing was running
+  (pre-empting before a queued task starts).
 
 **Status values:** `completed` (finished/rated, or deferred with null rating) and
 `interrupted` (aborted, pre-empted, or swept on next launch after a crash); a
