@@ -912,10 +912,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         historyWindow?.makeKeyAndOrderFront(nil)
     }
 
-    // Copy the selected history rows to the clipboard as CSV (with a header).
+    // Copy the selected history rows to the clipboard as TSV (with a header).
     private func copyHistoryRows(_ indexes: IndexSet) {
         guard !indexes.isEmpty else { return }
-        var lines = ["Started,Minutes,Rating,Status,Focus,Note"]
+        var lines = ["Started\tMinutes\tRating\tStatus\tFocus\tNote"]
         for i in indexes where i < historyRows.count {
             let r = historyRows[i]
             let fields = [
@@ -925,17 +925,18 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
                 r.status ?? (r.endedAt == nil ? "active" : ""),
                 r.focus,
                 r.note ?? "",
-            ].map(csvEscape)
-            lines.append(fields.joined(separator: ","))
+            ].map(tsvClean)
+            lines.append(fields.joined(separator: "\t"))
         }
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(lines.joined(separator: "\n"), forType: .string)
     }
 
-    // Quote a CSV field if it contains a comma, quote, or newline (doubling quotes).
-    private func csvEscape(_ s: String) -> String {
-        guard s.contains(",") || s.contains("\"") || s.contains("\n") else { return s }
-        return "\"" + s.replacingOccurrences(of: "\"", with: "\"\"") + "\""
+    // TSV has no quoting, so flatten any tabs/newlines in a field to spaces.
+    private func tsvClean(_ s: String) -> String {
+        s.replacingOccurrences(of: "\t", with: " ")
+         .replacingOccurrences(of: "\n", with: " ")
+         .replacingOccurrences(of: "\r", with: " ")
     }
 
     @objc func showQueue() {
