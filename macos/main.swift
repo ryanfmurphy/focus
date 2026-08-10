@@ -741,6 +741,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         alert.window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
 
         var autoTimer: Timer?
+        var elapsedTimer: Timer?
         if autoEligible && autoProceedEnabled {
             let label = NSTextField(wrappingLabelWithString: "")
             label.frame = NSRect(x: 0, y: 0, width: 340, height: 34)
@@ -762,10 +763,20 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             }
             RunLoop.main.add(timer, forMode: .common)
             autoTimer = timer
+        } else {
+            // No auto-proceed → show how long you've been sitting on this prompt.
+            let label = NSTextField(labelWithString: "")
+            label.frame = NSRect(x: 0, y: 0, width: 320, height: 18)
+            label.alignment = .center
+            label.font = NSFont.systemFont(ofSize: 11)
+            label.textColor = .secondaryLabelColor
+            alert.accessoryView = label
+            elapsedTimer = startElapsedTimer(label)
         }
 
         let response = alert.runModal()
         autoTimer?.invalidate()
+        elapsedTimer?.invalidate()
 
         if response == .alertSecondButtonReturn {
             // Pre-empt: leave the queued item where it is (still the front, since
@@ -806,13 +817,22 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         pushoverCheck.frame = NSRect(x: 0, y: 28, width: 320, height: 20)
         autoProceedCheck.frame = NSRect(x: 0, y: 2, width: 320, height: 20)
 
-        let accessory = NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 138))
+        let elapsed = NSTextField(labelWithString: "")
+        elapsed.frame = NSRect(x: 0, y: 140, width: 320, height: 18)
+        elapsed.font = NSFont.systemFont(ofSize: 11)
+        elapsed.textColor = .secondaryLabelColor
+
+        let accessory = NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 160))
         accessory.addSubview(focusField)
         accessory.addSubview(minutesLabel)
         accessory.addSubview(minutesField)
         accessory.addSubview(soundCheck)
         accessory.addSubview(pushoverCheck)
         accessory.addSubview(autoProceedCheck)
+        accessory.addSubview(elapsed)
+
+        let elapsedTimer = startElapsedTimer(elapsed)
+        defer { elapsedTimer.invalidate() }
 
         while true {
             let alert = makeAlert()
