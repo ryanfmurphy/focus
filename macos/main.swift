@@ -147,9 +147,8 @@ final class DB {
     private func exec(_ sql: String) { sqlite3_exec(db, sql, nil, nil, nil) }
 
     /// Insert a new in-progress session; returns its row id.
-    func startSession(reason: String, seconds: Int, focus: String, originalSessionId: Int64?,
-                      openSecondsStart: Int?) -> Int64? {
-        let sql = "INSERT INTO sessions (started_at, reason, seconds, focus, original_session_id, open_seconds_start) VALUES (?,?,?,?,?,?);"
+    func startSession(reason: String, seconds: Int, focus: String, originalSessionId: Int64?) -> Int64? {
+        let sql = "INSERT INTO sessions (started_at, reason, seconds, focus, original_session_id) VALUES (?,?,?,?,?);"
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return nil }
         defer { sqlite3_finalize(stmt) }
@@ -158,10 +157,25 @@ final class DB {
         sqlite3_bind_int(stmt, 3, Int32(seconds))
         sqlite3_bind_text(stmt, 4, focus, -1, SQLITE_TRANSIENT)
         if let o = originalSessionId { sqlite3_bind_int64(stmt, 5, o) } else { sqlite3_bind_null(stmt, 5) }
-        if let s = openSecondsStart { sqlite3_bind_int(stmt, 6, Int32(s)) } else { sqlite3_bind_null(stmt, 6) }
         guard sqlite3_step(stmt) == SQLITE_DONE else { return nil }
         return sqlite3_last_insert_rowid(db)
     }
+
+    /// Add to a session's accumulated popup-open seconds. COALESCE means the first
+    /// write counts from 0 (so a session closed without any popup stays NULL — the
+    /// column is only ever touched when there's time to add). Multiple openings of
+    /// the same popup (e.g. time's-up → "Add time" → later rate) sum together.
+    private func addOpenSeconds(_ column: String, id: Int64, seconds: Int) {
+        let sql = "UPDATE sessions SET \(column) = COALESCE(\(column), 0) + ? WHERE id=?;"
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_int(stmt, 1, Int32(seconds))
+        sqlite3_bind_int64(stmt, 2, id)
+        sqlite3_step(stmt)
+    }
+    func addOpenSecondsStart(id: Int64, seconds: Int) { addOpenSeconds("open_seconds_start", id: id, seconds: seconds) }
+    func addOpenSecondsEnd(id: Int64, seconds: Int)   { addOpenSeconds("open_seconds_end", id: id, seconds: seconds) }
 
     // Bind an optional note (empty → NULL) at the given parameter index.
     private func bindNote(_ stmt: OpaquePointer?, _ idx: Int32, _ note: String) {
@@ -173,7 +187,7 @@ final class DB {
     /// `openSecondsEnd` is how long the ending/rating popup stayed open (nil when
     /// closed without a popup, e.g. auto-proceed or a launch-time sweep).
     func endSession(id: Int64, status: String, rating: Int?, note: String = "", openSecondsEnd: Int? = nil) {
-        let sql = "UPDATE sessions SET ended_at=?, status=?, rating=?, note=?, open_seconds_end=? WHERE id=?;"
+        let sql = "UPDATE sessions SET ended_at=?, status=?, rating=?, note=? WHERE id=?;"
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
         defer { sqlite3_finalize(stmt) }
@@ -181,16 +195,16 @@ final class DB {
         sqlite3_bind_text(stmt, 2, status, -1, SQLITE_TRANSIENT)
         if let r = rating { sqlite3_bind_int(stmt, 3, Int32(r)) } else { sqlite3_bind_null(stmt, 3) }
         bindNote(stmt, 4, note)
-        if let e = openSecondsEnd { sqlite3_bind_int(stmt, 5, Int32(e)) } else { sqlite3_bind_null(stmt, 5) }
-        sqlite3_bind_int64(stmt, 6, id)
+        sqlite3_bind_int64(stmt, 5, id)
         sqlite3_step(stmt)
+        if let e = openSecondsEnd { addOpenSecondsEnd(id: id, seconds: e) }
     }
 
     /// Close a session as "interrupted", recording how many seconds it actually
     /// ran (overwriting the planned seconds), with an optional rating/note.
     func markInterrupted(id: Int64, elapsedSeconds: Int, rating: Int? = nil, note: String = "",
                          openSecondsEnd: Int? = nil) {
-        let sql = "UPDATE sessions SET ended_at=?, status='interrupted', seconds=?, rating=?, note=?, open_seconds_end=? WHERE id=?;"
+        let sql = "UPDATE sessions SET ended_at=?, status='interrupted', seconds=?, rating=?, note=? WHERE id=?;"
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
         defer { sqlite3_finalize(stmt) }
@@ -198,9 +212,9 @@ final class DB {
         sqlite3_bind_int(stmt, 2, Int32(elapsedSeconds))
         if let r = rating { sqlite3_bind_int(stmt, 3, Int32(r)) } else { sqlite3_bind_null(stmt, 3) }
         bindNote(stmt, 4, note)
-        if let e = openSecondsEnd { sqlite3_bind_int(stmt, 5, Int32(e)) } else { sqlite3_bind_null(stmt, 5) }
-        sqlite3_bind_int64(stmt, 6, id)
+        sqlite3_bind_int64(stmt, 5, id)
         sqlite3_step(stmt)
+        if let e = openSecondsEnd { addOpenSecondsEnd(id: id, seconds: e) }
     }
 
     /// Log an "Add time" event and bump the session's total seconds.
@@ -288,17 +302,17 @@ final class DB {
     }
 
     /// Set a rating and note on an already-completed session ("Rate unrated
-    /// sessions"). `openSecondsEnd` records how long that (deferred) rating popup
-    /// stayed open, since the session was completed earlier without one.
+    /// sessions"). `openSecondsEnd` accumulates how long that (deferred) rating
+    /// popup stayed open, on top of anything already recorded for the session.
     func setRating(id: Int64, rating: Int, note: String = "", openSecondsEnd: Int? = nil) {
         var stmt: OpaquePointer?
-        guard sqlite3_prepare_v2(db, "UPDATE sessions SET rating=?, note=?, open_seconds_end=? WHERE id=?;", -1, &stmt, nil) == SQLITE_OK else { return }
+        guard sqlite3_prepare_v2(db, "UPDATE sessions SET rating=?, note=? WHERE id=?;", -1, &stmt, nil) == SQLITE_OK else { return }
         defer { sqlite3_finalize(stmt) }
         sqlite3_bind_int(stmt, 1, Int32(rating))
         bindNote(stmt, 2, note)
-        if let e = openSecondsEnd { sqlite3_bind_int(stmt, 3, Int32(e)) } else { sqlite3_bind_null(stmt, 3) }
-        sqlite3_bind_int64(stmt, 4, id)
+        sqlite3_bind_int64(stmt, 3, id)
         sqlite3_step(stmt)
+        if let e = openSecondsEnd { addOpenSecondsEnd(id: id, seconds: e) }
     }
 
     /// Most recent sessions, newest first, for the history window.
@@ -935,8 +949,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         sessionOriginalId = originalSessionId
         deadline = Date().addingTimeInterval(Double(seconds))
         sessionId = db.startSession(reason: reason, seconds: seconds, focus: focus,
-                                    originalSessionId: originalSessionId,
-                                    openSecondsStart: openSecondsStart)
+                                    originalSessionId: originalSessionId)
+        if let id = sessionId, let s = openSecondsStart { db.addOpenSecondsStart(id: id, seconds: s) }
         if pushoverEnabled { sendPushover(title: "Focus started", message: "\(focus) — \(mmss(seconds))") }
         tick()
     }
@@ -1340,9 +1354,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         }
 
         switch promptTimeUp(focus: focus, seconds: sessionSeconds ?? 0) {
-        case .addTime(let extra):
-            // Keep the SAME session going: log the addition, extend, resume.
-            extendSession(by: extra)
+        case .addTime(let added, let popupOpen):
+            // Keep the SAME session going. Bank the time the time's-up popup was
+            // open (it accumulates with the eventual rating popup), then extend.
+            if let id = sessionId { db.addOpenSecondsEnd(id: id, seconds: popupOpen) }
+            extendSession(by: added)
             showing = false
 
         case .rate(let rating, let note, let openSeconds):
@@ -1357,7 +1373,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         }
     }
 
-    private enum TimeUpChoice { case rate(rating: Int, note: String, openSeconds: Int); case addTime(Int) }
+    private enum TimeUpChoice { case rate(rating: Int, note: String, openSeconds: Int); case addTime(added: Int, openSeconds: Int) }
 
     /// Time's-up modal: rate 1–10 (+ optional note) to finish, or add more time.
     private func promptTimeUp(focus: String, seconds: Int) -> TimeUpChoice {
@@ -1379,7 +1395,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
 
             if response == .alertSecondButtonReturn {
                 if let extra = askMinutes() {
-                    return .addTime(extra)
+                    return .addTime(added: extra, openSeconds: openSeconds())
                 }
                 continue   // cancelled the add → back to the time's-up modal
             }

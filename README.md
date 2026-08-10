@@ -144,8 +144,10 @@ rebuilds the binary and reloads the agent.
   sessions, the actual elapsed seconds), `focus`, `rating` (1–10, nullable),
   `status`, `note` (optional free text entered when rating), `open_seconds_start`
   / `open_seconds_end` (how long the session-start and ending/rating popups stayed
-  open, in whole seconds; `NULL` when a session was closed without a popup,
-  e.g. auto-proceed or a launch-time sweep). All durations are entered in whole
+  open, in whole seconds; **accumulated** — if a popup is shown more than once for
+  the session, e.g. time's-up → "Add time" → later rate, the seconds sum rather
+  than overwrite; `NULL` when a session was closed without any popup, e.g.
+  auto-proceed or a launch-time sweep). Planned durations are entered in whole
   minutes but stored as seconds (×60), and shown as `M:SS` in the history window.
 - **`queue`** — pending focuses (`created_at`, `seconds`, `focus`); FIFO by `id`.
 - **`time_additions`** — one row per "Add time" event (`session_id`, `added_at`,
