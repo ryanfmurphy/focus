@@ -142,10 +142,11 @@ rebuilds the binary and reloads the agent.
 - **`sessions`** — one row per focus session: `started_at`, `ended_at`, `reason`
   (what triggered it), `minutes` (planned duration; for interrupted sessions,
   the actual elapsed minutes), `focus`, `rating` (1–10, nullable), `status`,
-  `note` (optional free text entered when rating), `open_minutes_start` /
-  `open_minutes_end` (how long the session-start and ending/rating popups stayed
-  open, rounded to minutes; `NULL` when a session was closed without a popup,
-  e.g. auto-proceed or a launch-time sweep).
+  `note` (optional free text entered when rating), `open_seconds_start` /
+  `open_seconds_end` (how long the session-start and ending/rating popups stayed
+  open, in whole seconds; `NULL` when a session was closed without a popup,
+  e.g. auto-proceed or a launch-time sweep). Shown as `M:SS` in the history
+  window.
 - **`queue`** — pending focuses (`created_at`, `minutes`, `focus`); FIFO by `id`.
 - **`time_additions`** — one row per "Add time" event (`session_id`, `added_at`,
   `minutes`); the session's total `minutes` is also bumped.

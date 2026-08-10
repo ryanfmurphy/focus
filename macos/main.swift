@@ -84,16 +84,23 @@ final class DB {
             status     TEXT,          -- completed / interrupted (NULL while active)
             note       TEXT,          -- optional note written when rating
             original_session_id INTEGER, -- root of a pre-empt→continued chain (NULL if this is the original)
-            open_minutes_start INTEGER, -- minutes the session-start popup stayed open (rounded)
-            open_minutes_end   INTEGER  -- minutes the ending/rating popup stayed open (rounded)
+            open_seconds_start INTEGER, -- seconds the session-start popup stayed open
+            open_seconds_end   INTEGER  -- seconds the ending/rating popup stayed open
         );
         """)
         // Migrations for older DBs (each errors harmlessly if already applied).
         exec("ALTER TABLE sessions ADD COLUMN note TEXT;")
         exec("ALTER TABLE sessions RENAME COLUMN outcome TO status;")
         exec("ALTER TABLE sessions ADD COLUMN original_session_id INTEGER;")
-        exec("ALTER TABLE sessions ADD COLUMN open_minutes_start INTEGER;")
-        exec("ALTER TABLE sessions ADD COLUMN open_minutes_end INTEGER;")
+        exec("ALTER TABLE sessions ADD COLUMN open_seconds_start INTEGER;")
+        exec("ALTER TABLE sessions ADD COLUMN open_seconds_end INTEGER;")
+        // Popup-open durations were first stored as rounded minutes; convert any such
+        // columns to integer seconds (×60), then drop the old minute columns. Each
+        // statement no-ops harmlessly once the minute columns are gone.
+        exec("UPDATE sessions SET open_seconds_start = open_minutes_start * 60 WHERE open_seconds_start IS NULL AND open_minutes_start IS NOT NULL;")
+        exec("UPDATE sessions SET open_seconds_end = open_minutes_end * 60 WHERE open_seconds_end IS NULL AND open_minutes_end IS NOT NULL;")
+        exec("ALTER TABLE sessions DROP COLUMN open_minutes_start;")
+        exec("ALTER TABLE sessions DROP COLUMN open_minutes_end;")
         // FIFO queue of upcoming sessions. Front = lowest id; "add to end" is a
         // plain insert; "pop off" deletes the lowest id.
         exec("""
@@ -132,8 +139,8 @@ final class DB {
 
     /// Insert a new in-progress session; returns its row id.
     func startSession(reason: String, minutes: Int, focus: String, originalSessionId: Int64?,
-                      openMinutesStart: Int?) -> Int64? {
-        let sql = "INSERT INTO sessions (started_at, reason, minutes, focus, original_session_id, open_minutes_start) VALUES (?,?,?,?,?,?);"
+                      openSecondsStart: Int?) -> Int64? {
+        let sql = "INSERT INTO sessions (started_at, reason, minutes, focus, original_session_id, open_seconds_start) VALUES (?,?,?,?,?,?);"
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return nil }
         defer { sqlite3_finalize(stmt) }
@@ -142,7 +149,7 @@ final class DB {
         sqlite3_bind_int(stmt, 3, Int32(minutes))
         sqlite3_bind_text(stmt, 4, focus, -1, SQLITE_TRANSIENT)
         if let o = originalSessionId { sqlite3_bind_int64(stmt, 5, o) } else { sqlite3_bind_null(stmt, 5) }
-        if let s = openMinutesStart { sqlite3_bind_int(stmt, 6, Int32(s)) } else { sqlite3_bind_null(stmt, 6) }
+        if let s = openSecondsStart { sqlite3_bind_int(stmt, 6, Int32(s)) } else { sqlite3_bind_null(stmt, 6) }
         guard sqlite3_step(stmt) == SQLITE_DONE else { return nil }
         return sqlite3_last_insert_rowid(db)
     }
@@ -154,10 +161,10 @@ final class DB {
     }
 
     /// Close out a session with a status, (optionally) a rating, and a note.
-    /// `openMinutesEnd` is how long the ending/rating popup stayed open (nil when
+    /// `openSecondsEnd` is how long the ending/rating popup stayed open (nil when
     /// closed without a popup, e.g. auto-proceed or a launch-time sweep).
-    func endSession(id: Int64, status: String, rating: Int?, note: String = "", openMinutesEnd: Int? = nil) {
-        let sql = "UPDATE sessions SET ended_at=?, status=?, rating=?, note=?, open_minutes_end=? WHERE id=?;"
+    func endSession(id: Int64, status: String, rating: Int?, note: String = "", openSecondsEnd: Int? = nil) {
+        let sql = "UPDATE sessions SET ended_at=?, status=?, rating=?, note=?, open_seconds_end=? WHERE id=?;"
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
         defer { sqlite3_finalize(stmt) }
@@ -165,7 +172,7 @@ final class DB {
         sqlite3_bind_text(stmt, 2, status, -1, SQLITE_TRANSIENT)
         if let r = rating { sqlite3_bind_int(stmt, 3, Int32(r)) } else { sqlite3_bind_null(stmt, 3) }
         bindNote(stmt, 4, note)
-        if let e = openMinutesEnd { sqlite3_bind_int(stmt, 5, Int32(e)) } else { sqlite3_bind_null(stmt, 5) }
+        if let e = openSecondsEnd { sqlite3_bind_int(stmt, 5, Int32(e)) } else { sqlite3_bind_null(stmt, 5) }
         sqlite3_bind_int64(stmt, 6, id)
         sqlite3_step(stmt)
     }
@@ -173,8 +180,8 @@ final class DB {
     /// Close a session as "interrupted", recording how many minutes it actually
     /// ran (overwriting the planned minutes), with an optional rating/note.
     func markInterrupted(id: Int64, elapsedMinutes: Int, rating: Int? = nil, note: String = "",
-                         openMinutesEnd: Int? = nil) {
-        let sql = "UPDATE sessions SET ended_at=?, status='interrupted', minutes=?, rating=?, note=?, open_minutes_end=? WHERE id=?;"
+                         openSecondsEnd: Int? = nil) {
+        let sql = "UPDATE sessions SET ended_at=?, status='interrupted', minutes=?, rating=?, note=?, open_seconds_end=? WHERE id=?;"
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
         defer { sqlite3_finalize(stmt) }
@@ -182,7 +189,7 @@ final class DB {
         sqlite3_bind_int(stmt, 2, Int32(elapsedMinutes))
         if let r = rating { sqlite3_bind_int(stmt, 3, Int32(r)) } else { sqlite3_bind_null(stmt, 3) }
         bindNote(stmt, 4, note)
-        if let e = openMinutesEnd { sqlite3_bind_int(stmt, 5, Int32(e)) } else { sqlite3_bind_null(stmt, 5) }
+        if let e = openSecondsEnd { sqlite3_bind_int(stmt, 5, Int32(e)) } else { sqlite3_bind_null(stmt, 5) }
         sqlite3_bind_int64(stmt, 6, id)
         sqlite3_step(stmt)
     }
@@ -272,15 +279,15 @@ final class DB {
     }
 
     /// Set a rating and note on an already-completed session ("Rate unrated
-    /// sessions"). `openMinutesEnd` records how long that (deferred) rating popup
+    /// sessions"). `openSecondsEnd` records how long that (deferred) rating popup
     /// stayed open, since the session was completed earlier without one.
-    func setRating(id: Int64, rating: Int, note: String = "", openMinutesEnd: Int? = nil) {
+    func setRating(id: Int64, rating: Int, note: String = "", openSecondsEnd: Int? = nil) {
         var stmt: OpaquePointer?
-        guard sqlite3_prepare_v2(db, "UPDATE sessions SET rating=?, note=?, open_minutes_end=? WHERE id=?;", -1, &stmt, nil) == SQLITE_OK else { return }
+        guard sqlite3_prepare_v2(db, "UPDATE sessions SET rating=?, note=?, open_seconds_end=? WHERE id=?;", -1, &stmt, nil) == SQLITE_OK else { return }
         defer { sqlite3_finalize(stmt) }
         sqlite3_bind_int(stmt, 1, Int32(rating))
         bindNote(stmt, 2, note)
-        if let e = openMinutesEnd { sqlite3_bind_int(stmt, 3, Int32(e)) } else { sqlite3_bind_null(stmt, 3) }
+        if let e = openSecondsEnd { sqlite3_bind_int(stmt, 3, Int32(e)) } else { sqlite3_bind_null(stmt, 3) }
         sqlite3_bind_int64(stmt, 4, id)
         sqlite3_step(stmt)
     }
@@ -289,7 +296,7 @@ final class DB {
     func recent(limit: Int = 500) -> [SessionRow] {
         let sql = """
         SELECT started_at, ended_at, minutes, focus, rating, status, note,
-               open_minutes_start, open_minutes_end
+               open_seconds_start, open_seconds_end
         FROM sessions ORDER BY id DESC LIMIT ?;
         """
         var stmt: OpaquePointer?
@@ -315,8 +322,8 @@ final class DB {
                 rating: intOrNil(4),
                 status: text(5),
                 note: text(6),
-                openMinutesStart: intOrNil(7),
-                openMinutesEnd: intOrNil(8)))
+                openSecondsStart: intOrNil(7),
+                openSecondsEnd: intOrNil(8)))
         }
         return rows
     }
@@ -435,8 +442,8 @@ struct SessionRow {
     let rating: Int?
     let status: String?
     let note: String?
-    let openMinutesStart: Int?
-    let openMinutesEnd: Int?
+    let openSecondsStart: Int?
+    let openSecondsEnd: Int?
 }
 
 // An NSTableView that supports ⌘C — it forwards the selection to `onCopy`
@@ -636,7 +643,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
                             originalSessionId: sessionOriginalId ?? id)
         }
         beginSession(reason: preempting ? "preempt" : "manual", minutes: minutes, focus: focus,
-                     openMinutesStart: openStart)
+                     openSecondsStart: openStart)
         if preempting { db.recordPreempt(preemptedSessionId: preemptedId, newSessionId: sessionId) }
     }
 
@@ -701,8 +708,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         currentFocus = nil; deadline = nil; sessionId = nil
         sessionStart = nil; sessionMinutes = nil; sessionOriginalId = nil
         hudWindow.orderOut(nil)
-        let (rating, note, openMinutes) = promptRating(focus: "\(focus) · \(elapsed) min", title: "Rate this session")
-        db.markInterrupted(id: id, elapsedMinutes: elapsed, rating: rating, note: note, openMinutesEnd: openMinutes)
+        let (rating, note, openSeconds) = promptRating(focus: "\(focus) · \(elapsed) min", title: "Rate this session")
+        db.markInterrupted(id: id, elapsedMinutes: elapsed, rating: rating, note: note, openSecondsEnd: openSeconds)
         showing = false
         promptForFocus(reason: "after-session")
     }
@@ -772,14 +779,14 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             title: "Welcome back",
             info: "What's your one focus right now, and for how long?",
             confirm: "Start", cancellable: false) else { return }
-        beginSession(reason: reason, minutes: minutes, focus: answer, openMinutesStart: openStart)
+        beginSession(reason: reason, minutes: minutes, focus: answer, openSecondsStart: openStart)
     }
 
     /// Non-editable confirmation for the next queued focus. Pops it off and starts.
     /// When `autoEligible` and the auto-proceed preference is on, a 10s countdown
     /// auto-starts it (as if "Start" were clicked).
     private func confirmQueued(_ item: QueueItem, autoEligible: Bool) {
-        let confirmOpenedAt = Date()   // how long this confirm stays up → the queued session's open_minutes_start
+        let confirmOpenedAt = Date()   // how long this confirm stays up → the queued session's open_seconds_start
         let alert = makeAlert()
         alert.messageText = "Next focus"
         alert.informativeText = "\(item.focus)\n\n\(item.minutes) minutes"
@@ -833,7 +840,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
                 title: "Pre-empt with a new focus",
                 info: "This runs now; the queued focus stays next in line.",
                 confirm: "Start", cancellable: true) {
-                beginSession(reason: "preempt", minutes: minutes, focus: focus, openMinutesStart: openStart)
+                beginSession(reason: "preempt", minutes: minutes, focus: focus, openSecondsStart: openStart)
                 // Nothing was underway → preempted_session_id is NULL.
                 db.recordPreempt(preemptedSessionId: nil, newSessionId: sessionId)
                 return
@@ -842,15 +849,15 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         }
 
         db.removeFromQueue(id: item.id)
-        let queuedOpenStart = Int((Date().timeIntervalSince(confirmOpenedAt) / 60).rounded())
+        let queuedOpenStart = Int(Date().timeIntervalSince(confirmOpenedAt).rounded())
         beginSession(reason: "queue", minutes: item.minutes, focus: item.focus,
-                     originalSessionId: item.originalSessionId, openMinutesStart: queuedOpenStart)
+                     originalSessionId: item.originalSessionId, openSecondsStart: queuedOpenStart)
     }
 
     /// Editable "focus + minutes" modal. Loops until valid; returns nil only if
     /// `cancellable` and the user cancels.
     private func askFocusAndMinutes(title: String, info: String, confirm: String,
-                                    cancellable: Bool) -> (focus: String, minutes: Int, openMinutes: Int)? {
+                                    cancellable: Bool) -> (focus: String, minutes: Int, openSeconds: Int)? {
         NSApp.activate(ignoringOtherApps: true)
 
         let focusField = NSTextField(frame: NSRect(x: 0, y: 34, width: 320, height: 24))
@@ -872,7 +879,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         accessory.addSubview(minutesField)
         accessory.addSubview(elapsed)
 
-        let (elapsedTimer, openMinutes) = startElapsedTimer(elapsed)
+        let (elapsedTimer, openSeconds) = startElapsedTimer(elapsed)
         defer { elapsedTimer.invalidate() }
 
         while true {
@@ -891,7 +898,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
 
             let answer = focusField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
             let minutes = Int(minutesField.stringValue.trimmingCharacters(in: .whitespaces)) ?? 0
-            if !answer.isEmpty && minutes > 0 { return (answer, minutes, openMinutes()) }
+            if !answer.isEmpty && minutes > 0 { return (answer, minutes, openSeconds()) }
             // otherwise invalid: loop and ask again
         }
     }
@@ -911,7 +918,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     }
 
     private func beginSession(reason: String, minutes: Int, focus: String, originalSessionId: Int64? = nil,
-                              openMinutesStart: Int? = nil) {
+                              openSecondsStart: Int? = nil) {
         currentFocus = focus
         sessionStart = Date()
         sessionMinutes = minutes
@@ -919,7 +926,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         deadline = Date().addingTimeInterval(Double(minutes) * 60)
         sessionId = db.startSession(reason: reason, minutes: minutes, focus: focus,
                                     originalSessionId: originalSessionId,
-                                    openMinutesStart: openMinutesStart)
+                                    openSecondsStart: openSecondsStart)
         if pushoverEnabled { sendPushover(title: "Focus started", message: "\(focus) — \(minutes) min") }
         tick()
     }
@@ -986,7 +993,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     // Copy the selected history rows to the clipboard as TSV (with a header).
     private func copyHistoryRows(_ indexes: IndexSet) {
         guard !indexes.isEmpty else { return }
-        var lines = ["Started\tMinutes\tRating\tStatus\tFocus\tOpen (start)\tOpen (end)\tNote"]
+        var lines = ["Started\tMinutes\tRating\tStatus\tFocus\tOpen start (s)\tOpen end (s)\tNote"]
         for i in indexes where i < historyRows.count {
             let r = historyRows[i]
             let fields = [
@@ -995,8 +1002,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
                 r.rating.map { "\($0)" } ?? "",
                 r.status ?? (r.endedAt == nil ? "active" : ""),
                 r.focus,
-                r.openMinutesStart.map { "\($0)" } ?? "",
-                r.openMinutesEnd.map { "\($0)" } ?? "",
+                r.openSecondsStart.map { "\($0)" } ?? "",
+                r.openSecondsEnd.map { "\($0)" } ?? "",
                 r.note ?? "",
             ].map(tsvClean)
             lines.append(fields.joined(separator: "\t"))
@@ -1101,8 +1108,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         defer { showing = false }
         for s in db.unratedCompleted() {
             let label = "\(whenLabel(s.startedAt)) · \(s.focus) · \(s.minutes) min"
-            let (rating, note, openMinutes) = promptRating(focus: label, title: "Rate session")
-            db.setRating(id: s.id, rating: rating, note: note, openMinutesEnd: openMinutes)
+            let (rating, note, openSeconds) = promptRating(focus: label, title: "Rate session")
+            db.setRating(id: s.id, rating: rating, note: note, openSecondsEnd: openSeconds)
         }
     }
 
@@ -1147,8 +1154,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         case "min":       text = "\(r.minutes)"; align = .right
         case "rating":    text = r.rating.map { "\($0)/10" } ?? "—"; align = .right
         case "status":    text = r.status ?? (r.endedAt == nil ? "active" : "—")
-        case "openstart": text = r.openMinutesStart.map { "\($0)m" } ?? "—"; align = .right
-        case "openend":   text = r.openMinutesEnd.map { "\($0)m" } ?? "—"; align = .right
+        case "openstart": text = r.openSecondsStart.map { mmss($0) } ?? "—"; align = .right
+        case "openend":   text = r.openSecondsEnd.map { mmss($0) } ?? "—"; align = .right
         case "note":      text = r.note ?? ""
         default:          text = r.focus
         }
@@ -1325,25 +1332,25 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             extendSession(by: extra)
             showing = false
 
-        case .rate(let rating, let note, let openMinutes):
+        case .rate(let rating, let note, let openSeconds):
             let endedId = sessionId
             currentFocus = nil
             deadline = nil
             sessionId = nil
-            if let id = endedId { db.endSession(id: id, status: "completed", rating: rating, note: note, openMinutesEnd: openMinutes) }
+            if let id = endedId { db.endSession(id: id, status: "completed", rating: rating, note: note, openSecondsEnd: openSeconds) }
             // Roll straight into the next session: having rated, set a new focus.
             showing = false
             promptForFocus(reason: "after-session")
         }
     }
 
-    private enum TimeUpChoice { case rate(rating: Int, note: String, openMinutes: Int); case addTime(Int) }
+    private enum TimeUpChoice { case rate(rating: Int, note: String, openSeconds: Int); case addTime(Int) }
 
     /// Time's-up modal: rate 1–10 (+ optional note) to finish, or add more time.
     private func promptTimeUp(focus: String, minutes: Int) -> TimeUpChoice {
         NSApp.activate(ignoringOtherApps: true)
         let (accessory, ratingField, noteField, elapsed) = ratingAccessory()
-        let (timer, openMinutes) = startElapsedTimer(elapsed)
+        let (timer, openSeconds) = startElapsedTimer(elapsed)
         defer { timer.invalidate() }
         while true {
             let alert = makeAlert()
@@ -1367,7 +1374,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             if (1...10).contains(rating) {
                 return .rate(rating: rating,
                              note: noteField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines),
-                             openMinutes: openMinutes())
+                             openSeconds: openSeconds())
             }
             // invalid rating → loop
         }
@@ -1404,8 +1411,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         sessionMinutes = nil
         sessionOriginalId = nil
         hudWindow.orderOut(nil)
-        let (rating, note, openMinutes) = promptRating(focus: focus, title: "Rate this session")
-        db.endSession(id: id, status: "completed", rating: rating, note: note, openMinutesEnd: openMinutes)
+        let (rating, note, openSeconds) = promptRating(focus: focus, title: "Rate this session")
+        db.endSession(id: id, status: "completed", rating: rating, note: note, openSecondsEnd: openSeconds)
     }
 
     /// A rating (1–10) field over an optional note field, for the rating modals.
@@ -1430,22 +1437,22 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
 
     /// A `.common`-mode timer that shows how long the modal has been open, so it
     /// keeps ticking while runModal blocks. Caller invalidates the timer, and can
-    /// call `openMinutes()` at close time to get the elapsed minutes (rounded).
-    private func startElapsedTimer(_ label: NSTextField) -> (timer: Timer, openMinutes: () -> Int) {
+    /// call `openSeconds()` at close time to get the elapsed seconds (rounded).
+    private func startElapsedTimer(_ label: NSTextField) -> (timer: Timer, openSeconds: () -> Int) {
         let openedAt = Date()
         label.stringValue = "Open for 0:00"
         let timer = Timer(timeInterval: 1, repeats: true) { _ in
             label.stringValue = "Open for \(mmss(Int(Date().timeIntervalSince(openedAt))))"
         }
         RunLoop.main.add(timer, forMode: .common)
-        return (timer, { Int((Date().timeIntervalSince(openedAt) / 60).rounded()) })
+        return (timer, { Int(Date().timeIntervalSince(openedAt).rounded()) })
     }
 
     /// Mandatory 1–10 rating modal (+ optional note) — floating, loops until valid.
-    private func promptRating(focus: String, title: String) -> (rating: Int, note: String, openMinutes: Int) {
+    private func promptRating(focus: String, title: String) -> (rating: Int, note: String, openSeconds: Int) {
         NSApp.activate(ignoringOtherApps: true)
         let (accessory, ratingField, noteField, elapsed) = ratingAccessory()
-        let (timer, openMinutes) = startElapsedTimer(elapsed)
+        let (timer, openSeconds) = startElapsedTimer(elapsed)
         defer { timer.invalidate() }
         var rating = 0
         while rating < 1 || rating > 10 {
@@ -1460,7 +1467,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             alert.runModal()
             rating = Int(ratingField.stringValue.trimmingCharacters(in: .whitespaces)) ?? 0
         }
-        return (rating, noteField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines), openMinutes())
+        return (rating, noteField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines), openSeconds())
     }
 
     // ---- UI construction ----
