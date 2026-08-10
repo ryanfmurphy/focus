@@ -91,6 +91,7 @@ based on state):
 | **See queue (N)** | always | Table of pending queued focuses, next-up first (N = current length) |
 | **Clear queue** | queue non-empty | Empty the queue (with confirmation) |
 | **Rate unrated sessions (N)** | N > 0 | Loop through deferred/unrated completed sessions oldest-first and rate each |
+| **Show current task** | always | Checkbox — toggles the floating corner pill on/off (persisted). Menu-bar icon and all timing/logging are unaffected |
 | **Settings** | always | Toggle the three global preference checkboxes without starting a session |
 | **Quit focus** | always | Quit the app |
 

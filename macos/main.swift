@@ -634,6 +634,13 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         db.recordPreempt(preemptedSessionId: nil, newSessionId: nil)
     }
 
+    // Toggle the floating corner pill on/off (persisted). The menu-bar icon and
+    // all timing/logging are unaffected — only the pill is suppressed.
+    @objc func toggleShowPill() {
+        showPillEnabled.toggle()
+        tick()   // apply immediately: re-show or hide the pill
+    }
+
     // Prompt for minutes and add them to the running session — same as choosing
     // "Add time" at time's up, but available any time from the menu.
     @objc func addTimeToCurrent() {
@@ -684,6 +691,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         if menuItem.action == #selector(completeTask) || menuItem.action == #selector(abortTask)
             || menuItem.action == #selector(addTimeToCurrent) {
             return currentFocus != nil
+        }
+        if menuItem.action == #selector(toggleShowPill) {
+            menuItem.state = showPillEnabled ? .on : .off
+            return true
         }
         if menuItem.action == #selector(changeFocus) {
             menuItem.title = currentFocus != nil ? "Pre-empt this task" : "Set focus"
@@ -1149,7 +1160,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             }
             hudLabel.stringValue = "🎯 \(focus)    \(mmss(remaining))"
             layoutHUD()
-            hudWindow.orderFrontRegardless()
+            if showPillEnabled {
+                hudWindow.orderFrontRegardless()
+            } else {
+                hudWindow.orderOut(nil)
+            }
         } else {
             hudWindow.orderOut(nil)
         }
@@ -1167,6 +1182,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     private var autoProceedEnabled: Bool {
         get { UserDefaults.standard.bool(forKey: "autoProceed") }                    // default off
         set { UserDefaults.standard.set(newValue, forKey: "autoProceed") }
+    }
+    private var showPillEnabled: Bool {
+        get { UserDefaults.standard.object(forKey: "showPill") as? Bool ?? true }    // default on
+        set { UserDefaults.standard.set(newValue, forKey: "showPill") }
     }
 
     /// The three preference checkboxes, initialized from the stored values. Shared
@@ -1458,6 +1477,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         menu.addItem(withTitle: "Clear queue", action: #selector(clearQueue), keyEquivalent: "")
         menu.addItem(withTitle: "Rate unrated sessions", action: #selector(rateUnrated), keyEquivalent: "")
         menu.addItem(.separator())
+        menu.addItem(withTitle: "Show current task", action: #selector(toggleShowPill), keyEquivalent: "")
         menu.addItem(withTitle: "Settings", action: #selector(showSettings), keyEquivalent: "")
         menu.addItem(withTitle: "Quit focus", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         for item in menu.items where item.action != #selector(NSApplication.terminate(_:)) {
