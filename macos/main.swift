@@ -1217,14 +1217,24 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
                 rep.draw(at: NSPoint(x: x, y: 0))
             }
             image.unlockFocus()
-            item.setDraggingFrame(rowRect, contents: image)
+            // Keep AppKit's vertical placement (already correct/under the cursor)
+            // and only widen the item to the full row — recomputing the frame from
+            // rect(ofRow:) uses flipped Y and makes the image fly in from a corner.
+            var frame = item.draggingFrame
+            frame.origin.x = rowRect.minX
+            frame.size = rowRect.size
+            item.setDraggingFrame(frame, contents: image)
         }
     }
 
-    // Only allow dropping into the gap between rows (reorder), not onto a row.
+    // Reorder is always "between rows": if the cursor is over the middle of a row
+    // (proposed .on), retarget to the gap above it so the insertion cue shows
+    // consistently. Always a move within the queue.
     func tableView(_ tableView: NSTableView, validateDrop info: NSDraggingInfo,
                    proposedRow row: Int, proposedDropOperation dropOperation: NSTableView.DropOperation) -> NSDragOperation {
-        (tableView === queueTable && dropOperation == .above) ? .move : []
+        guard tableView === queueTable else { return [] }
+        if dropOperation == .on { tableView.setDropRow(row, dropOperation: .above) }
+        return .move
     }
 
     func tableView(_ tableView: NSTableView, acceptDrop info: NSDraggingInfo,
