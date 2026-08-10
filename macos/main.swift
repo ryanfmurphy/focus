@@ -100,6 +100,16 @@ final class DB {
             minutes    INTEGER
         );
         """)
+        // One row per pre-empt. preempted_session_id is the interrupted session
+        // (NULL if nothing was underway); new_session_id is the one that barged in.
+        exec("""
+        CREATE TABLE IF NOT EXISTS preempts (
+            id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+            at                   TEXT NOT NULL,
+            preempted_session_id INTEGER,
+            new_session_id       INTEGER
+        );
+        """)
     }
 
     private func exec(_ sql: String) { sqlite3_exec(db, sql, nil, nil, nil) }
@@ -173,6 +183,19 @@ final class DB {
             sqlite3_step(upd)
         }
         sqlite3_finalize(upd)
+    }
+
+    /// Record a pre-empt: `preemptedSessionId` = the interrupted session (nil if
+    /// none was underway), `newSessionId` = the session that started in its place.
+    func recordPreempt(preemptedSessionId: Int64?, newSessionId: Int64?) {
+        let sql = "INSERT INTO preempts (at, preempted_session_id, new_session_id) VALUES (?,?,?);"
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, isoNow(), -1, SQLITE_TRANSIENT)
+        if let p = preemptedSessionId { sqlite3_bind_int64(stmt, 2, p) } else { sqlite3_bind_null(stmt, 2) }
+        if let n = newSessionId { sqlite3_bind_int64(stmt, 3, n) } else { sqlite3_bind_null(stmt, 3) }
+        sqlite3_step(stmt)
     }
 
     /// Sessions never closed out (ended_at IS NULL), newest first — i.e. a
@@ -556,7 +579,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         guard let (focus, minutes) = askFocusAndMinutes(
             title: title, info: info, confirm: "Start", cancellable: preempting) else { return }
 
+        var preemptedId: Int64? = nil
         if preempting, let id = sessionId, let curFocus = currentFocus, let dl = deadline {
+            preemptedId = id
             let remaining = max(1, Int((dl.timeIntervalSinceNow / 60).rounded()))
             let elapsed = max(0, Int((Date().timeIntervalSince(sessionStart ?? Date()) / 60).rounded()))
             // Complete the existing record as interrupted, recording elapsed minutes.
@@ -565,6 +590,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             db.enqueueFront(focus: continuedName(curFocus), minutes: remaining)
         }
         beginSession(reason: preempting ? "preempt" : "manual", minutes: minutes, focus: focus)
+        if preempting { db.recordPreempt(preemptedSessionId: preemptedId, newSessionId: sessionId) }
     }
 
     // Prompt for minutes and add them to the running session — same as choosing
@@ -723,6 +749,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
                 info: "This runs now; the queued focus stays next in line.",
                 confirm: "Start", cancellable: true) {
                 beginSession(reason: "preempt", minutes: minutes, focus: focus)
+                // Nothing was underway → preempted_session_id is NULL.
+                db.recordPreempt(preemptedSessionId: nil, newSessionId: sessionId)
                 return
             }
             // Cancelled the pre-empt → fall through and start the queued one.
