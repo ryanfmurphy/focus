@@ -1194,9 +1194,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         return item
     }
 
-    // Drag the whole row, not just the clicked cell: replace each dragging item's
-    // image with a PDF snapshot of the row's full width from the table view (PDF
-    // renders the text reliably regardless of layer backing).
+    // Drag the whole row, not just the clicked cell. Composite each cell view's
+    // own snapshot at its column offset (cell views are plain text labels and
+    // snapshot reliably, unlike the layer-backed row view).
     func tableView(_ tableView: NSTableView, draggingSession session: NSDraggingSession,
                    willBeginAt screenPoint: NSPoint, forRowIndexes rowIndexes: IndexSet) {
         guard tableView === queueTable else { return }
@@ -1204,9 +1204,19 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         session.enumerateDraggingItems(options: [], for: tableView,
                                        classes: [NSPasteboardItem.self], searchOptions: [:]) { item, index, _ in
             guard index < rows.count else { return }
-            let rowRect = tableView.rect(ofRow: rows[index])
-            guard rowRect.width > 0, rowRect.height > 0,
-                  let image = NSImage(data: tableView.dataWithPDF(inside: rowRect)) else { return }
+            let row = rows[index]
+            let rowRect = tableView.rect(ofRow: row)
+            guard rowRect.width > 1, rowRect.height > 1 else { return }
+            let image = NSImage(size: rowRect.size)
+            image.lockFocus()
+            for col in 0..<tableView.numberOfColumns {
+                guard let cell = tableView.view(atColumn: col, row: row, makeIfNecessary: true),
+                      let rep = cell.bitmapImageRepForCachingDisplay(in: cell.bounds) else { continue }
+                cell.cacheDisplay(in: cell.bounds, to: rep)
+                let x = tableView.frameOfCell(atColumn: col, row: row).minX - rowRect.minX
+                rep.draw(at: NSPoint(x: x, y: 0))
+            }
+            image.unlockFocus()
             item.setDraggingFrame(rowRect, contents: image)
         }
     }
