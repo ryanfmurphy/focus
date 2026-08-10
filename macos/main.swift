@@ -1268,7 +1268,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     /// Time's-up modal: rate 1–10 (+ optional note) to finish, or add more time.
     private func promptTimeUp(focus: String, minutes: Int) -> TimeUpChoice {
         NSApp.activate(ignoringOtherApps: true)
-        let (accessory, ratingField, noteField) = ratingAccessory()
+        let (accessory, ratingField, noteField, elapsed) = ratingAccessory()
+        let timer = startElapsedTimer(elapsed)
+        defer { timer.invalidate() }
         while true {
             let alert = makeAlert()
             alert.messageText = "Time's up"
@@ -1331,21 +1333,40 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     }
 
     /// A rating (1–10) field over an optional note field, for the rating modals.
-    private func ratingAccessory() -> (view: NSView, rating: NSTextField, note: NSTextField) {
+    private func ratingAccessory() -> (view: NSView, rating: NSTextField, note: NSTextField, elapsed: NSTextField) {
         let ratingField = NSTextField(frame: NSRect(x: 0, y: 34, width: 80, height: 24))
         ratingField.placeholderString = "1–10"
         let noteField = NSTextField(frame: NSRect(x: 0, y: 2, width: 320, height: 24))
         noteField.placeholderString = "Note (optional)"
-        let view = NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 60))
+        let elapsed = NSTextField(labelWithString: "")
+        elapsed.frame = NSRect(x: 0, y: 62, width: 320, height: 18)
+        elapsed.font = NSFont.systemFont(ofSize: 11)
+        elapsed.textColor = .secondaryLabelColor
+        let view = NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 84))
         view.addSubview(ratingField)
         view.addSubview(noteField)
-        return (view, ratingField, noteField)
+        view.addSubview(elapsed)
+        return (view, ratingField, noteField, elapsed)
+    }
+
+    /// A `.common`-mode timer that shows how long the modal has been open, so it
+    /// keeps ticking while runModal blocks. Caller invalidates it.
+    private func startElapsedTimer(_ label: NSTextField) -> Timer {
+        let openedAt = Date()
+        label.stringValue = "Open for 0:00"
+        let timer = Timer(timeInterval: 1, repeats: true) { _ in
+            label.stringValue = "Open for \(mmss(Int(Date().timeIntervalSince(openedAt))))"
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        return timer
     }
 
     /// Mandatory 1–10 rating modal (+ optional note) — floating, loops until valid.
     private func promptRating(focus: String, title: String) -> (rating: Int, note: String) {
         NSApp.activate(ignoringOtherApps: true)
-        let (accessory, ratingField, noteField) = ratingAccessory()
+        let (accessory, ratingField, noteField, elapsed) = ratingAccessory()
+        let timer = startElapsedTimer(elapsed)
+        defer { timer.invalidate() }
         var rating = 0
         while rating < 1 || rating > 10 {
             let alert = makeAlert()
