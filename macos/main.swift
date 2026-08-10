@@ -937,7 +937,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
 
         if historyWindow == nil {
             let window = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 900, height: 560),
+                contentRect: NSRect(x: 0, y: 0, width: 1040, height: 560),
                 styleMask: [.titled, .closable, .resizable, .miniaturizable],
                 backing: .buffered, defer: false)
             window.title = "Focus history"
@@ -947,13 +947,16 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             let scroll = NSScrollView(frame: window.contentView!.bounds)
             scroll.autoresizingMask = [.width, .height]
             scroll.hasVerticalScroller = true
+            scroll.hasHorizontalScroller = true   // let wide columns (Focus/Note) scroll
             scroll.borderType = .noBorder
 
             let table = CopyableTableView()
             table.dataSource = self
             table.delegate = self
             table.usesAlternatingRowBackgroundColors = true
-            table.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
+            // Keep each column's natural width; total can exceed the window and
+            // scroll horizontally, so Focus/Note aren't squeezed.
+            table.columnAutoresizingStyle = .noColumnAutoresizing
             table.rowHeight = 22
             table.allowsColumnResizing = true
             table.allowsMultipleSelection = true   // Shift/⌘-click to select a range
@@ -973,10 +976,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             addColumn("min", "Min", width: 48, min: 40, align: .right)
             addColumn("rating", "Rating", width: 60, min: 50, align: .right)
             addColumn("status", "Status", width: 95, min: 70)
-            addColumn("focus", "Focus", width: 240, min: 150)
+            addColumn("focus", "Focus", width: 360, min: 150)
+            addColumn("note", "Note", width: 320, min: 100)
             addColumn("openstart", "Start popup open", width: 110, min: 90, align: .right)
             addColumn("openend", "End popup open", width: 110, min: 90, align: .right)
-            addColumn("note", "Note", width: 220, min: 100)   // flexible last column
 
             scroll.documentView = table
             window.contentView = scroll
@@ -993,7 +996,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     // Copy the selected history rows to the clipboard as TSV (with a header).
     private func copyHistoryRows(_ indexes: IndexSet) {
         guard !indexes.isEmpty else { return }
-        var lines = ["Started\tMinutes\tRating\tStatus\tFocus\tStart popup open (s)\tEnd popup open (s)\tNote"]
+        var lines = ["Started\tMinutes\tRating\tStatus\tFocus\tNote\tStart popup open (s)\tEnd popup open (s)"]
         for i in indexes where i < historyRows.count {
             let r = historyRows[i]
             let fields = [
@@ -1002,9 +1005,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
                 r.rating.map { "\($0)" } ?? "",
                 r.status ?? (r.endedAt == nil ? "active" : ""),
                 r.focus,
+                r.note ?? "",
                 r.openSecondsStart.map { "\($0)" } ?? "",
                 r.openSecondsEnd.map { "\($0)" } ?? "",
-                r.note ?? "",
             ].map(tsvClean)
             lines.append(fields.joined(separator: "\t"))
         }
