@@ -47,6 +47,14 @@ private let localTimeFormatter: DateFormatter = {
     f.timeZone = .current
     return f
 }()
+// Time-of-day only, for the queue's estimated start/finish columns.
+private let localClockFormatter: DateFormatter = {
+    let f = DateFormatter()
+    f.locale = Locale(identifier: "en_US_POSIX")
+    f.dateFormat = "h:mm a"
+    f.timeZone = .current
+    return f
+}()
 
 // SQLite wants to know whether the bound string outlives the call; TRANSIENT
 // tells it to copy, so passing a temporary Swift string is safe.
@@ -455,6 +463,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     private var queueWindow: NSWindow?
     private var queueTable: NSTableView?
     private var queueRows: [QueueItem] = []
+    private var queueEstimates: [(start: Date, finish: Date)] = []
     private lazy var alertIcon = emojiImage("🎯", size: 256)
 
     // NSAlert's default icon is the (missing) app icon; force 🎯 on every modal.
@@ -942,9 +951,21 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     @objc func showQueue() {
         queueRows = db.queueItems()
 
+        // Estimated schedule: start from when the current session finishes (its
+        // deadline, if one is running and still ahead), else now, then chain each
+        // queued item's minutes.
+        var cursor = Date()
+        if let dl = deadline, dl > cursor { cursor = dl }
+        queueEstimates = queueRows.map { item in
+            let start = cursor
+            let finish = cursor.addingTimeInterval(Double(item.minutes) * 60)
+            cursor = finish
+            return (start, finish)
+        }
+
         if queueWindow == nil {
             let window = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 460, height: 360),
+                contentRect: NSRect(x: 0, y: 0, width: 640, height: 360),
                 styleMask: [.titled, .closable, .resizable, .miniaturizable],
                 backing: .buffered, defer: false)
             window.title = "Focus queue"
@@ -975,7 +996,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             }
             addColumn("pos", "#", width: 36, min: 30, align: .right)
             addColumn("min", "Min", width: 48, min: 40, align: .right)
-            addColumn("focus", "Focus (next up first)", width: 320, min: 150)
+            addColumn("start", "Est. start", width: 90, min: 70, align: .right)
+            addColumn("finish", "Est. finish", width: 90, min: 70, align: .right)
+            addColumn("focus", "Focus (next up first)", width: 300, min: 150)
 
             scroll.documentView = table
             window.contentView = scroll
@@ -1040,10 +1063,13 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             let q = queueRows[row]
             let text: String
             var align: NSTextAlignment = .left
+            let est = row < queueEstimates.count ? queueEstimates[row] : nil
             switch id {
-            case "pos": text = "\(row + 1)"; align = .right
-            case "min": text = "\(q.minutes)"; align = .right
-            default:    text = q.focus
+            case "pos":    text = "\(row + 1)"; align = .right
+            case "min":    text = "\(q.minutes)"; align = .right
+            case "start":  text = est.map { localClockFormatter.string(from: $0.start) } ?? ""; align = .right
+            case "finish": text = est.map { localClockFormatter.string(from: $0.finish) } ?? ""; align = .right
+            default:       text = q.focus
             }
             return historyCell(tableView, id: id, text: text, align: align)
         }
