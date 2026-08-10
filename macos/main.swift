@@ -1194,6 +1194,24 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         return item
     }
 
+    // Drag the whole row, not just the clicked cell: replace each dragging item's
+    // image with a snapshot of its full row view.
+    func tableView(_ tableView: NSTableView, draggingSession session: NSDraggingSession,
+                   willBeginAt screenPoint: NSPoint, forRowIndexes rowIndexes: IndexSet) {
+        guard tableView === queueTable else { return }
+        let rows = Array(rowIndexes)
+        session.enumerateDraggingItems(options: [], for: tableView,
+                                       classes: [NSPasteboardItem.self], searchOptions: [:]) { item, index, _ in
+            guard index < rows.count,
+                  let rowView = tableView.rowView(atRow: rows[index], makeIfNecessary: true),
+                  let rep = rowView.bitmapImageRepForCachingDisplay(in: rowView.bounds) else { return }
+            rowView.cacheDisplay(in: rowView.bounds, to: rep)
+            let image = NSImage(size: rowView.bounds.size)
+            image.addRepresentation(rep)
+            item.setDraggingFrame(tableView.rect(ofRow: rows[index]), contents: image)
+        }
+    }
+
     // Only allow dropping into the gap between rows (reorder), not onto a row.
     func tableView(_ tableView: NSTableView, validateDrop info: NSDraggingInfo,
                    proposedRow row: Int, proposedDropOperation dropOperation: NSTableView.DropOperation) -> NSDragOperation {
