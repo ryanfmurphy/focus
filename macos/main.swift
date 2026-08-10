@@ -619,6 +619,21 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         if preempting { db.recordPreempt(preemptedSessionId: preemptedId, newSessionId: sessionId) }
     }
 
+    // Insert a new focus at the FRONT of the queue — it jumps ahead of whatever
+    // was queued next, without disturbing the running session. Records a pre-empt
+    // (both ids NULL: nothing interrupted, nothing started yet — just a queue jump).
+    @objc func preemptNextFocus() {
+        guard !showing else { return }
+        showing = true
+        defer { showing = false }
+        guard let (focus, minutes) = askFocusAndMinutes(
+            title: "Pre-empt the queue",
+            info: "This goes to the front of the queue — it runs before whatever's queued next.",
+            confirm: "Add to front", cancellable: true) else { return }
+        db.enqueueFront(focus: focus, minutes: minutes, originalSessionId: nil)
+        db.recordPreempt(preemptedSessionId: nil, newSessionId: nil)
+    }
+
     // Prompt for minutes and add them to the running session — same as choosing
     // "Add time" at time's up, but available any time from the menu.
     @objc func addTimeToCurrent() {
@@ -1447,6 +1462,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         menu.addItem(withTitle: "Abort task", action: #selector(abortTask), keyEquivalent: "")
         menu.addItem(withTitle: "Add time to current", action: #selector(addTimeToCurrent), keyEquivalent: "")
         menu.addItem(withTitle: "Pre-empt this task", action: #selector(changeFocus), keyEquivalent: "")
+        menu.addItem(withTitle: "Pre-empt next task", action: #selector(preemptNextFocus), keyEquivalent: "")
         menu.addItem(.separator())
         menu.addItem(withTitle: "See history", action: #selector(showHistory), keyEquivalent: "")
         menu.addItem(withTitle: "See queue", action: #selector(showQueue), keyEquivalent: "")

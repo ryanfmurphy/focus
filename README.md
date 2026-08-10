@@ -86,6 +86,7 @@ based on state):
 | **Add time to current** | session active | Add N minutes to the running session (same as "Add time" at time's up) |
 | **Pre-empt this task** | session active | Interrupt the current one (its remaining time is re-queued to the front as "… (continued)") and start a new focus now |
 | **Set focus** | idle | Start an ad-hoc focus (same item as Pre-empt this task, relabeled) |
+| **Pre-empt next task** | always | Add a new focus to the **front** of the queue (jumps ahead of whatever's queued next) without disturbing the running session; also logs a pre-empt |
 | **See history (N)** | always | Table of past sessions (time · duration · rating · status · focus · note); N = total recorded |
 | **See queue (N)** | always | Table of pending queued focuses, next-up first (N = current length) |
 | **Clear queue** | queue non-empty | Empty the queue (with confirmation) |
@@ -146,7 +147,8 @@ rebuilds the binary and reloads the agent.
   `minutes`); the session's total `minutes` is also bumped.
 - **`preempts`** — one row per pre-empt (`at`, `preempted_session_id`,
   `new_session_id`); `preempted_session_id` is `NULL` when nothing was running
-  (pre-empting before a queued task starts).
+  (pre-empting before a queued task starts), and both are `NULL` for a
+  "Pre-empt next task" queue jump (nothing interrupted, nothing started yet).
 
 **Status values:** `completed` (finished/rated, or deferred with null rating) and
 `interrupted` (aborted, pre-empted, or swept on next launch after a crash); a
