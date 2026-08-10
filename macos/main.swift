@@ -1366,6 +1366,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         view.addSubview(ratingField)
         view.addSubview(noteField)
         view.addSubview(elapsed)
+        // Wire the field editor loop so Tab / Shift-Tab cycle rating ⇄ note.
+        ratingField.nextKeyView = noteField
+        noteField.nextKeyView = ratingField
         return (view, ratingField, noteField, elapsed)
     }
 
