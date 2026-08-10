@@ -82,7 +82,7 @@ based on state):
 |------|------|--------------|
 | **Add to queue** | always | Append a focus to the end of the queue |
 | **Complete task** | session active | Mark completed, rate 1–10, advance to the next focus |
-| **Abort task** | session active | Rate it, mark interrupted (records elapsed minutes), advance |
+| **Abort task** | session active | Rate it, mark interrupted (records elapsed time), advance |
 | **Add time to current** | session active | Add N minutes to the running session (same as "Add time" at time's up) |
 | **Pre-empt this task** | session active | Interrupt the current one (its remaining time is re-queued to the front as "… (continued)") and start a new focus now |
 | **Set focus** | idle | Start an ad-hoc focus (same item as Pre-empt this task, relabeled) |
@@ -140,16 +140,16 @@ rebuilds the binary and reloads the agent.
 ### Database schema
 
 - **`sessions`** — one row per focus session: `started_at`, `ended_at`, `reason`
-  (what triggered it), `minutes` (planned duration; for interrupted sessions,
-  the actual elapsed minutes), `focus`, `rating` (1–10, nullable), `status`,
-  `note` (optional free text entered when rating), `open_seconds_start` /
-  `open_seconds_end` (how long the session-start and ending/rating popups stayed
+  (what triggered it), `seconds` (planned duration in seconds; for interrupted
+  sessions, the actual elapsed seconds), `focus`, `rating` (1–10, nullable),
+  `status`, `note` (optional free text entered when rating), `open_seconds_start`
+  / `open_seconds_end` (how long the session-start and ending/rating popups stayed
   open, in whole seconds; `NULL` when a session was closed without a popup,
-  e.g. auto-proceed or a launch-time sweep). Shown as `M:SS` in the history
-  window.
-- **`queue`** — pending focuses (`created_at`, `minutes`, `focus`); FIFO by `id`.
+  e.g. auto-proceed or a launch-time sweep). All durations are entered in whole
+  minutes but stored as seconds (×60), and shown as `M:SS` in the history window.
+- **`queue`** — pending focuses (`created_at`, `seconds`, `focus`); FIFO by `id`.
 - **`time_additions`** — one row per "Add time" event (`session_id`, `added_at`,
-  `minutes`); the session's total `minutes` is also bumped.
+  `seconds`); the session's total `seconds` is also bumped.
 - **`preempts`** — one row per pre-empt (`at`, `preempted_session_id`,
   `new_session_id`); `preempted_session_id` is `NULL` when nothing was running
   (pre-empting before a queued task starts), and both are `NULL` for a
