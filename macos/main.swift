@@ -1371,7 +1371,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
                 timeUp(focus: focus)
                 return
             }
-            hudLabel.stringValue = "🎯 \(focus)    \(mmss(remaining))"
+            // "remaining / total" — e.g. 3:00 / 5:00 = 3 min left of a 5 min session.
+            let total = sessionSeconds ?? remaining
+            hudLabel.stringValue = "🎯 \(focus)    \(mmss(remaining)) / \(mmss(total))"
             layoutHUD()
             if showPillEnabled {
                 hudWindow.orderFrontRegardless()
