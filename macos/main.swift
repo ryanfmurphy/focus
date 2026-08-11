@@ -1413,7 +1413,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     private func preferenceCheckboxes() -> (sound: NSButton, pushover: NSButton, auto: NSButton, total: NSButton) {
         let sound = NSButton(checkboxWithTitle: "Play sound when time's up", target: nil, action: nil)
         sound.state = playSoundEnabled ? .on : .off
-        let pushover = NSButton(checkboxWithTitle: "Send Pushover notification", target: nil, action: nil)
+        let pushover = NSButton(checkboxWithTitle: "Send Pushover notification at start and end of sessions", target: nil, action: nil)
         pushover.state = pushoverEnabled ? .on : .off
         let auto = NSButton(checkboxWithTitle: "Auto-proceed with next queued task", target: nil, action: nil)
         auto.state = autoProceedEnabled ? .on : .off
