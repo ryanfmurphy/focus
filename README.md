@@ -89,7 +89,7 @@ based on state):
 | **Set focus** | idle | Start an ad-hoc focus (same item as Pre-empt this task, relabeled) |
 | **Pre-empt next task** | always | Add a new focus to the **front** of the queue (jumps ahead of whatever's queued next) without disturbing the running session; also logs a pre-empt |
 | **See history (N)** | always | Table of past sessions (time · duration · rating · status · focus · start/end popup-open · note); N = total recorded |
-| **See queue (N)** | always | Table of pending queued focuses, next-up first; right-click a row to move it up / down / to top / to bottom (N = current length) |
+| **See queue (N)** | always | Table of pending queued focuses, next-up first; right-click a row to move it up / down / to top / to bottom or delete it, or select a row and press Delete to remove it (N = current length) |
 | **Clear queue** | queue non-empty | Empty the queue (with confirmation) |
 | **Rate unrated sessions (N)** | N > 0 | Loop through deferred/unrated completed sessions oldest-first and rate each |
 | **Show current task** | always | Checkbox — toggles the floating corner pill on/off (persisted). Menu-bar icon and all timing/logging are unaffected |

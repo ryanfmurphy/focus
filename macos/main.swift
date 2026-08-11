@@ -534,6 +534,21 @@ final class CopyableTableView: NSTableView {
     }
 }
 
+// An NSTableView that reports Delete / ⌦ key presses (with a row selected) so the
+// queue window can remove the selected item.
+final class QueueTableView: NSTableView {
+    var onDelete: ((Int) -> Void)?
+
+    override func keyDown(with event: NSEvent) {
+        // 51 = Delete (backspace), 117 = forward delete (fn+Delete).
+        if (event.keyCode == 51 || event.keyCode == 117), selectedRow >= 0 {
+            onDelete?(selectedRow)
+            return
+        }
+        super.keyDown(with: event)
+    }
+}
+
 // MARK: - App
 
 final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSource,
@@ -845,6 +860,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         if menuItem.action == #selector(moveQueueItemDown) || menuItem.action == #selector(moveQueueItemToBottom) {
             let r = queueTable?.clickedRow ?? -1
             return r >= 0 && r < queueRows.count - 1
+        }
+        if menuItem.action == #selector(deleteClickedQueueItem) {
+            let r = queueTable?.clickedRow ?? -1
+            return r >= 0 && r < queueRows.count
         }
         return true
     }
@@ -1160,20 +1179,23 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             scroll.hasVerticalScroller = true
             scroll.borderType = .noBorder
 
-            let table = NSTableView()
+            let table = QueueTableView()
             table.dataSource = self
             table.delegate = self
             table.usesAlternatingRowBackgroundColors = true
             table.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
             table.rowHeight = 22
             table.style = .inset
-            // Right-click a row to re-order it within the queue.
+            table.onDelete = { [weak self] row in self?.deleteQueueRow(at: row) }
+            // Right-click a row to re-order it within the queue, or remove it.
             let rowMenu = NSMenu()
             rowMenu.addItem(withTitle: "Move up", action: #selector(moveQueueItemUp), keyEquivalent: "")
             rowMenu.addItem(withTitle: "Move down", action: #selector(moveQueueItemDown), keyEquivalent: "")
             rowMenu.addItem(.separator())
             rowMenu.addItem(withTitle: "Move to top", action: #selector(moveQueueItemToTop), keyEquivalent: "")
             rowMenu.addItem(withTitle: "Move to bottom", action: #selector(moveQueueItemToBottom), keyEquivalent: "")
+            rowMenu.addItem(.separator())
+            rowMenu.addItem(withTitle: "Delete from queue", action: #selector(deleteClickedQueueItem), keyEquivalent: "")
             for mi in rowMenu.items { mi.target = self }
             table.menu = rowMenu
 
@@ -1267,6 +1289,16 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         db.reorderQueue(ids: ids)
         reloadQueueData()
         table.reloadData()
+    }
+
+    // Delete the right-clicked queue row (menu), or the selected row (Delete key).
+    @objc func deleteClickedQueueItem() { deleteQueueRow(at: queueTable?.clickedRow ?? -1) }
+
+    private func deleteQueueRow(at row: Int) {
+        guard row >= 0, row < queueRows.count else { return }
+        db.removeFromQueue(id: queueRows[row].id)
+        reloadQueueData()
+        queueTable?.reloadData()
     }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
