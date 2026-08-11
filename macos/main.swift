@@ -222,6 +222,32 @@ final class DB {
         if let e = openSecondsEnd { addOpenSecondsEnd(id: id, seconds: e) }
     }
 
+    /// Close a session as "deferred" (to be continued later), recording how many
+    /// seconds it actually ran. No rating — the work isn't finished, it's paused.
+    func markDeferred(id: Int64, elapsedSeconds: Int) {
+        let sql = "UPDATE sessions SET ended_at=?, status='deferred', seconds=? WHERE id=?;"
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, isoNow(), -1, SQLITE_TRANSIENT)
+        sqlite3_bind_int(stmt, 2, Int32(elapsedSeconds))
+        sqlite3_bind_int64(stmt, 3, id)
+        sqlite3_step(stmt)
+    }
+
+    /// The planned duration a session *started* with, i.e. its current planned
+    /// seconds minus any time added later. Used to re-queue a deferred task with
+    /// its full original duration.
+    func plannedSecondsAtStart(id: Int64) -> Int {
+        let sql = "SELECT seconds - COALESCE((SELECT SUM(seconds) FROM time_additions WHERE session_id = ?), 0) FROM sessions WHERE id = ?;"
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return 0 }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_int64(stmt, 1, id)
+        sqlite3_bind_int64(stmt, 2, id)
+        return sqlite3_step(stmt) == SQLITE_ROW ? Int(sqlite3_column_int(stmt, 0)) : 0
+    }
+
     /// Log an "Add time" event and bump the session's total seconds.
     func addTime(sessionId: Int64, seconds: Int) {
         var ins: OpaquePointer?
@@ -392,14 +418,17 @@ final class DB {
     }
 
     /// Append a focus to the end of the queue (position = current max + 1).
-    func enqueue(focus: String, seconds: Int) {
-        let sql = "INSERT INTO queue (created_at, seconds, focus, position) VALUES (?,?,?, (SELECT COALESCE(MAX(position), 0) + 1 FROM queue));"
+    /// `originalSessionId` carries the chain root when appending a deferred task's
+    /// continuation (nil for a plain new "Add to queue").
+    func enqueue(focus: String, seconds: Int, originalSessionId: Int64? = nil) {
+        let sql = "INSERT INTO queue (created_at, seconds, focus, original_session_id, position) VALUES (?,?,?,?, (SELECT COALESCE(MAX(position), 0) + 1 FROM queue));"
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
         defer { sqlite3_finalize(stmt) }
         sqlite3_bind_text(stmt, 1, isoNow(), -1, SQLITE_TRANSIENT)
         sqlite3_bind_int(stmt, 2, Int32(seconds))
         sqlite3_bind_text(stmt, 3, focus, -1, SQLITE_TRANSIENT)
+        if let o = originalSessionId { sqlite3_bind_int64(stmt, 4, o) } else { sqlite3_bind_null(stmt, 4) }
         sqlite3_step(stmt)
     }
 
@@ -708,6 +737,26 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         db.recordPreempt(preemptedSessionId: nil, newSessionId: nil)
     }
 
+    // Defer the current task "to be continued": mark it deferred (recording the
+    // elapsed time), append a fresh (continued) copy with the task's FULL original
+    // duration to the END of the queue, then advance to the next focus. Unlike
+    // pre-empt, it doesn't start a new focus now and re-queues the full time (at the
+    // back) rather than the remaining time (at the front).
+    @objc func deferTask() {
+        guard !showing, let id = sessionId, let focus = currentFocus else { return }
+        showing = true
+        let elapsed = max(0, Int(Date().timeIntervalSince(sessionStart ?? Date()).rounded()))
+        let full = db.plannedSecondsAtStart(id: id)
+        let orig = sessionOriginalId ?? id
+        currentFocus = nil; deadline = nil; sessionId = nil
+        sessionStart = nil; sessionSeconds = nil; sessionOriginalId = nil
+        hudWindow.orderOut(nil)
+        db.markDeferred(id: id, elapsedSeconds: elapsed)
+        db.enqueue(focus: continuedName(focus), seconds: full, originalSessionId: orig)
+        showing = false
+        promptForFocus(reason: "after-session")
+    }
+
     // Toggle the floating corner pill on/off (persisted). The menu-bar icon and
     // all timing/logging are unaffected — only the pill is suppressed.
     @objc func toggleShowPill() {
@@ -762,9 +811,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     }
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
-        // Complete / Abort / Pre-empt act on a running session.
+        // Complete / Abort / Defer / Pre-empt act on a running session.
         if menuItem.action == #selector(completeTask) || menuItem.action == #selector(abortTask)
-            || menuItem.action == #selector(addTimeToCurrent) {
+            || menuItem.action == #selector(addTimeToCurrent) || menuItem.action == #selector(deferTask) {
             return currentFocus != nil
         }
         if menuItem.action == #selector(toggleShowPill) {
@@ -1608,6 +1657,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         menu.addItem(withTitle: "Complete task", action: #selector(completeTask), keyEquivalent: "")
         menu.addItem(withTitle: "Abort task", action: #selector(abortTask), keyEquivalent: "")
         menu.addItem(withTitle: "Add time to current", action: #selector(addTimeToCurrent), keyEquivalent: "")
+        menu.addItem(withTitle: "Defer task", action: #selector(deferTask), keyEquivalent: "")
         menu.addItem(withTitle: "Pre-empt this task", action: #selector(changeFocus), keyEquivalent: "")
         menu.addItem(withTitle: "Pre-empt next task", action: #selector(preemptNextFocus), keyEquivalent: "")
         menu.addItem(.separator())

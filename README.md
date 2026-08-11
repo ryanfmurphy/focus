@@ -84,6 +84,7 @@ based on state):
 | **Complete task** | session active | Mark completed, rate 1–10, advance to the next focus |
 | **Abort task** | session active | Rate it, mark interrupted (records elapsed time), advance |
 | **Add time to current** | session active | Add N minutes to the running session (same as "Add time" at time's up) |
+| **Defer task** | session active | Mark the current one **deferred** ("to be continued") and append a fresh "… (continued)" copy — with its **full original duration** — to the **back** of the queue, then advance to the next focus |
 | **Pre-empt this task** | session active | Interrupt the current one (its remaining time is re-queued to the front as "… (continued)") and start a new focus now |
 | **Set focus** | idle | Start an ad-hoc focus (same item as Pre-empt this task, relabeled) |
 | **Pre-empt next task** | always | Add a new focus to the **front** of the queue (jumps ahead of whatever's queued next) without disturbing the running session; also logs a pre-empt |
@@ -159,10 +160,12 @@ rebuilds the binary and reloads the agent.
   (pre-empting before a queued task starts), and both are `NULL` for a
   "Pre-empt next task" queue jump (nothing interrupted, nothing started yet).
 
-**Status values:** `completed` (finished/rated, or deferred with null rating) and
-`interrupted` (aborted, pre-empted, or swept on next launch after a crash); a
-`NULL` status means the session is still in progress (shown as "active").
-(Older databases may also contain the retired `superseded`/`cleared` values.)
+**Status values:** `completed` (finished/rated, or auto-proceeded with a null
+rating pending), `interrupted` (aborted, pre-empted, or swept on next launch after
+a crash), and `deferred` ("Defer task" — paused to be continued later, its
+full-duration continuation appended to the queue). A `NULL` status means the
+session is still in progress (shown as "active"). (Older databases may also
+contain the retired `superseded`/`cleared` values.)
 
 ## Session lifecycle & resilience
 
