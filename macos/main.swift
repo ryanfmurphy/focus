@@ -1371,9 +1371,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
                 timeUp(focus: focus)
                 return
             }
-            // "remaining / total" — e.g. 3:00 / 5:00 = 3 min left of a 5 min session.
-            let total = sessionSeconds ?? remaining
-            hudLabel.stringValue = "🎯 \(focus)    \(mmss(remaining)) / \(mmss(total))"
+            // Optionally append "/ total" — e.g. 3:00 / 5:00 = 3 min left of a 5 min session.
+            let time = showTotalOnPillEnabled ? "\(mmss(remaining)) / \(mmss(sessionSeconds ?? remaining))"
+                                              : mmss(remaining)
+            hudLabel.stringValue = "🎯 \(focus)    \(time)"
             layoutHUD()
             if showPillEnabled {
                 hudWindow.orderFrontRegardless()
@@ -1402,37 +1403,46 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         get { UserDefaults.standard.object(forKey: "showPill") as? Bool ?? true }    // default on
         set { UserDefaults.standard.set(newValue, forKey: "showPill") }
     }
+    private var showTotalOnPillEnabled: Bool {
+        get { UserDefaults.standard.object(forKey: "showTotalOnPill") as? Bool ?? true }  // default on
+        set { UserDefaults.standard.set(newValue, forKey: "showTotalOnPill") }
+    }
 
-    /// The three preference checkboxes, initialized from the stored values. Shared
-    /// by the session-start modal and the Settings dialog so they stay in sync.
-    private func preferenceCheckboxes() -> (sound: NSButton, pushover: NSButton, auto: NSButton) {
+    /// The global preference checkboxes, initialized from the stored values,
+    /// for the Settings dialog.
+    private func preferenceCheckboxes() -> (sound: NSButton, pushover: NSButton, auto: NSButton, total: NSButton) {
         let sound = NSButton(checkboxWithTitle: "Play sound when time's up", target: nil, action: nil)
         sound.state = playSoundEnabled ? .on : .off
         let pushover = NSButton(checkboxWithTitle: "Send Pushover notification", target: nil, action: nil)
         pushover.state = pushoverEnabled ? .on : .off
         let auto = NSButton(checkboxWithTitle: "Auto-proceed with next queued task", target: nil, action: nil)
         auto.state = autoProceedEnabled ? .on : .off
-        return (sound, pushover, auto)
+        let total = NSButton(checkboxWithTitle: "Show total session time after remaining time", target: nil, action: nil)
+        total.state = showTotalOnPillEnabled ? .on : .off
+        return (sound, pushover, auto, total)
     }
 
-    private func persistPreferences(_ sound: NSButton, _ pushover: NSButton, _ auto: NSButton) {
+    private func persistPreferences(_ sound: NSButton, _ pushover: NSButton, _ auto: NSButton, _ total: NSButton) {
         playSoundEnabled = sound.state == .on
         pushoverEnabled = pushover.state == .on
         autoProceedEnabled = auto.state == .on
+        showTotalOnPillEnabled = total.state == .on
     }
 
-    // Standalone Settings dialog for the three global preferences.
+    // Standalone Settings dialog for the global preferences.
     @objc func showSettings() {
         guard !showing else { return }
         showing = true
         defer { showing = false }
         NSApp.activate(ignoringOtherApps: true)
 
-        let (sound, pushover, auto) = preferenceCheckboxes()
-        sound.frame = NSRect(x: 0, y: 52, width: 320, height: 20)
-        pushover.frame = NSRect(x: 0, y: 26, width: 320, height: 20)
-        auto.frame = NSRect(x: 0, y: 0, width: 320, height: 20)
-        let accessory = NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 72))
+        let (sound, pushover, auto, total) = preferenceCheckboxes()
+        total.frame = NSRect(x: 0, y: 78, width: 340, height: 20)
+        sound.frame = NSRect(x: 0, y: 52, width: 340, height: 20)
+        pushover.frame = NSRect(x: 0, y: 26, width: 340, height: 20)
+        auto.frame = NSRect(x: 0, y: 0, width: 340, height: 20)
+        let accessory = NSView(frame: NSRect(x: 0, y: 0, width: 340, height: 98))
+        accessory.addSubview(total)
         accessory.addSubview(sound)
         accessory.addSubview(pushover)
         accessory.addSubview(auto)
@@ -1446,7 +1456,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         alert.window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         alert.runModal()
 
-        persistPreferences(sound, pushover, auto)
+        persistPreferences(sound, pushover, auto, total)
+        tick()   // apply the pill's remaining/total toggle immediately
     }
 
     /// Fire-and-forget Pushover message. Credentials come from ~/focus/pushover.json

@@ -100,7 +100,7 @@ The countdown keeps updating even while the menu is open.
 
 ## Preferences (Settings dialog)
 
-Three checkboxes live in the **Settings** dialog. They're **global, persisted
+Four checkboxes live in the **Settings** dialog. They're **global, persisted
 preferences** (stored in `UserDefaults`), not per-session — the last state you
 set applies to every future timer:
 
@@ -111,6 +111,8 @@ set applies to every future timer:
   a session ends, it's marked completed **without stopping to rate** (deferred to
   "Rate unrated sessions"), and the next queued focus auto-starts after a 10-second
   countdown you can cancel. Lets a queue run start-to-finish untouched.
+- **Show total session time after remaining time** *(default on)* — the pill
+  shows `MM:SS / MM:SS` (remaining / session total); off shows just the remaining.
 
 ## Pushover setup
 
