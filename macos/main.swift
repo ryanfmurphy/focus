@@ -579,6 +579,75 @@ final class QueueTableView: NSTableView {
     }
 }
 
+// A read-only "See Queue"-style table used to pick a queued focus to pre-empt
+// with. Single-clicking a row fires `onPick` with that item. Self-contained data
+// source/delegate so it doesn't collide with AppController's own two tables.
+struct QueuePickRow { let item: QueueItem; let num: Int; let duration: String; let start: String; let finish: String }
+
+final class QueuePickSource: NSObject, NSTableViewDataSource, NSTableViewDelegate {
+    private let rows: [QueuePickRow]
+    private let onPick: (QueueItem) -> Void
+    init(rows: [QueuePickRow], onPick: @escaping (QueueItem) -> Void) { self.rows = rows; self.onPick = onPick }
+
+    func makeTable() -> NSTableView {
+        let t = NSTableView()
+        t.usesAlternatingRowBackgroundColors = true
+        t.rowHeight = 22
+        t.style = .inset
+        t.headerView = NSTableHeaderView()
+        func col(_ id: String, _ title: String, _ w: CGFloat, _ a: NSTextAlignment = .left) {
+            let c = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(id))
+            c.title = title; c.width = w; c.headerCell.alignment = a
+            t.addTableColumn(c)
+        }
+        col("num", "#", 30, .right)
+        col("dur", "Duration", 70, .right)
+        col("start", "Est. start", 84, .right)
+        col("finish", "Est. finish", 84, .right)
+        col("focus", "Focus (next up first)", 240)
+        t.dataSource = self
+        t.delegate = self
+        t.target = self
+        t.action = #selector(clicked(_:))   // single click → pick
+        return t
+    }
+
+    @objc private func clicked(_ sender: NSTableView) {
+        let r = sender.clickedRow
+        guard r >= 0, r < rows.count else { return }
+        onPick(rows[r].item)
+    }
+
+    func numberOfRows(in tableView: NSTableView) -> Int { rows.count }
+
+    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        let r = rows[row]
+        var align: NSTextAlignment = .left
+        let text: String
+        switch tableColumn?.identifier.rawValue {
+        case "num":    text = "\(r.num)"; align = .right
+        case "dur":    text = r.duration; align = .right
+        case "start":  text = r.start; align = .right
+        case "finish": text = r.finish; align = .right
+        default:       text = r.item.focus
+        }
+        let cell = NSTableCellView()
+        let tf = NSTextField(labelWithString: text)
+        tf.translatesAutoresizingMaskIntoConstraints = false
+        tf.lineBreakMode = .byTruncatingTail
+        tf.alignment = align
+        tf.font = NSFont.systemFont(ofSize: 12)
+        cell.addSubview(tf)
+        cell.textField = tf
+        NSLayoutConstraint.activate([
+            tf.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 4),
+            tf.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -4),
+            tf.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+        ])
+        return cell
+    }
+}
+
 // MARK: - App
 
 final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSource,
@@ -961,8 +1030,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         let alert = makeAlert()
         alert.messageText = "Next focus"
         alert.informativeText = "\(item.focus)\n\n\(mmss(item.seconds))"
-        alert.addButton(withTitle: "Start")                  // .alertFirstButtonReturn
-        alert.addButton(withTitle: "Pre-empt with another…") // .alertSecondButtonReturn
+        alert.addButton(withTitle: "Start")             // .alertFirstButtonReturn
+        alert.addButton(withTitle: "Pre-empt with new") // .alertSecondButtonReturn
+        // Offer picking a different queued item only when there's another to pick.
+        if db.queueCount() > 1 {
+            alert.addButton(withTitle: "Pre-empt from queue…")  // .alertThirdButtonReturn
+        }
         alert.window.level = .floating
         alert.window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
 
@@ -1005,8 +1078,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         elapsedTimer?.invalidate()
 
         if response == .alertSecondButtonReturn {
-            // Pre-empt: leave the queued item where it is (still the front, since
-            // we never removed it) and run an ad-hoc focus right now instead.
+            // Pre-empt with new: leave the queued item where it is (still the front,
+            // since we never removed it) and run an ad-hoc focus right now instead.
             if let (focus, seconds, openStart) = askFocusAndMinutes(
                 title: "Pre-empt with a new focus",
                 info: "This runs now; the queued focus stays next in line.",
@@ -1017,12 +1090,70 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
                 return
             }
             // Cancelled the pre-empt → fall through and start the queued one.
+        } else if response == .alertThirdButtonReturn {
+            // Pre-empt from queue: pick any queued focus and start it now instead of
+            // the front one (which stays queued). Same as a normal front-fetch, just
+            // for the chosen item.
+            if let chosen = pickFromQueue() {
+                db.removeFromQueue(id: chosen.id)
+                let openStart = Int(Date().timeIntervalSince(confirmOpenedAt).rounded())
+                beginSession(reason: "queue", seconds: chosen.seconds, focus: chosen.focus,
+                             originalSessionId: chosen.originalSessionId, openSecondsStart: openStart)
+                db.recordPreempt(preemptedSessionId: nil, newSessionId: sessionId)
+                return
+            }
+            // Cancelled the picker → fall through and start the front one.
         }
 
         db.removeFromQueue(id: item.id)
         let queuedOpenStart = Int(Date().timeIntervalSince(confirmOpenedAt).rounded())
         beginSession(reason: "queue", seconds: item.seconds, focus: item.focus,
                      originalSessionId: item.originalSessionId, openSecondsStart: queuedOpenStart)
+    }
+
+    /// Show a "See Queue"-style picker (in a floating modal) of all queued focuses,
+    /// with the same Est. start/finish schedule. Returns the one the user clicks,
+    /// or nil if they cancel.
+    private func pickFromQueue() -> QueueItem? {
+        let items = db.queueItems()
+        guard !items.isEmpty else { return nil }
+
+        // Same estimate chain as the queue window: from the current deadline if a
+        // session is running (there isn't one here), else now.
+        var cursor = Date()
+        if let dl = deadline, dl > cursor { cursor = dl }
+        var rows: [QueuePickRow] = []
+        for item in items {
+            let start = cursor
+            let finish = cursor.addingTimeInterval(Double(item.seconds))
+            cursor = finish
+            rows.append(QueuePickRow(item: item, num: rows.count + 1,
+                                     duration: mmss(item.seconds),
+                                     start: localClockFormatter.string(from: start),
+                                     finish: localClockFormatter.string(from: finish)))
+        }
+
+        var chosen: QueueItem?
+        let source = QueuePickSource(rows: rows) { item in
+            chosen = item
+            NSApp.stopModal()   // ends the alert's runModal below
+        }
+        let table = source.makeTable()
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 540, height: 240))
+        scroll.documentView = table
+        scroll.hasVerticalScroller = true
+        scroll.borderType = .bezelBorder
+        table.frame = scroll.bounds
+
+        let alert = makeAlert()
+        alert.messageText = "Pre-empt from queue"
+        alert.informativeText = "Click a queued focus to start it now (it's removed from the queue; the others stay)."
+        alert.addButton(withTitle: "Cancel")
+        alert.accessoryView = scroll
+        alert.window.level = .floating
+        alert.window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        alert.runModal()   // a row click calls NSApp.stopModal(); Cancel ends it too
+        return chosen
     }
 
     /// Editable "focus + minutes" modal. The field takes whole minutes but the

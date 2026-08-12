@@ -204,7 +204,10 @@ task is deferred or pre-empted, its "(continued)" copy carries the original id, 
 
 `confirmQueued` is the non-editable "Next focus" screen shown when a session pulls
 the next queued item; with **auto-proceed** on and eligible, it auto-starts after
-a 10-second cancelable countdown.
+a 10-second cancelable countdown. Besides **Start**, it offers **Pre-empt with new**
+(run an ad-hoc focus instead) and — when more than one item is queued —
+**Pre-empt from queue** (`pickFromQueue`, a See-Queue-style click-to-choose picker
+that starts any queued item now, leaving the front one in place).
 
 ---
 
