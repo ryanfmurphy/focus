@@ -205,7 +205,10 @@ final class DB {
     /// Close out a session with a status, (optionally) a rating, and a note.
     /// `openSecondsEnd` is how long the ending/rating popup stayed open (nil when
     /// closed without a popup, e.g. auto-proceed or a launch-time sweep).
-    func endSession(id: Int64, status: String, rating: Int?, note: String = "", openSecondsEnd: Int? = nil) {
+    /// `elapsedSeconds`, when given, overwrites the planned `seconds` with the time
+    /// actually used (e.g. completing a task early) — `original_seconds` is untouched.
+    func endSession(id: Int64, status: String, rating: Int?, note: String = "",
+                    openSecondsEnd: Int? = nil, elapsedSeconds: Int? = nil) {
         let sql = "UPDATE sessions SET ended_at=?, status=?, rating=?, note=? WHERE id=?;"
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
@@ -216,7 +219,19 @@ final class DB {
         bindNote(stmt, 4, note)
         sqlite3_bind_int64(stmt, 5, id)
         sqlite3_step(stmt)
+        if let sec = elapsedSeconds { updatePlannedSeconds(id: id, seconds: sec) }
         if let e = openSecondsEnd { addOpenSecondsEnd(id: id, seconds: e) }
+    }
+
+    /// Overwrite a session's `seconds` (the actual/planned duration). Leaves
+    /// `original_seconds` alone.
+    private func updatePlannedSeconds(id: Int64, seconds: Int) {
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "UPDATE sessions SET seconds=? WHERE id=?;", -1, &stmt, nil) == SQLITE_OK else { return }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_int(stmt, 1, Int32(seconds))
+        sqlite3_bind_int64(stmt, 2, id)
+        sqlite3_step(stmt)
     }
 
     /// Close a session as "interrupted", recording how many seconds it actually
@@ -1611,9 +1626,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     }
 
     /// Force a rating, then close the current session out as completed and clear
-    /// its state. Caller must already hold `showing`.
+    /// its state. Caller must already hold `showing`. Completing early records the
+    /// time actually used as the Duration (Original Duration is untouched).
     private func rateAndComplete() {
         guard let id = sessionId, let focus = currentFocus else { return }
+        let elapsed = max(0, Int(Date().timeIntervalSince(sessionStart ?? Date()).rounded()))
         currentFocus = nil
         deadline = nil
         sessionId = nil
@@ -1622,7 +1639,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         sessionOriginalId = nil
         hudWindow.orderOut(nil)
         let (rating, note, openSeconds) = promptRating(focus: focus, title: "Rate this session")
-        db.endSession(id: id, status: "completed", rating: rating, note: note, openSecondsEnd: openSeconds)
+        db.endSession(id: id, status: "completed", rating: rating, note: note,
+                      openSecondsEnd: openSeconds, elapsedSeconds: elapsed)
     }
 
     /// A rating (1–10) field over an optional note field, for the rating modals.

@@ -81,7 +81,7 @@ based on state):
 | Item | When | What it does |
 |------|------|--------------|
 | **Add to queue** | always | Append a focus to the end of the queue |
-| **Complete task** | session active | Mark completed, rate 1–10, advance to the next focus |
+| **Complete task** | session active | Mark completed, rate 1–10, record the elapsed time as its duration (Original Duration is kept), advance to the next focus |
 | **Abort task** | session active | Rate it, mark interrupted (records elapsed time), advance |
 | **Add time to current** | session active | Add N minutes to the running session (same as "Add time" at time's up) |
 | **Defer task** | session active | Mark the current one **deferred** ("to be continued") and append a fresh "… (continued)" copy — with its **full original duration** — to the **back** of the queue, then advance to the next focus |
