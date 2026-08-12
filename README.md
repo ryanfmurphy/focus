@@ -88,7 +88,7 @@ based on state):
 | **Pre-empt this task** | session active | Interrupt the current one (its remaining time is re-queued to the front as "… (continued)") and start a new focus now |
 | **Set focus** | idle | Start an ad-hoc focus (same item as Pre-empt this task, relabeled) |
 | **Pre-empt next task** | always | Add a new focus to the **front** of the queue (jumps ahead of whatever's queued next) without disturbing the running session; also logs a pre-empt |
-| **See history (N)** | always | Table of past sessions (time · duration · rating · status · focus · start/end popup-open · note); N = total recorded |
+| **See history (N)** | always | Table of past sessions (time · duration · original · rating · status · focus · start/end popup-open · note); N = total recorded |
 | **See queue (N)** | always | Table of pending queued focuses, next-up first; right-click a row to move it up / down / to top / to bottom or delete it, or select a row and press Delete to remove it (N = current length) |
 | **Clear queue** | queue non-empty | Empty the queue (with confirmation) |
 | **Rate unrated sessions (N)** | N > 0 | Loop through deferred/unrated completed sessions oldest-first and rate each |
@@ -143,8 +143,10 @@ rebuilds the binary and reloads the agent.
 ### Database schema
 
 - **`sessions`** — one row per focus session: `started_at`, `ended_at`, `reason`
-  (what triggered it), `seconds` (planned duration in seconds; for interrupted
-  sessions, the actual elapsed seconds), `focus`, `rating` (1–10, nullable),
+  (what triggered it), `seconds` (planned duration in seconds, bumped by "Add
+  time"; for interrupted sessions, the actual elapsed seconds), `original_seconds`
+  (the planned duration stamped at creation — never changes when time is added),
+  `focus`, `rating` (1–10, nullable),
   `status`, `note` (optional free text entered when rating), `open_seconds_start`
   / `open_seconds_end` (how long the session-start and ending/rating popups stayed
   open, in whole seconds; **accumulated** — if a popup is shown more than once for

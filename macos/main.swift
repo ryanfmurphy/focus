@@ -78,7 +78,8 @@ final class DB {
             started_at TEXT NOT NULL,
             ended_at   TEXT,
             reason     TEXT,          -- what triggered the prompt: launch/wake/unlock/session/manual
-            seconds    INTEGER,       -- planned duration in seconds (input is minutes, stored ×60)
+            seconds    INTEGER,       -- planned duration in seconds (input is minutes, stored ×60); bumped by "Add time"
+            original_seconds INTEGER, -- planned duration stamped at creation; never changes when time is added
             focus      TEXT,
             rating     INTEGER,       -- 1..10, only for completed sessions
             status     TEXT,          -- completed / interrupted (NULL while active)
@@ -147,21 +148,34 @@ final class DB {
             exec("UPDATE \(table) SET seconds = minutes * 60 WHERE seconds IS NULL AND minutes IS NOT NULL;")
             exec("ALTER TABLE \(table) DROP COLUMN minutes;")
         }
+        // Duration a session was created with, unaffected by "Add time". New rows
+        // stamp it directly. Back-fill only completed/active rows, where `seconds`
+        // still holds the planned total, as (current seconds − time added). For
+        // interrupted/deferred rows `seconds` was overwritten with elapsed time, so
+        // the original is unrecoverable — leave it NULL (shown as "—" in history).
+        exec("ALTER TABLE sessions ADD COLUMN original_seconds INTEGER;")
+        exec("""
+        UPDATE sessions SET original_seconds =
+            seconds - COALESCE((SELECT SUM(seconds) FROM time_additions WHERE session_id = sessions.id), 0)
+        WHERE original_seconds IS NULL AND (status IS NULL OR status = 'completed');
+        """)
     }
 
     private func exec(_ sql: String) { sqlite3_exec(db, sql, nil, nil, nil) }
 
-    /// Insert a new in-progress session; returns its row id.
+    /// Insert a new in-progress session; returns its row id. `seconds` is stamped
+    /// into both `seconds` (the running planned total) and `original_seconds` (fixed).
     func startSession(reason: String, seconds: Int, focus: String, originalSessionId: Int64?) -> Int64? {
-        let sql = "INSERT INTO sessions (started_at, reason, seconds, focus, original_session_id) VALUES (?,?,?,?,?);"
+        let sql = "INSERT INTO sessions (started_at, reason, seconds, original_seconds, focus, original_session_id) VALUES (?,?,?,?,?,?);"
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return nil }
         defer { sqlite3_finalize(stmt) }
         sqlite3_bind_text(stmt, 1, isoNow(), -1, SQLITE_TRANSIENT)
         sqlite3_bind_text(stmt, 2, reason, -1, SQLITE_TRANSIENT)
         sqlite3_bind_int(stmt, 3, Int32(seconds))
-        sqlite3_bind_text(stmt, 4, focus, -1, SQLITE_TRANSIENT)
-        if let o = originalSessionId { sqlite3_bind_int64(stmt, 5, o) } else { sqlite3_bind_null(stmt, 5) }
+        sqlite3_bind_int(stmt, 4, Int32(seconds))
+        sqlite3_bind_text(stmt, 5, focus, -1, SQLITE_TRANSIENT)
+        if let o = originalSessionId { sqlite3_bind_int64(stmt, 6, o) } else { sqlite3_bind_null(stmt, 6) }
         guard sqlite3_step(stmt) == SQLITE_DONE else { return nil }
         return sqlite3_last_insert_rowid(db)
     }
@@ -235,16 +249,15 @@ final class DB {
         sqlite3_step(stmt)
     }
 
-    /// The planned duration a session *started* with, i.e. its current planned
-    /// seconds minus any time added later. Used to re-queue a deferred task with
-    /// its full original duration.
+    /// The planned duration a session *started* with (the stamped `original_seconds`,
+    /// unaffected by "Add time"). Used to re-queue a deferred task with its full
+    /// original duration.
     func plannedSecondsAtStart(id: Int64) -> Int {
-        let sql = "SELECT seconds - COALESCE((SELECT SUM(seconds) FROM time_additions WHERE session_id = ?), 0) FROM sessions WHERE id = ?;"
+        let sql = "SELECT COALESCE(original_seconds, seconds) FROM sessions WHERE id = ?;"
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return 0 }
         defer { sqlite3_finalize(stmt) }
         sqlite3_bind_int64(stmt, 1, id)
-        sqlite3_bind_int64(stmt, 2, id)
         return sqlite3_step(stmt) == SQLITE_ROW ? Int(sqlite3_column_int(stmt, 0)) : 0
     }
 
@@ -350,7 +363,7 @@ final class DB {
     func recent(limit: Int = 500) -> [SessionRow] {
         let sql = """
         SELECT started_at, ended_at, seconds, focus, rating, status, note,
-               open_seconds_start, open_seconds_end
+               open_seconds_start, open_seconds_end, original_seconds
         FROM sessions ORDER BY id DESC LIMIT ?;
         """
         var stmt: OpaquePointer?
@@ -377,7 +390,8 @@ final class DB {
                 status: text(5),
                 note: text(6),
                 openSecondsStart: intOrNil(7),
-                openSecondsEnd: intOrNil(8)))
+                openSecondsEnd: intOrNil(8),
+                originalSeconds: intOrNil(9)))
         }
         return rows
     }
@@ -519,6 +533,7 @@ struct SessionRow {
     let note: String?
     let openSecondsStart: Int?
     let openSecondsEnd: Int?
+    let originalSeconds: Int?   // nil for old interrupted/deferred rows (unrecoverable)
 }
 
 // An NSTableView that supports ⌘C — it forwards the selection to `onCopy`
@@ -1099,6 +1114,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             }
             addColumn("when", "Started", width: 140, min: 120)
             addColumn("min", "Duration", width: 70, min: 56, align: .right)
+            addColumn("origmin", "Original", width: 70, min: 56, align: .right)
             addColumn("rating", "Rating", width: 60, min: 50, align: .right)
             addColumn("status", "Status", width: 95, min: 70)
             addColumn("focus", "Focus", width: 360, min: 150)
@@ -1121,12 +1137,13 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     // Copy the selected history rows to the clipboard as TSV (with a header).
     private func copyHistoryRows(_ indexes: IndexSet) {
         guard !indexes.isEmpty else { return }
-        var lines = ["Started\tDuration (s)\tRating\tStatus\tFocus\tNote\tStart popup open (s)\tEnd popup open (s)"]
+        var lines = ["Started\tDuration (s)\tOriginal (s)\tRating\tStatus\tFocus\tNote\tStart popup open (s)\tEnd popup open (s)"]
         for i in indexes where i < historyRows.count {
             let r = historyRows[i]
             let fields = [
                 whenLabel(r.startedAt),
                 "\(r.seconds)",
+                r.originalSeconds.map { "\($0)" } ?? "",
                 r.rating.map { "\($0)" } ?? "",
                 r.status ?? (r.endedAt == nil ? "active" : ""),
                 r.focus,
@@ -1327,6 +1344,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         switch id {
         case "when":      text = whenLabel(r.startedAt)
         case "min":       text = mmss(r.seconds); align = .right
+        case "origmin":   text = r.originalSeconds.map { mmss($0) } ?? "—"; align = .right
         case "rating":    text = r.rating.map { "\($0)/10" } ?? "—"; align = .right
         case "status":    text = r.status ?? (r.endedAt == nil ? "active" : "—")
         case "openstart": text = r.openSecondsStart.map { mmss($0) } ?? "—"; align = .right
