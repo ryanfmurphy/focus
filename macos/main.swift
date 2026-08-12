@@ -700,17 +700,34 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         let alert = makeAlert()
         alert.messageText = "Resume focus?"
         alert.informativeText = "\(s.focus)\n\n\(mmss(remaining)) remaining (of \(mmss(s.seconds)))"
-        alert.addButton(withTitle: "Resume")            // .alertFirstButtonReturn
-        alert.addButton(withTitle: "Start new focus")   // .alertSecondButtonReturn
+        alert.addButton(withTitle: "Resume")        // .alertFirstButtonReturn
+        alert.addButton(withTitle: "Pre-empt…")     // .alertSecondButtonReturn
+        alert.addButton(withTitle: "Start fresh…")  // .alertThirdButtonReturn
         alert.window.level = .floating
         alert.window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         let response = alert.runModal()
         showing = false
 
-        if response == .alertFirstButtonReturn {
+        switch response {
+        case .alertFirstButtonReturn:            // Resume — continue where it left off
             adopt(s, deadline: deadline)
             tick()
-        } else {
+
+        case .alertSecondButtonReturn:           // Pre-empt — adopt it, then run the
+            adopt(s, deadline: deadline)         // standard pre-empt flow (re-queues the
+            tick()                               // remaining time to the front, starts new).
+            changeFocus()
+
+        default:                                 // Start fresh — abandon it, optionally
+            showing = true                       // clear the queue, then start anew.
+            let hasQueue = db.queueCount() > 0
+            let clear = hasQueue ? confirmClearQueue() : false
+            showing = false
+            if hasQueue && !clear {
+                offerResume(s, deadline: deadline)   // declined clearing → back to the choice
+                return
+            }
+            if clear { db.clearQueue() }
             db.endSession(id: s.id, status: "interrupted", rating: nil)
             onReturn("launch")
         }
@@ -1260,11 +1277,18 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
 
     @objc func clearQueue() {
         guard !showing else { return }
-        let count = db.queueCount()
-        guard count > 0 else { return }
+        guard db.queueCount() > 0 else { return }
         showing = true
         defer { showing = false }
         NSApp.activate(ignoringOtherApps: true)
+        if confirmClearQueue() { db.clearQueue() }
+    }
+
+    /// Show the "Clear queue?" confirmation; returns true if the user confirms
+    /// (false if the queue is empty). The caller manages `showing` and clearing.
+    private func confirmClearQueue() -> Bool {
+        let count = db.queueCount()
+        guard count > 0 else { return false }
         let alert = makeAlert()
         alert.messageText = "Clear queue?"
         alert.informativeText = "Remove all \(count) queued focus\(count == 1 ? "" : "es")? This can't be undone."
@@ -1272,7 +1296,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         alert.addButton(withTitle: "Cancel")
         alert.window.level = .floating
         alert.window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        if alert.runModal() == .alertFirstButtonReturn { db.clearQueue() }
+        return alert.runModal() == .alertFirstButtonReturn
     }
 
     // Loop through the deferred (unrated, completed) sessions oldest-first and

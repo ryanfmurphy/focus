@@ -180,8 +180,10 @@ something's queued, otherwise a fresh prompt — so you can flow session to sess
 The timer is wall-clock based, so lock / sleep / closing the lid don't disturb a
 running session, and returning won't re-prompt while one is active. If the
 *process* itself dies mid-session (crash, reboot, reinstall), the next launch
-offers to **resume** it (or start fresh); if its time elapsed while away, it's
-completed and sent to the rating queue.
+offers three choices: **Resume** it, **Pre-empt** (re-queue its remaining time to
+the front and start a new focus now), or **Start fresh** (abandon it — with an
+optional confirm to also clear the queue — then prompt for a new focus). If its
+time elapsed while away, it's completed and sent to the rating queue instead.
 
 ## Configuration
 
