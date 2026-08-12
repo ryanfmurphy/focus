@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>focus — code walkthrough</title>
+<style>
+  :root{
+    --bg:#f6f7f9; --panel:#ffffff; --ink:#1c2230; --muted:#5b6472;
+    --line:#e4e7ec; --accent:#e0533d; --accent2:#2f6db3; --good:#2e9e6b;
+    --warn:#c98a12; --code-bg:#f0f2f5; --shadow:0 1px 3px rgba(20,30,50,.08),0 8px 24px rgba(20,30,50,.06);
+    --chip:#eef1f5;
+  }
+  @media (prefers-color-scheme:dark){
+    :root{
+      --bg:#0f1319; --panel:#161c25; --ink:#e6eaf0; --muted:#9aa4b2;
+      --line:#26303c; --accent:#f4795f; --accent2:#6fa8e0; --good:#57c78f;
+      --warn:#e0b357; --code-bg:#0c1016; --shadow:0 1px 3px rgba(0,0,0,.4),0 8px 24px rgba(0,0,0,.3);
+      --chip:#1e2733;
+    }
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font:15px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    -webkit-font-smoothing:antialiased}
+  .wrap{max-width:960px;margin:0 auto;padding:48px 24px 80px}
+  header.hero{text-align:center;margin-bottom:44px}
+  header.hero .logo{font-size:56px;line-height:1}
+  header.hero h1{font-size:34px;margin:10px 0 6px;letter-spacing:-.5px}
+  header.hero p{color:var(--muted);margin:0;font-size:16px}
+  header.hero code{background:var(--chip);padding:1px 6px;border-radius:5px;font-size:13px}
+  h2{font-size:22px;margin:0 0 4px;letter-spacing:-.3px}
+  h2 .num{color:var(--accent);font-variant-numeric:tabular-nums;margin-right:10px}
+  section{background:var(--panel);border:1px solid var(--line);border-radius:14px;
+    padding:24px 26px;margin:20px 0;box-shadow:var(--shadow)}
+  section > p:first-of-type{margin-top:8px}
+  p{margin:12px 0}
+  .lead{color:var(--muted)}
+  code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.88em}
+  p code,li code,td code{background:var(--code-bg);padding:1px 5px;border-radius:5px}
+  pre{background:var(--code-bg);border:1px solid var(--line);border-radius:10px;
+    padding:14px 16px;overflow-x:auto;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    font-size:12.5px;line-height:1.55}
+  a{color:var(--accent2)}
+  table{width:100%;border-collapse:collapse;margin:14px 0;font-size:14px}
+  th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{font-size:12px;text-transform:uppercase;letter-spacing:.5px;color:var(--muted)}
+  tr:last-child td{border-bottom:none}
+  .chip{display:inline-block;background:var(--chip);border-radius:20px;padding:2px 10px;
+    font-size:12px;color:var(--muted);margin:2px 4px 2px 0;white-space:nowrap}
+  .grid{display:grid;gap:14px}
+  .g3{grid-template-columns:repeat(3,1fr)}
+  .g2{grid-template-columns:repeat(2,1fr)}
+  @media(max-width:720px){.g3,.g2{grid-template-columns:1fr}}
+  .card{background:var(--bg);border:1px solid var(--line);border-radius:11px;padding:14px 16px}
+  .card h4{margin:0 0 6px;font-size:14px}
+  .card p{margin:0;font-size:13px;color:var(--muted)}
+  .k{display:inline-block;min-width:20px}
+  .callout{border-left:3px solid var(--warn);background:var(--code-bg);
+    padding:12px 16px;border-radius:0 10px 10px 0;margin:16px 0;font-size:14px}
+  .callout.good{border-color:var(--good)}
+  .callout.blue{border-color:var(--accent2)}
+  ul.tight{margin:10px 0;padding-left:22px}
+  ul.tight li{margin:5px 0}
+  .toc{display:flex;flex-wrap:wrap;gap:8px;margin-top:18px;justify-content:center}
+  .toc a{background:var(--chip);color:var(--ink);text-decoration:none;border-radius:8px;
+    padding:6px 12px;font-size:13px;border:1px solid var(--line)}
+  .toc a:hover{border-color:var(--accent2)}
+  .diagram{width:100%;height:auto;margin:8px 0 4px}
+  .legend{display:flex;gap:18px;flex-wrap:wrap;font-size:12.5px;color:var(--muted);margin-top:6px}
+  .legend span{display:inline-flex;align-items:center;gap:6px}
+  .dot{width:11px;height:11px;border-radius:3px;display:inline-block}
+  .muted{color:var(--muted)}
+  .pill-demo{display:inline-flex;align-items:center;gap:8px;background:#2a2f38;color:#fff;
+    padding:6px 14px;border-radius:20px;font-size:14px;box-shadow:var(--shadow)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="hero">
+    <div class="logo">🎯</div>
+    <h1>focus — code walkthrough</h1>
+    <p>How the single-file macOS app in <code>main.swift</code> is put together.</p>
+    <nav class="toc">
+      <a href="#model">Mental model</a>
+      <a href="#layout">File layout</a>
+      <a href="#startup">Startup</a>
+      <a href="#db">Storage</a>
+      <a href="#life">Session life</a>
+      <a href="#queue">Queue</a>
+      <a href="#resume">Resume</a>
+      <a href="#modals">Modals</a>
+      <a href="#tables">Tables</a>
+      <a href="#files">Files</a>
+      <a href="#gotchas">Gotchas</a>
+    </nav>
+  </header>
+
+  <!-- 1 -->
+  <section id="model">
+    <h2><span class="num">1</span>The mental model</h2>
+    <p class="lead">A tiny state machine around <strong>“one current focus,”</strong> plus a SQLite log of everything.</p>
+    <div class="grid g3">
+      <div class="card"><h4>State</h4><p>Either a session is running (<code>currentFocus != nil</code>) or you're idle. That's it.</p></div>
+      <div class="card"><h4>Three drivers</h4><p>System events (login/wake/unlock), a 1-second timer, and menu clicks all read/mutate that state.</p></div>
+      <div class="card"><h4>Three surfaces</h4><p>Blocking <b>modals</b>, an always-on-top <b>pill</b>, and the <b>🎯 menu-bar</b> item.</p></div>
+    </div>
+
+    <svg class="diagram" viewBox="0 0 900 260" role="img" aria-label="Session lifecycle state machine">
+      <defs>
+        <marker id="arw" markerWidth="9" markerHeight="9" refX="7" refY="3" orient="auto">
+          <path d="M0,0 L7,3 L0,6 Z" style="fill:var(--muted)"/>
+        </marker>
+        <style>
+          .box{fill:var(--panel);stroke:var(--line);stroke-width:1.5;rx:12}
+          .lbl{fill:var(--ink);font:600 15px -apple-system,sans-serif}
+          .edge{stroke:var(--muted);stroke-width:1.6;fill:none;marker-end:url(#arw)}
+          .etxt{fill:var(--muted);font:12px -apple-system,sans-serif}
+          .accent{stroke:var(--accent)}
+        </style>
+      </defs>
+      <!-- IDLE -->
+      <rect class="box" x="30" y="100" width="150" height="58" rx="12"/>
+      <text class="lbl" x="105" y="134" text-anchor="middle">IDLE</text>
+      <!-- RUNNING -->
+      <rect class="box" x="360" y="100" width="200" height="58" rx="12" style="stroke:var(--accent2)"/>
+      <text class="lbl" x="460" y="127" text-anchor="middle">SESSION RUNNING</text>
+      <text class="etxt" x="460" y="145" text-anchor="middle">deadline = now + seconds</text>
+      <!-- TIMES UP -->
+      <rect class="box" x="720" y="100" width="150" height="58" rx="12" style="stroke:var(--good)"/>
+      <text class="lbl" x="795" y="134" text-anchor="middle">TIME'S UP</text>
+      <!-- edges -->
+      <path class="edge" d="M182,120 L356,120"/>
+      <text class="etxt" x="268" y="112" text-anchor="middle">start focus</text>
+      <path class="edge" d="M562,120 L716,120"/>
+      <text class="etxt" x="639" y="112" text-anchor="middle">timer → 0</text>
+      <!-- complete/abort/defer back to idle -->
+      <path class="edge" d="M420,158 C380,220 200,220 130,160"/>
+      <text class="etxt" x="300" y="212" text-anchor="middle">complete · abort · defer · pre-empt</text>
+      <!-- add time self loop -->
+      <path class="edge accent" d="M460,100 C440,50 480,50 470,98"/>
+      <text class="etxt" x="500" y="52" text-anchor="middle" style="fill:var(--accent)">add time</text>
+      <!-- times up back to idle (rate → chain) -->
+      <path class="edge" d="M795,158 C795,244 470,246 300,190" style="stroke-dasharray:4 4"/>
+      <text class="etxt" x="640" y="240" text-anchor="middle">rate 1–10 · log · chain to next</text>
+    </svg>
+    <p class="muted" style="font-size:13px">Every transition is written to <code>~/focus/focus.db</code>.</p>
+  </section>
+
+  <!-- 2 -->
+  <section id="layout">
+    <h2><span class="num">2</span>File layout</h2>
+    <p>~1,800 lines of Swift, three top-level types, no external dependencies beyond <code>AppKit</code> and <code>SQLite3</code>.</p>
+    <table>
+      <tr><th>Part</th><th>Role</th></tr>
+      <tr><td><code>mmss()</code>, <code>isoNow()</code>, <code>emojiImage()</code></td><td>Free helpers + the <code>SQLITE_TRANSIENT</code> shim.</td></tr>
+      <tr><td><code>final class DB</code></td><td>Everything SQLite: schema, idempotent migrations, all queries.</td></tr>
+      <tr><td><code>QueueItem</code> · <code>ActiveSession</code> · <code>SessionRow</code></td><td>Plain structs the DB hands back.</td></tr>
+      <tr><td><code>CopyableTableView</code> · <code>QueueTableView</code></td><td><code>NSTableView</code> subclasses adding ⌘C and the Delete key.</td></tr>
+      <tr><td><code>final class AppController</code></td><td>The whole UI + behavior; the <code>NSApplicationDelegate</code>.</td></tr>
+      <tr><td>Bootstrap (bottom)</td><td>5 lines — see below.</td></tr>
+    </table>
+    <pre>let app = NSApplication.shared
+app.setActivationPolicy(.accessory)   // menu-bar-only: no Dock icon
+let controller = AppController()
+app.delegate = controller
+app.run()</pre>
+  </section>
+
+  <!-- 3 -->
+  <section id="startup">
+    <h2><span class="num">3</span>Startup — <code>applicationDidFinishLaunching</code></h2>
+    <ol class="tight" style="padding-left:20px">
+      <li>Set the 🎯 app icon (so modals aren't generic).</li>
+      <li>Build the three surfaces: <code>buildMainMenu()</code> (an Edit menu so ⌘C/⌘V work in modals), <code>buildStatusItem()</code>, <code>buildHUD()</code>.</li>
+      <li>Register observers → all funnel into <code>onReturn(reason)</code>:
+        <span class="chip">sessionDidBecomeActive</span><span class="chip">didWake</span><span class="chip">com.apple.screenIsUnlocked</span></li>
+      <li>Start the 1-second <code>uiTimer</code> → <code>tick()</code>, added in <b><code>.common</code> run-loop mode</b>.</li>
+      <li>Call <code>restoreOrPrompt()</code> to handle a session left open from a previous run.</li>
+    </ol>
+    <div class="callout blue"><b>Why <code>.common</code> mode?</b> A default-mode timer freezes while a menu or modal is open. Common mode keeps the pill countdown, the auto-proceed countdown, and the “Open for M:SS” timers all ticking.</div>
+  </section>
+
+  <!-- 4 -->
+  <section id="db">
+    <h2><span class="num">4</span>Storage — <code>class DB</code></h2>
+    <p>A thin wrapper over the SQLite C API. Conventions: strings bound with <code>SQLITE_TRANSIENT</code> (SQLite copies them), times stored as ISO-8601 UTC text, durations as <b>integer seconds</b>.</p>
+
+    <div class="grid g2">
+      <div class="card">
+        <h4>Two duration columns</h4>
+        <p><code>seconds</code> — planned duration, <b>mutable</b> (bumped by Add-time; overwritten with <i>elapsed</i> on interrupt/defer/early-complete).<br>
+        <code>original_seconds</code> — stamped once at creation, <b>never changes</b>. Lets history show <code>9:12 / 25:00</code>.</p>
+      </div>
+      <div class="card">
+        <h4>Tables</h4>
+        <p><code>sessions</code>, <code>queue</code> (ordered by a <code>position</code> column), <code>time_additions</code> (one per Add-time), <code>preempts</code> (one per pre-empt).</p>
+      </div>
+    </div>
+
+    <p style="margin-top:16px"><b>Status values</b>
+      <span class="chip">completed</span><span class="chip">interrupted</span><span class="chip">deferred</span><span class="chip">NULL = active</span></p>
+
+    <h4 style="margin:18px 0 4px">Idempotent migrations</h4>
+    <p><code>exec()</code> deliberately <b>ignores errors</b> — that's what lets every migration run on every launch and simply no-op once applied:</p>
+    <pre>exec("ALTER TABLE sessions ADD COLUMN original_seconds INTEGER;")   // "duplicate column" after 1st run → ignored
+exec("UPDATE sessions SET original_seconds = … WHERE original_seconds IS NULL AND …;")  // WHERE guard → no-op later</pre>
+    <div class="callout"><b>Load-bearing quirk:</b> don't “fix” <code>exec()</code> to surface errors — the whole migration strategy depends on it swallowing them.</div>
+  </section>
+
+  <!-- 5 -->
+  <section id="life">
+    <h2><span class="num">5</span>A session's life</h2>
+    <div class="grid g3">
+      <div class="card"><h4>beginSession</h4><p>Sets in-memory state, inserts the row (stamps both duration columns), logs start-popup time, pings Pushover, paints the pill.</p></div>
+      <div class="card"><h4>tick() · 1&nbsp;Hz</h4><p>Computes <code>remaining = deadline − now</code>, updates the pill, and fires <code>timeUp</code> at zero. Drives display <i>and</i> detection.</p></div>
+      <div class="card"><h4>timeUp</h4><p>Chime + optional ping, then a mandatory rating (or hands-free auto-proceed), then chain to the next focus.</p></div>
+    </div>
+
+    <div class="callout good"><b>Wall-clock deadline.</b> <code>deadline</code> is a <code>Date</code> (<code>now + seconds</code>), not a countdown integer — so sleep / lock / lid-close don't disturb the timer, and a resumed session computes the right remaining time automatically.</div>
+
+    <h4 style="margin:18px 0 4px">The five ways a session ends</h4>
+    <table>
+      <tr><th>Action</th><th>Method</th><th>Status</th><th>Duration&nbsp;recorded</th><th>Continuation</th></tr>
+      <tr><td><b>Complete</b></td><td><code>rateAndComplete</code></td><td>completed</td><td>elapsed (early)</td><td>—</td></tr>
+      <tr><td><b>Abort</b></td><td><code>abortTask</code></td><td>interrupted</td><td>elapsed</td><td>—</td></tr>
+      <tr><td><b>Defer</b></td><td><code>deferTask</code></td><td>deferred</td><td>elapsed</td><td><b>full original</b> → back of queue</td></tr>
+      <tr><td><b>Pre-empt this</b></td><td><code>changeFocus</code></td><td>interrupted</td><td>elapsed</td><td><b>remaining</b> → front, start new now</td></tr>
+      <tr><td><b>Time's up → rate</b></td><td><code>timeUp</code></td><td>completed</td><td>planned</td><td>—</td></tr>
+    </table>
+  </section>
+
+  <!-- 6 -->
+  <section id="queue">
+    <h2><span class="num">6</span>The queue</h2>
+    <p>A FIFO ordered by an explicit <code>position</code> column (not <code>id</code>), so it can be reordered.</p>
+    <ul class="tight">
+      <li><code>enqueue</code> appends at <code>MAX(position)+1</code>; <code>enqueueFront</code> inserts at <code>MIN(position)−1</code>.</li>
+      <li><code>reorderQueue(ids:)</code> rewrites <code>position = 0,1,2,…</code> in one transaction (right-click <b>Move up/down/to top/to bottom</b>).</li>
+      <li>Delete via the Delete key, right-click <b>Delete from queue</b>, or when a session pops the front.</li>
+    </ul>
+    <div class="callout blue"><b>Lineage:</b> <code>original_session_id</code> threads a task's root through the queue, so a deferred/pre-empted task's “(continued)” copy stays linked. <code>COALESCE(original_session_id, id)</code> groups a whole chain in history.</div>
+  </section>
+
+  <!-- 7 -->
+  <section id="resume">
+    <h2><span class="num">7</span>Coming back &amp; resume</h2>
+    <p><code>onReturn(reason)</code> funnels login/wake/unlock/launch: it <b>debounces</b> (10-second cooldown, since wake+unlock+session fire together), guards on <code>showing</code>, does nothing if a session is running, else prompts.</p>
+    <p><code>restoreOrPrompt</code> (once at launch) recovers a session left open when the process died. If its deadline is still ahead, <code>offerResume</code> shows a three-button modal:</p>
+    <div class="grid g3">
+      <div class="card"><h4>Resume</h4><p><code>adopt</code> the row back into memory and continue.</p></div>
+      <div class="card"><h4>Pre-empt…</h4><p><code>adopt</code> it, then reuse <code>changeFocus</code>: remaining time → front, start new now.</p></div>
+      <div class="card"><h4>Start fresh…</h4><p>Abandon it, optionally clear the queue (<code>confirmClearQueue()</code>), then prompt for a new focus.</p></div>
+    </div>
+    <p class="muted" style="font-size:13px">If the deadline already passed while away, it's adopted and <code>tick()</code> runs <code>timeUp</code> immediately.</p>
+  </section>
+
+  <!-- 8 -->
+  <section id="modals">
+    <h2><span class="num">8</span>The modals — one shared shape</h2>
+    <p>Every prompt is an application-modal <code>NSAlert</code> from <code>makeAlert()</code> (forces the 🎯 icon), floated above all Spaces.</p>
+    <ul class="tight">
+      <li><b>Accessory views</b> carry the text fields / checkboxes.</li>
+      <li><b>“Open for M:SS”</b> — <code>startElapsedTimer</code> returns a <code>.common</code>-mode <code>Timer</code> <i>and</i> an <code>openSeconds()</code> closure read at close to log popup-open time.</li>
+      <li><b>Tab</b> cycles fields via <code>nextKeyView</code>.</li>
+      <li>Inputs are <b>minutes</b>, converted to seconds (<code>× 60</code>) at the return; everything downstream is seconds.</li>
+    </ul>
+    <div style="text-align:center;margin:14px 0 2px"><span class="pill-demo">🎯 Ship the pill&nbsp;&nbsp;3:00 / 5:00</span></div>
+    <p class="muted" style="font-size:13px;text-align:center">the pill: <code>remaining / total</code> (total optional, in Settings)</p>
+  </section>
+
+  <!-- 9 -->
+  <section id="tables">
+    <h2><span class="num">9</span>The tables — history &amp; queue</h2>
+    <p><code>AppController</code> is the data source / delegate for <b>both</b> windows, disambiguated by <code>tableView === queueTable</code>.</p>
+    <div class="grid g2">
+      <div class="card"><h4>History</h4><p><code>CopyableTableView</code> — ⌘C emits <b>TSV</b> via <code>copyHistoryRows</code>. Columns include Duration &amp; Original.</p></div>
+      <div class="card"><h4>Queue</h4><p><code>QueueTableView</code> — Delete key removes a row; right-click reorders/deletes; Est. start/finish chained from the current deadline.</p></div>
+    </div>
+  </section>
+
+  <!-- 10 -->
+  <section id="files">
+    <h2><span class="num">10</span>Files on disk</h2>
+    <table>
+      <tr><th>Path</th><th>What</th></tr>
+      <tr><td><code>~/focus/focus.db</code></td><td>the SQLite database</td></tr>
+      <tr><td><code>~/focus/pushover.json</code></td><td>Pushover credentials (you create it)</td></tr>
+      <tr><td><code>~/Library/LaunchAgents/com.murftown.focus.plist</code></td><td>the agent (RunAtLoad + KeepAlive)</td></tr>
+      <tr><td><code>~/Library/Preferences/…</code></td><td>the four checkbox prefs (<code>UserDefaults</code>)</td></tr>
+      <tr><td><code>/tmp/focus.err.log</code> · <code>.out.log</code></td><td>agent stderr / stdout</td></tr>
+    </table>
+  </section>
+
+  <!-- 11 -->
+  <section id="gotchas">
+    <h2><span class="num">11</span>Gotchas worth remembering</h2>
+    <ul class="tight">
+      <li><b>Timers must be <code>.common</code> mode</b> or they freeze under menus/modals.</li>
+      <li><b>Wall-clock deadlines</b> (<code>Date</code>, not a counter) survive sleep/lock.</li>
+      <li><b><code>exec()</code> ignoring errors</b> is load-bearing for migrations.</li>
+      <li><b><code>seconds</code> mutates; <code>original_seconds</code> is immutable.</b> Old interrupted/deferred rows lost their true original (overwritten with elapsed), so they show <code>—</code>.</li>
+      <li><b><code>showing</code></b> stops modals stacking; <b><code>cooldown</code></b> debounces return events.</li>
+      <li>One process, one DB, one user — no concurrency concerns.</li>
+    </ul>
+    <div class="legend" style="margin-top:16px;justify-content:center">
+      <span><span class="dot" style="background:var(--accent2)"></span> session running</span>
+      <span><span class="dot" style="background:var(--good)"></span> time's up</span>
+      <span><span class="dot" style="background:var(--accent)"></span> add-time loop</span>
+    </div>
+  </section>
+
+  <p style="text-align:center;color:var(--muted);font-size:13px;margin-top:30px">
+    Companion to <code>ARCHITECTURE.md</code> · source in <code>main.swift</code>
+  </p>
+
+</div>
+</body>
+</html>
