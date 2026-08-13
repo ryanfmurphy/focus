@@ -154,6 +154,9 @@ rebuilds the binary and reloads the agent.
   than overwrite; `NULL` when a session was closed without any popup, e.g.
   auto-proceed or a launch-time sweep). Planned durations are entered in whole
   minutes but stored as seconds (×60), and shown as `M:SS` in the history window.
+  The rating modal has an **"Apply this time to the previous focus session"**
+  checkbox — when ticked, that popup's open-seconds are added to the session's
+  `seconds` (duration) instead, and its `open_seconds_end` is set to `0`.
 - **`queue`** — pending focuses (`created_at`, `seconds`, `focus`, `position`);
   ordered by `position` (right-click a row in the queue window to re-order).
   "Add to queue" appends (max position + 1); a front pre-empt inserts at min − 1.

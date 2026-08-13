@@ -234,6 +234,17 @@ final class DB {
         sqlite3_step(stmt)
     }
 
+    /// "Apply this time to the previous focus session": add the rating popup's
+    /// open-seconds to the session's duration and zero out its end-popup-open time.
+    func applyPopupTimeToDuration(id: Int64, seconds: Int) {
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "UPDATE sessions SET seconds = seconds + ?, open_seconds_end = 0 WHERE id=?;", -1, &stmt, nil) == SQLITE_OK else { return }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_int(stmt, 1, Int32(seconds))
+        sqlite3_bind_int64(stmt, 2, id)
+        sqlite3_step(stmt)
+    }
+
     /// Close a session as "interrupted", recording how many seconds it actually
     /// ran (overwriting the planned seconds), with an optional rating/note.
     func markInterrupted(id: Int64, elapsedSeconds: Int, rating: Int? = nil, note: String = "",
@@ -935,8 +946,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         currentFocus = nil; deadline = nil; sessionId = nil
         sessionStart = nil; sessionSeconds = nil; sessionOriginalId = nil
         hudWindow.orderOut(nil)
-        let (rating, note, openSeconds) = promptRating(focus: "\(focus) · \(mmss(elapsed))", title: "Rate this session")
-        db.markInterrupted(id: id, elapsedSeconds: elapsed, rating: rating, note: note, openSecondsEnd: openSeconds)
+        let (rating, note, openSeconds, applyTime) = promptRating(focus: "\(focus) · \(mmss(elapsed))", title: "Rate this session")
+        db.markInterrupted(id: id, elapsedSeconds: elapsed, rating: rating, note: note,
+                           openSecondsEnd: applyTime ? nil : openSeconds)
+        if applyTime { db.applyPopupTimeToDuration(id: id, seconds: openSeconds) }
         showing = false
         promptForFocus(reason: "after-session")
     }
@@ -1438,8 +1451,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         defer { showing = false }
         for s in db.unratedCompleted() {
             let label = "\(whenLabel(s.startedAt)) · \(s.focus) · \(mmss(s.seconds))"
-            let (rating, note, openSeconds) = promptRating(focus: label, title: "Rate session")
-            db.setRating(id: s.id, rating: rating, note: note, openSecondsEnd: openSeconds)
+            let (rating, note, openSeconds, applyTime) = promptRating(focus: label, title: "Rate session")
+            db.setRating(id: s.id, rating: rating, note: note, openSecondsEnd: applyTime ? nil : openSeconds)
+            if applyTime { db.applyPopupTimeToDuration(id: s.id, seconds: openSeconds) }
         }
     }
 
@@ -1710,24 +1724,28 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             extendSession(by: added)
             showing = false
 
-        case .rate(let rating, let note, let openSeconds):
+        case .rate(let rating, let note, let openSeconds, let applyTime):
             let endedId = sessionId
             currentFocus = nil
             deadline = nil
             sessionId = nil
-            if let id = endedId { db.endSession(id: id, status: "completed", rating: rating, note: note, openSecondsEnd: openSeconds) }
+            if let id = endedId {
+                db.endSession(id: id, status: "completed", rating: rating, note: note,
+                              openSecondsEnd: applyTime ? nil : openSeconds)
+                if applyTime { db.applyPopupTimeToDuration(id: id, seconds: openSeconds) }
+            }
             // Roll straight into the next session: having rated, set a new focus.
             showing = false
             promptForFocus(reason: "after-session")
         }
     }
 
-    private enum TimeUpChoice { case rate(rating: Int, note: String, openSeconds: Int); case addTime(added: Int, openSeconds: Int) }
+    private enum TimeUpChoice { case rate(rating: Int, note: String, openSeconds: Int, applyTime: Bool); case addTime(added: Int, openSeconds: Int) }
 
     /// Time's-up modal: rate 1–10 (+ optional note) to finish, or add more time.
     private func promptTimeUp(focus: String, seconds: Int) -> TimeUpChoice {
         NSApp.activate(ignoringOtherApps: true)
-        let (accessory, ratingField, noteField, elapsed) = ratingAccessory()
+        let (accessory, ratingField, noteField, elapsed, apply) = ratingAccessory()
         let (timer, openSeconds) = startElapsedTimer(elapsed)
         defer { timer.invalidate() }
         while true {
@@ -1752,7 +1770,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             if (1...10).contains(rating) {
                 return .rate(rating: rating,
                              note: noteField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines),
-                             openSeconds: openSeconds())
+                             openSeconds: openSeconds(), applyTime: apply.state == .on)
             }
             // invalid rating → loop
         }
@@ -1793,29 +1811,37 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         sessionSeconds = nil
         sessionOriginalId = nil
         hudWindow.orderOut(nil)
-        let (rating, note, openSeconds) = promptRating(focus: focus, title: "Rate this session")
+        let (rating, note, openSeconds, applyTime) = promptRating(focus: focus, title: "Rate this session")
         db.endSession(id: id, status: "completed", rating: rating, note: note,
-                      openSecondsEnd: openSeconds, elapsedSeconds: elapsed)
+                      openSecondsEnd: applyTime ? nil : openSeconds, elapsedSeconds: elapsed)
+        if applyTime { db.applyPopupTimeToDuration(id: id, seconds: openSeconds) }
     }
 
-    /// A rating (1–10) field over an optional note field, for the rating modals.
-    private func ratingAccessory() -> (view: NSView, rating: NSTextField, note: NSTextField, elapsed: NSTextField) {
+    /// A rating (1–10) field over an optional note field, for the rating modals,
+    /// with the "Open for M:SS" timer on top and an "apply this time" checkbox below it.
+    private func ratingAccessory() -> (view: NSView, rating: NSTextField, note: NSTextField, elapsed: NSTextField, apply: NSButton) {
         let ratingField = NSTextField(frame: NSRect(x: 0, y: 34, width: 80, height: 24))
         ratingField.placeholderString = "1–10"
-        let noteField = NSTextField(frame: NSRect(x: 0, y: 2, width: 320, height: 24))
+        let noteField = NSTextField(frame: NSRect(x: 0, y: 2, width: 340, height: 24))
         noteField.placeholderString = "Note (optional)"
+        // When checked, the popup-open time is added to the session's duration
+        // instead of being recorded as end-popup-open time (which becomes 0).
+        let apply = NSButton(checkboxWithTitle: "Apply this time to the previous focus session", target: nil, action: nil)
+        apply.frame = NSRect(x: 0, y: 64, width: 340, height: 20)
+        apply.state = .off
         let elapsed = NSTextField(labelWithString: "")
-        elapsed.frame = NSRect(x: 0, y: 62, width: 320, height: 18)
+        elapsed.frame = NSRect(x: 0, y: 90, width: 340, height: 18)
         elapsed.font = NSFont.systemFont(ofSize: 11)
         elapsed.textColor = .secondaryLabelColor
-        let view = NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 84))
+        let view = NSView(frame: NSRect(x: 0, y: 0, width: 340, height: 110))
         view.addSubview(ratingField)
         view.addSubview(noteField)
+        view.addSubview(apply)
         view.addSubview(elapsed)
         // Wire the field editor loop so Tab / Shift-Tab cycle rating ⇄ note.
         ratingField.nextKeyView = noteField
         noteField.nextKeyView = ratingField
-        return (view, ratingField, noteField, elapsed)
+        return (view, ratingField, noteField, elapsed, apply)
     }
 
     /// A `.common`-mode timer that shows how long the modal has been open, so it
@@ -1832,9 +1858,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     }
 
     /// Mandatory 1–10 rating modal (+ optional note) — floating, loops until valid.
-    private func promptRating(focus: String, title: String) -> (rating: Int, note: String, openSeconds: Int) {
+    private func promptRating(focus: String, title: String) -> (rating: Int, note: String, openSeconds: Int, applyTime: Bool) {
         NSApp.activate(ignoringOtherApps: true)
-        let (accessory, ratingField, noteField, elapsed) = ratingAccessory()
+        let (accessory, ratingField, noteField, elapsed, apply) = ratingAccessory()
         let (timer, openSeconds) = startElapsedTimer(elapsed)
         defer { timer.invalidate() }
         var rating = 0
@@ -1850,7 +1876,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             alert.runModal()
             rating = Int(ratingField.stringValue.trimmingCharacters(in: .whitespaces)) ?? 0
         }
-        return (rating, noteField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines), openSeconds())
+        return (rating, noteField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines),
+                openSeconds(), apply.state == .on)
     }
 
     // ---- UI construction ----
