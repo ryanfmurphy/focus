@@ -1826,14 +1826,19 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         noteField.placeholderString = "Note (optional)"
         // When checked, the popup-open time is added to the session's duration
         // instead of being recorded as end-popup-open time (which becomes 0).
-        let apply = NSButton(checkboxWithTitle: "Apply this time to the previous focus session", target: nil, action: nil)
-        apply.frame = NSRect(x: 0, y: 64, width: 340, height: 20)
+        // Small + gray to sit with the "Open for …" timer above it.
+        let apply = NSButton(checkboxWithTitle: "", target: nil, action: nil)
+        apply.controlSize = .small
+        apply.attributedTitle = NSAttributedString(
+            string: "Apply this time to the previous focus session",
+            attributes: [.font: NSFont.systemFont(ofSize: 11), .foregroundColor: NSColor.secondaryLabelColor])
+        apply.frame = NSRect(x: 0, y: 78, width: 340, height: 18)
         apply.state = .off
         let elapsed = NSTextField(labelWithString: "")
-        elapsed.frame = NSRect(x: 0, y: 90, width: 340, height: 18)
+        elapsed.frame = NSRect(x: 0, y: 100, width: 340, height: 18)
         elapsed.font = NSFont.systemFont(ofSize: 11)
         elapsed.textColor = .secondaryLabelColor
-        let view = NSView(frame: NSRect(x: 0, y: 0, width: 340, height: 110))
+        let view = NSView(frame: NSRect(x: 0, y: 0, width: 340, height: 122))
         view.addSubview(ratingField)
         view.addSubview(noteField)
         view.addSubview(apply)
