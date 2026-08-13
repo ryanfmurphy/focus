@@ -1523,15 +1523,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     // Copy the selected queue rows to the clipboard as TSV (with a header).
     private func copyQueueRows(_ indexes: IndexSet) {
         guard !indexes.isEmpty else { return }
-        var lines = ["#\tDuration (s)\tEst. start\tEst. finish\tFocus"]
+        var lines = ["Duration (s)\tFocus"]
         for i in indexes where i < queueRows.count {
             let q = queueRows[i]
-            let est = i < queueEstimates.count ? queueEstimates[i] : nil
             let fields = [
-                "\(i + 1)",
                 "\(q.seconds)",
-                est.map { localClockFormatter.string(from: $0.start) } ?? "",
-                est.map { localClockFormatter.string(from: $0.finish) } ?? "",
                 q.focus,
             ].map(tsvClean)
             lines.append(fields.joined(separator: "\t"))
