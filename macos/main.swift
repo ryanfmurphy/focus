@@ -575,10 +575,11 @@ final class CopyableTableView: NSTableView {
     }
 }
 
-// An NSTableView that reports Delete / ⌦ key presses (with a row selected) so the
-// queue window can remove the selected item.
+// An NSTableView that reports Delete / ⌦ key presses (to remove the selected item)
+// and supports ⌘C (to copy the selected rows).
 final class QueueTableView: NSTableView {
     var onDelete: ((Int) -> Void)?
+    var onCopy: ((IndexSet) -> Void)?
 
     override func keyDown(with event: NSEvent) {
         // 51 = Delete (backspace), 117 = forward delete (fn+Delete).
@@ -587,6 +588,13 @@ final class QueueTableView: NSTableView {
             return
         }
         super.keyDown(with: event)
+    }
+
+    @objc func copy(_ sender: Any?) { onCopy?(selectedRowIndexes) }
+
+    override func validateUserInterfaceItem(_ item: NSValidatedUserInterfaceItem) -> Bool {
+        if item.action == #selector(copy(_:)) { return !selectedRowIndexes.isEmpty }
+        return super.validateUserInterfaceItem(item)
     }
 }
 
@@ -1387,7 +1395,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             table.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
             table.rowHeight = 22
             table.style = .inset
+            table.allowsMultipleSelection = true   // Shift/⌘-click to select a range, then ⌘C
             table.onDelete = { [weak self] row in self?.deleteQueueRow(at: row) }
+            table.onCopy = { [weak self] indexes in self?.copyQueueRows(indexes) }
             // Right-click a row to re-order it within the queue, or remove it.
             let rowMenu = NSMenu()
             rowMenu.addItem(withTitle: "Move up", action: #selector(moveQueueItemUp), keyEquivalent: "")
@@ -1508,6 +1518,26 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         db.removeFromQueue(id: queueRows[row].id)
         reloadQueueData()
         queueTable?.reloadData()
+    }
+
+    // Copy the selected queue rows to the clipboard as TSV (with a header).
+    private func copyQueueRows(_ indexes: IndexSet) {
+        guard !indexes.isEmpty else { return }
+        var lines = ["#\tDuration (s)\tEst. start\tEst. finish\tFocus"]
+        for i in indexes where i < queueRows.count {
+            let q = queueRows[i]
+            let est = i < queueEstimates.count ? queueEstimates[i] : nil
+            let fields = [
+                "\(i + 1)",
+                "\(q.seconds)",
+                est.map { localClockFormatter.string(from: $0.start) } ?? "",
+                est.map { localClockFormatter.string(from: $0.finish) } ?? "",
+                q.focus,
+            ].map(tsvClean)
+            lines.append(fields.joined(separator: "\t"))
+        }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(lines.joined(separator: "\n"), forType: .string)
     }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
