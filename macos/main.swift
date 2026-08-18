@@ -670,7 +670,7 @@ final class QueuePickSource: NSObject, NSTableViewDataSource, NSTableViewDelegat
 // MARK: - App
 
 final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSource,
-                           NSTableViewDelegate, NSMenuItemValidation {
+                           NSTableViewDelegate, NSMenuItemValidation, NSWindowDelegate {
     private let db = DB()
 
     // ---- session state ----
@@ -691,6 +691,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     private var statusItem: NSStatusItem!
     private var hudWindow: NSWindow!
     private var hudLabel: NSTextField!
+    private var hudMovedOrigin: NSPoint?   // set once the user drags the pill; layout keeps it there
+    private var hudProgrammaticMove = false // guards windowDidMove during our own setFrame
     private var uiTimer: Timer?
     private var historyWindow: NSWindow?
     private var historyTable: NSTableView?
@@ -1982,7 +1984,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         hudWindow.isOpaque = false
         hudWindow.backgroundColor = .clear
         hudWindow.hasShadow = true
-        hudWindow.ignoresMouseEvents = true            // click-through
+        hudWindow.isMovableByWindowBackground = true   // drag the pill anywhere on it
+        hudWindow.delegate = self                      // to notice user drags (windowDidMove)
         hudWindow.level = .statusBar                   // above normal windows
         hudWindow.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
 
@@ -2013,11 +2016,26 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         let h = hudLabel.frame.height + padY * 2
         hudLabel.setFrameOrigin(NSPoint(x: padX, y: padY))
 
-        guard let screen = NSScreen.main else { return }
-        let vf = screen.visibleFrame
-        let x = vf.maxX - w - 16
-        let y = vf.maxY - h - 12
-        hudWindow.setFrame(NSRect(x: x, y: y, width: w, height: h), display: true)
+        // If the user has dragged the pill, keep its (bottom-left) origin and just
+        // resize as the text changes; otherwise pin it to the top-right corner.
+        let origin: NSPoint
+        if let moved = hudMovedOrigin {
+            origin = moved
+        } else {
+            guard let screen = NSScreen.main else { return }
+            let vf = screen.visibleFrame
+            origin = NSPoint(x: vf.maxX - w - 16, y: vf.maxY - h - 12)
+        }
+        hudProgrammaticMove = true
+        hudWindow.setFrame(NSRect(origin: origin, size: NSSize(width: w, height: h)), display: true)
+        hudProgrammaticMove = false
+    }
+
+    // The user dragged the pill — remember where they put it so layoutHUD stops
+    // snapping it back to the corner.
+    func windowDidMove(_ notification: Notification) {
+        guard (notification.object as? NSWindow) === hudWindow, !hudProgrammaticMove else { return }
+        hudMovedOrigin = hudWindow.frame.origin
     }
 }
 
