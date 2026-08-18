@@ -857,21 +857,13 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         guard let (focus, seconds, openStart) = askFocusAndMinutes(
             title: title, info: info, confirm: "Start", cancellable: preempting) else { return }
 
-        // The pre-empt is committed now (no cancel past this point), so close out the
-        // current session — rating it — and re-queue its remaining time to the front.
         var preemptedId: Int64? = nil
         if preempting, let id = sessionId, let curFocus = currentFocus, let dl = deadline {
             preemptedId = id
-            // Freeze elapsed/remaining before the rating popup so its time isn't charged.
             let remaining = max(1, Int(dl.timeIntervalSinceNow.rounded()))
             let elapsed = max(0, Int(Date().timeIntervalSince(sessionStart ?? Date()).rounded()))
-            let (rating, note, openSeconds, applyTime) = promptRating(
-                focus: "\(curFocus) · \(mmss(elapsed))",
-                title: "Rate your session before moving on to the new task")
-            // Complete the existing record as interrupted, with the rating and elapsed seconds.
-            db.markInterrupted(id: id, elapsedSeconds: elapsed, rating: rating, note: note,
-                               openSecondsEnd: applyTime ? nil : openSeconds)
-            if applyTime { db.applyPopupTimeToDuration(id: id, seconds: openSeconds) }
+            // Complete the existing record as interrupted, recording elapsed seconds.
+            db.markInterrupted(id: id, elapsedSeconds: elapsed)
             // Queue a fresh copy for the remaining time to resume next, carrying
             // the chain root (this session's original, or itself if it's the root).
             db.enqueueFront(focus: continuedName(curFocus), seconds: remaining,
