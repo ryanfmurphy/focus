@@ -1061,10 +1061,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         alert.informativeText = "\(item.focus)\n\n\(mmss(item.seconds))"
         alert.addButton(withTitle: "Start")             // .alertFirstButtonReturn
         alert.addButton(withTitle: "Pre-empt with new") // .alertSecondButtonReturn
-        // Offer picking a different queued item only when there's another to pick.
-        if db.queueCount() > 1 {
-            alert.addButton(withTitle: "Pre-empt from queue…")  // .alertThirdButtonReturn
-        }
+        // Always shown, but disabled when there's no other queued item to pick.
+        let pickButton = alert.addButton(withTitle: "Pre-empt from queue…")  // .alertThirdButtonReturn
+        pickButton.isEnabled = db.queueCount() > 1
         alert.window.level = .floating
         alert.window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
 
