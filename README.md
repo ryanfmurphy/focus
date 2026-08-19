@@ -88,6 +88,23 @@ entirely (this also works while a modal is up, since prompts are app-modal):
 launchctl bootout gui/$(id -u)/com.murftown.focus
 ```
 
+### A clickable launcher icon (Applications / Dock)
+
+The app itself is a menu-bar-only LaunchAgent binary (no Dock icon). To get a
+🎯 icon you can click to launch it — handy after a clean quit — build a small
+launcher bundle:
+
+```sh
+cd macos
+./make-app.sh                # builds ./Focus.app (drag it into /Applications)
+./make-app.sh /Applications  # …or build and install straight to /Applications
+```
+
+`Focus.app` doesn't run the app itself; clicking it just tells launchd to start
+the managed agent (so you never get a second instance — if it's already running,
+the click is a no-op). Drag it to the Dock to keep it one click away. Re-run
+`make-app.sh` if you ever want to regenerate it.
+
 ## Menu reference
 
 Click the `🎯` menu-bar icon. Items are context-sensitive (disabled/renamed

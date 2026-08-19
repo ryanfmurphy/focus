@@ -15,3 +15,6 @@ ios/build/
 *.xcuserstate
 xcuserdata/
 .DS_Store
+
+# generated launcher app bundle
+/macos/Focus.app/
