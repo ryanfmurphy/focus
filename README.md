@@ -50,8 +50,10 @@ cd macos
 
 This compiles `main.swift` to `macos/focus`, copies the LaunchAgent to
 `~/Library/LaunchAgents/com.murftown.focus.plist`, and (re)loads it. The agent
-has `RunAtLoad` + `KeepAlive`, so it starts at login and relaunches if it exits.
-The focus prompt appears immediately (launching counts as a return).
+has `RunAtLoad` + a conditional `KeepAlive`, so it starts at login and relaunches
+if it *crashes* — but a clean quit (Cmd-Q) stays closed (see
+[Quitting & reopening](#quitting--reopening)). The focus prompt appears
+immediately (launching counts as a return).
 
 To update after editing `main.swift`, just re-run `./install.sh` — it kills the
 old instance and loads the rebuilt binary cleanly.
@@ -65,10 +67,22 @@ cd macos
 
 Stops and unloads the agent. Your data in `~/focus/` is left untouched.
 
-### Quitting while a modal is up
+## Quitting & reopening
 
-The prompts are application-modal, and the agent has `KeepAlive`, so a plain
-Force-Quit just respawns it. To stop it (even with a modal showing):
+**Cmd-Q** or **Quit focus** quits the app and it *stays* closed. The agent's
+`KeepAlive` is conditional (`SuccessfulExit = false`), so a clean quit (exit 0) is
+not relaunched, while a crash or kill still respawns it. It will, however, come
+back on your **next login** (`RunAtLoad`).
+
+To reopen it before then (or after a clean quit):
+
+```sh
+cd macos
+./open.sh          # relaunches the still-loaded agent (falls back to install.sh)
+```
+
+To stop it **and** keep it from returning at next login, unload the agent
+entirely (this also works while a modal is up, since prompts are app-modal):
 
 ```sh
 launchctl bootout gui/$(id -u)/com.murftown.focus

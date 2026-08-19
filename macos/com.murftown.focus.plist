@@ -11,11 +11,16 @@
         <string>__FOCUS_BIN__</string>
     </array>
 
-    <!-- Launch at login and keep it alive if it ever exits/crashes. -->
+    <!-- Launch at login, and relaunch only if it exits *unsuccessfully* (a crash
+         or kill). A clean quit (Cmd-Q / "Quit focus", exit 0) stays closed until
+         the next login or an explicit relaunch (./open.sh). -->
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
-    <true/>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
 
     <!-- An Aqua GUI session is required to show modals. -->
     <key>LimitLoadToSessionType</key>
