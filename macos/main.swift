@@ -388,7 +388,7 @@ final class DB {
     /// Most recent sessions, newest first, for the history window.
     func recent(limit: Int = 500) -> [SessionRow] {
         let sql = """
-        SELECT started_at, ended_at, seconds, focus, rating, status, note,
+        SELECT id, started_at, ended_at, seconds, focus, rating, status, note,
                open_seconds_start, open_seconds_end, original_seconds
         FROM sessions ORDER BY id DESC LIMIT ?;
         """
@@ -408,18 +408,30 @@ final class DB {
         var rows: [SessionRow] = []
         while sqlite3_step(stmt) == SQLITE_ROW {
             rows.append(SessionRow(
-                startedAt: text(0) ?? "",
-                endedAt: text(1),
-                seconds: Int(sqlite3_column_int(stmt, 2)),
-                focus: text(3) ?? "",
-                rating: intOrNil(4),
-                status: text(5),
-                note: text(6),
-                openSecondsStart: intOrNil(7),
-                openSecondsEnd: intOrNil(8),
-                originalSeconds: intOrNil(9)))
+                id: sqlite3_column_int64(stmt, 0),
+                startedAt: text(1) ?? "",
+                endedAt: text(2),
+                seconds: Int(sqlite3_column_int(stmt, 3)),
+                focus: text(4) ?? "",
+                rating: intOrNil(5),
+                status: text(6),
+                note: text(7),
+                openSecondsStart: intOrNil(8),
+                openSecondsEnd: intOrNil(9),
+                originalSeconds: intOrNil(10)))
         }
         return rows
+    }
+
+    /// Permanently delete the given sessions from history.
+    func deleteSessions(ids: [Int64]) {
+        guard !ids.isEmpty else { return }
+        let placeholders = ids.map { _ in "?" }.joined(separator: ",")
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "DELETE FROM sessions WHERE id IN (\(placeholders));", -1, &stmt, nil) == SQLITE_OK else { return }
+        defer { sqlite3_finalize(stmt) }
+        for (i, id) in ids.enumerated() { sqlite3_bind_int64(stmt, Int32(i + 1), id) }
+        sqlite3_step(stmt)
     }
 
     /// Total number of recorded sessions (for the history menu label).
@@ -550,6 +562,7 @@ struct ActiveSession {
 }
 
 struct SessionRow {
+    let id: Int64
     let startedAt: String
     let endedAt: String?
     let seconds: Int
@@ -970,6 +983,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             || menuItem.action == #selector(addTimeToCurrent) || menuItem.action == #selector(deferTask) {
             return currentFocus != nil
         }
+        if menuItem.action == #selector(deleteHistoryItems) {
+            return !historyTargetRows().isEmpty
+        }
         if menuItem.action == #selector(toggleShowPill) {
             menuItem.state = showPillEnabled ? .on : .off
             return true
@@ -1287,6 +1303,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             table.allowsMultipleSelection = true   // Shift/⌘-click to select a range
             table.style = .inset
             table.onCopy = { [weak self] indexes in self?.copyHistoryRows(indexes) }
+            // Right-click a row (or a selection) to delete it.
+            let histMenu = NSMenu()
+            histMenu.addItem(withTitle: "Delete", action: #selector(deleteHistoryItems), keyEquivalent: "")
+            for mi in histMenu.items { mi.target = self }
+            table.menu = histMenu
 
             func addColumn(_ id: String, _ title: String, width: CGFloat, min: CGFloat,
                            align: NSTextAlignment = .left) {
@@ -1340,6 +1361,43 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         }
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(lines.joined(separator: "\n"), forType: .string)
+    }
+
+    // Rows a history right-click acts on: the current selection if the clicked row
+    // is part of it, otherwise just the clicked row.
+    private func historyTargetRows() -> [Int] {
+        guard let table = historyTable else { return [] }
+        let clicked = table.clickedRow
+        let selected = table.selectedRowIndexes
+        let rows: IndexSet
+        if clicked >= 0 && selected.contains(clicked) { rows = selected }
+        else if clicked >= 0 { rows = IndexSet(integer: clicked) }
+        else { rows = selected }
+        return rows.filter { $0 < historyRows.count }
+    }
+
+    // Delete the right-clicked (or selected) history sessions, after confirming.
+    @objc func deleteHistoryItems() {
+        guard !showing else { return }
+        let rows = historyTargetRows()
+        guard !rows.isEmpty else { return }
+        let ids = rows.map { historyRows[$0].id }
+
+        showing = true
+        defer { showing = false }
+        let n = ids.count
+        let alert = makeAlert()
+        alert.messageText = "Delete \(n) session\(n == 1 ? "" : "s")?"
+        alert.informativeText = "This permanently removes \(n == 1 ? "this session" : "these sessions") from history. This can't be undone."
+        alert.addButton(withTitle: "Delete")   // .alertFirstButtonReturn
+        alert.addButton(withTitle: "Cancel")
+        alert.window.level = .floating
+        alert.window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        db.deleteSessions(ids: ids)
+        historyRows = db.recent()
+        historyTable?.reloadData()
     }
 
     // TSV has no quoting, so flatten any tabs/newlines in a field to spaces.
