@@ -691,7 +691,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     private var statusItem: NSStatusItem!
     private var hudWindow: NSWindow!
     private var hudLabel: NSTextField!
-    private var hudMovedOrigin: NSPoint?   // set once the user drags the pill; layout keeps it there
+    private var hudAnchorTopRight: NSPoint? // set once the user drags the pill; layout keeps this corner fixed
     private var hudProgrammaticMove = false // guards windowDidMove during our own setFrame
     private var uiTimer: Timer?
     private var historyWindow: NSWindow?
@@ -2008,26 +2008,28 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         let h = hudLabel.frame.height + padY * 2
         hudLabel.setFrameOrigin(NSPoint(x: padX, y: padY))
 
-        // If the user has dragged the pill, keep its (bottom-left) origin and just
-        // resize as the text changes; otherwise pin it to the top-right corner.
-        let origin: NSPoint
-        if let moved = hudMovedOrigin {
-            origin = moved
+        // Anchor the top-right corner (right edge + top edge), so the pill grows
+        // left/down as the focus text changes and stays neatly justified — whether
+        // it's at the default corner or wherever the user dragged it.
+        let topRight: NSPoint
+        if let dragged = hudAnchorTopRight {
+            topRight = dragged
         } else {
             guard let screen = NSScreen.main else { return }
             let vf = screen.visibleFrame
-            origin = NSPoint(x: vf.maxX - w - 16, y: vf.maxY - h - 12)
+            topRight = NSPoint(x: vf.maxX - 16, y: vf.maxY - 12)
         }
+        let origin = NSPoint(x: topRight.x - w, y: topRight.y - h)
         hudProgrammaticMove = true
         hudWindow.setFrame(NSRect(origin: origin, size: NSSize(width: w, height: h)), display: true)
         hudProgrammaticMove = false
     }
 
-    // The user dragged the pill — remember where they put it so layoutHUD stops
-    // snapping it back to the corner.
+    // The user dragged the pill — remember its top-right corner so layoutHUD keeps
+    // that fixed (and stops snapping back to the screen corner).
     func windowDidMove(_ notification: Notification) {
         guard (notification.object as? NSWindow) === hudWindow, !hudProgrammaticMove else { return }
-        hudMovedOrigin = hudWindow.frame.origin
+        hudAnchorTopRight = NSPoint(x: hudWindow.frame.maxX, y: hudWindow.frame.maxY)
     }
 }
 
