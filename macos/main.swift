@@ -2002,6 +2002,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     }
 
     private func layoutHUD() {
+        // Don't move/resize the pill mid-drag (primary mouse button held) — that
+        // would fight the drag. It re-justifies on the first tick after release.
+        if (NSEvent.pressedMouseButtons & 1) != 0 { return }
+
         hudLabel.sizeToFit()
         let padX: CGFloat = 14, padY: CGFloat = 8
         let w = hudLabel.frame.width + padX * 2
