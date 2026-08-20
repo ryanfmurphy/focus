@@ -188,7 +188,9 @@ rebuilds the binary and reloads the agent.
   minutes but stored as seconds (×60), and shown as `M:SS` in the history window.
   The rating modal has an **"Apply this time to the previous focus session"**
   checkbox — when ticked, that popup's open-seconds are added to the session's
-  `seconds` (duration) instead, and its `open_seconds_end` is set to `0`.
+  `seconds` (duration) instead, and its `open_seconds_end` is set to `0`. At
+  time's-up, ticking it and clicking **Add time** applies the popup-open-so-far to
+  the duration *immediately* (and restarts the "Open for" counter).
 - **`queue`** — pending focuses (`created_at`, `seconds`, `focus`, `position`);
   ordered by `position` (right-click a row in the queue window to re-order).
   "Add to queue" appends (max position + 1); a front pre-empt inserts at min − 1.

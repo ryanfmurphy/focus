@@ -245,6 +245,16 @@ final class DB {
         sqlite3_step(stmt)
     }
 
+    /// Add seconds to a session's duration (without touching end-popup-open time).
+    func addToDuration(id: Int64, seconds: Int) {
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "UPDATE sessions SET seconds = seconds + ? WHERE id=?;", -1, &stmt, nil) == SQLITE_OK else { return }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_int(stmt, 1, Int32(seconds))
+        sqlite3_bind_int64(stmt, 2, id)
+        sqlite3_step(stmt)
+    }
+
     /// Close a session as "interrupted", recording how many seconds it actually
     /// ran (overwriting the planned seconds), with an optional rating/note.
     func markInterrupted(id: Int64, elapsedSeconds: Int, rating: Int? = nil, note: String = "",
@@ -1220,7 +1230,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         accessory.addSubview(minutesField)
         accessory.addSubview(elapsed)
 
-        let (elapsedTimer, openSeconds) = startElapsedTimer(elapsed)
+        let (elapsedTimer, openSeconds, _) = startElapsedTimer(elapsed)
         defer { elapsedTimer.invalidate() }
 
         while true {
@@ -1831,7 +1841,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     private func promptTimeUp(focus: String, seconds: Int) -> TimeUpChoice {
         NSApp.activate(ignoringOtherApps: true)
         let (accessory, ratingField, noteField, elapsed, apply) = ratingAccessory()
-        let (timer, openSeconds) = startElapsedTimer(elapsed)
+        let (timer, openSeconds, resetElapsed) = startElapsedTimer(elapsed)
         defer { timer.invalidate() }
         while true {
             let alert = makeAlert()
@@ -1846,6 +1856,13 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             let response = alert.runModal()
 
             if response == .alertSecondButtonReturn {
+                // "Apply this time" + Add time: instantly credit the popup-open time
+                // so far to the session's duration, then restart the counter so that
+                // stretch isn't counted again on the next Add-time / rating.
+                if apply.state == .on, let id = sessionId {
+                    db.addToDuration(id: id, seconds: openSeconds())
+                    resetElapsed()
+                }
                 if let extra = askMinutes() {
                     return .addTime(added: extra, openSeconds: openSeconds())
                 }
@@ -1937,21 +1954,23 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     /// A `.common`-mode timer that shows how long the modal has been open, so it
     /// keeps ticking while runModal blocks. Caller invalidates the timer, and can
     /// call `openSeconds()` at close time to get the elapsed seconds (rounded).
-    private func startElapsedTimer(_ label: NSTextField) -> (timer: Timer, openSeconds: () -> Int) {
-        let openedAt = Date()
+    private func startElapsedTimer(_ label: NSTextField) -> (timer: Timer, openSeconds: () -> Int, reset: () -> Void) {
+        var openedAt = Date()   // var so `reset` can restart the count
         label.stringValue = "Open for 0:00"
         let timer = Timer(timeInterval: 1, repeats: true) { _ in
             label.stringValue = "Open for \(mmss(Int(Date().timeIntervalSince(openedAt))))"
         }
         RunLoop.main.add(timer, forMode: .common)
-        return (timer, { Int(Date().timeIntervalSince(openedAt).rounded()) })
+        return (timer,
+                { Int(Date().timeIntervalSince(openedAt).rounded()) },
+                { openedAt = Date(); label.stringValue = "Open for 0:00" })
     }
 
     /// Mandatory 1–10 rating modal (+ optional note) — floating, loops until valid.
     private func promptRating(focus: String, title: String) -> (rating: Int, note: String, openSeconds: Int, applyTime: Bool) {
         NSApp.activate(ignoringOtherApps: true)
         let (accessory, ratingField, noteField, elapsed, apply) = ratingAccessory()
-        let (timer, openSeconds) = startElapsedTimer(elapsed)
+        let (timer, openSeconds, _) = startElapsedTimer(elapsed)
         defer { timer.invalidate() }
         var rating = 0
         while rating < 1 || rating > 10 {
