@@ -699,6 +699,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     private var showing = false
     private var lastFired = Date.distantPast
     private let cooldown: TimeInterval = 10
+    private var panelResult: Int?   // set by a floating (non-app-modal) panel's button
 
     // ---- ui ----
     private var statusItem: NSStatusItem!
@@ -721,6 +722,42 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         let alert = NSAlert()
         alert.icon = alertIcon
         return alert
+    }
+
+    @objc private func floatingPanelButton(_ sender: NSButton) { panelResult = sender.tag }
+
+    /// Show an NSAlert's window *without* an application-modal session, so the 🎯
+    /// menu and other app windows stay usable while it's up. We reuse the alert's
+    /// layout but drive it with our own event pump: it returns the clicked button's
+    /// index (0 = first button). Because events aren't restricted to this window,
+    /// status-item clicks / other windows work; the `showing` guard still blocks a
+    /// second prompt from stacking.
+    private func runFloatingAlert(_ alert: NSAlert, firstResponder: NSView? = nil) -> Int {
+        alert.layout()
+        let panel = alert.window
+        panel.level = .floating
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        panel.hidesOnDeactivate = false
+        // Re-point the buttons at us (their default action only works under runModal).
+        for (i, b) in alert.buttons.enumerated() {
+            b.target = self
+            b.action = #selector(floatingPanelButton(_:))
+            b.tag = i
+        }
+        panelResult = nil
+        NSApp.activate(ignoringOtherApps: true)
+        panel.makeKeyAndOrderFront(nil)
+        if let fr = firstResponder { panel.makeFirstResponder(fr) }
+        // Pump events until a button sets panelResult. nextEvent in .default mode
+        // still services .common-mode timers (the countdown / "Open for" label), and
+        // dispatching a status-item click runs the menu inline.
+        while panelResult == nil {
+            if let e = NSApp.nextEvent(matching: .any, until: .distantFuture, inMode: .default, dequeue: true) {
+                NSApp.sendEvent(e)
+            }
+        }
+        panel.orderOut(nil)
+        return panelResult ?? 0
     }
 
     func applicationDidFinishLaunching(_ note: Notification) {
@@ -1836,15 +1873,13 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             let alert = makeAlert()
             alert.messageText = "Time's up"
             alert.informativeText = "Focus: \(focus)\n\(mmss(seconds))\n\nRate it 1–10 to finish (optional note), or add more time:"
-            alert.addButton(withTitle: "Save")        // .alertFirstButtonReturn
-            alert.addButton(withTitle: "Add time…")   // .alertSecondButtonReturn
+            alert.addButton(withTitle: "Save")        // index 0
+            alert.addButton(withTitle: "Add time…")   // index 1
             alert.accessoryView = accessory
-            alert.window.level = .floating
-            alert.window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-            alert.window.initialFirstResponder = ratingField
-            let response = alert.runModal()
+            // Non-app-modal so the menu stays usable while the prompt is up.
+            let clicked = runFloatingAlert(alert, firstResponder: ratingField)
 
-            if response == .alertSecondButtonReturn {
+            if clicked == 1 {
                 // Account for the popup-open time so far right now (before the Add-time
                 // prompt): to the session's duration if "Apply this time" is checked,
                 // otherwise banked as end-popup-open. Then restart the counter so this
