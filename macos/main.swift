@@ -234,18 +234,8 @@ final class DB {
         sqlite3_step(stmt)
     }
 
-    /// "Apply this time to the previous focus session": add the rating popup's
-    /// open-seconds to the session's duration and zero out its end-popup-open time.
-    func applyPopupTimeToDuration(id: Int64, seconds: Int) {
-        var stmt: OpaquePointer?
-        guard sqlite3_prepare_v2(db, "UPDATE sessions SET seconds = seconds + ?, open_seconds_end = 0 WHERE id=?;", -1, &stmt, nil) == SQLITE_OK else { return }
-        defer { sqlite3_finalize(stmt) }
-        sqlite3_bind_int(stmt, 1, Int32(seconds))
-        sqlite3_bind_int64(stmt, 2, id)
-        sqlite3_step(stmt)
-    }
-
-    /// Add seconds to a session's duration (without touching end-popup-open time).
+    /// "Apply this time to the previous focus session": add a popup span to the
+    /// session's duration (without touching end-popup-open time).
     func addToDuration(id: Int64, seconds: Int) {
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, "UPDATE sessions SET seconds = seconds + ? WHERE id=?;", -1, &stmt, nil) == SQLITE_OK else { return }
@@ -982,7 +972,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         let (rating, note, openSeconds, applyTime) = promptRating(focus: "\(focus) · \(mmss(elapsed))", title: "Rate this session")
         db.markInterrupted(id: id, elapsedSeconds: elapsed, rating: rating, note: note,
                            openSecondsEnd: applyTime ? nil : openSeconds)
-        if applyTime { db.applyPopupTimeToDuration(id: id, seconds: openSeconds) }
+        if applyTime { db.addToDuration(id: id, seconds: openSeconds) }
         showing = false
         promptForFocus(reason: "after-session")
     }
@@ -1532,7 +1522,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             let label = "\(whenLabel(s.startedAt)) · \(s.focus) · \(mmss(s.seconds))"
             let (rating, note, openSeconds, applyTime) = promptRating(focus: label, title: "Rate session")
             db.setRating(id: s.id, rating: rating, note: note, openSecondsEnd: applyTime ? nil : openSeconds)
-            if applyTime { db.applyPopupTimeToDuration(id: s.id, seconds: openSeconds) }
+            if applyTime { db.addToDuration(id: s.id, seconds: openSeconds) }
         }
     }
 
@@ -1626,8 +1616,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         case "origmin":   text = r.originalSeconds.map { mmss($0) } ?? "—"; align = .right
         case "rating":    text = r.rating.map { "\($0)/10" } ?? "—"; align = .right
         case "status":    text = r.status ?? (r.endedAt == nil ? "active" : "—")
-        case "openstart": text = r.openSecondsStart.map { mmss($0) } ?? "—"; align = .right
-        case "openend":   text = r.openSecondsEnd.map { mmss($0) } ?? "—"; align = .right
+        case "openstart": text = mmss(r.openSecondsStart ?? 0); align = .right   // NULL shows 0:00
+        case "openend":   text = mmss(r.openSecondsEnd ?? 0); align = .right
         case "note":      text = r.note ?? ""
         default:          text = r.focus
         }
@@ -1812,10 +1802,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         }
 
         switch promptTimeUp(focus: focus, seconds: sessionSeconds ?? 0) {
-        case .addTime(let added, let popupOpen):
-            // Keep the SAME session going. Bank the time the time's-up popup was
-            // open (it accumulates with the eventual rating popup), then extend.
-            if let id = sessionId { db.addOpenSecondsEnd(id: id, seconds: popupOpen) }
+        case .addTime(let added):
+            // Keep the SAME session going. The popup-open time was already accounted
+            // (to duration or end, per the checkbox) inside promptTimeUp — just extend.
             extendSession(by: added)
             showing = false
 
@@ -1827,7 +1816,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             if let id = endedId {
                 db.endSession(id: id, status: "completed", rating: rating, note: note,
                               openSecondsEnd: applyTime ? nil : openSeconds)
-                if applyTime { db.applyPopupTimeToDuration(id: id, seconds: openSeconds) }
+                if applyTime { db.addToDuration(id: id, seconds: openSeconds) }
             }
             // Roll straight into the next session: having rated, set a new focus.
             showing = false
@@ -1835,7 +1824,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         }
     }
 
-    private enum TimeUpChoice { case rate(rating: Int, note: String, openSeconds: Int, applyTime: Bool); case addTime(added: Int, openSeconds: Int) }
+    private enum TimeUpChoice { case rate(rating: Int, note: String, openSeconds: Int, applyTime: Bool); case addTime(added: Int) }
 
     /// Time's-up modal: rate 1–10 (+ optional note) to finish, or add more time.
     private func promptTimeUp(focus: String, seconds: Int) -> TimeUpChoice {
@@ -1856,15 +1845,18 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             let response = alert.runModal()
 
             if response == .alertSecondButtonReturn {
-                // "Apply this time" + Add time: instantly credit the popup-open time
-                // so far to the session's duration, then restart the counter so that
+                // Account for the popup-open time so far right now (before the Add-time
+                // prompt): to the session's duration if "Apply this time" is checked,
+                // otherwise banked as end-popup-open. Then restart the counter so this
                 // stretch isn't counted again on the next Add-time / rating.
-                if apply.state == .on, let id = sessionId {
-                    db.addToDuration(id: id, seconds: openSeconds())
+                if let id = sessionId {
+                    let span = openSeconds()
+                    if apply.state == .on { db.addToDuration(id: id, seconds: span) }
+                    else { db.addOpenSecondsEnd(id: id, seconds: span) }
                     resetElapsed()
                 }
                 if let extra = askMinutes() {
-                    return .addTime(added: extra, openSeconds: openSeconds())
+                    return .addTime(added: extra)
                 }
                 continue   // cancelled the add → back to the time's-up modal
             }
@@ -1916,7 +1908,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         let (rating, note, openSeconds, applyTime) = promptRating(focus: focus, title: "Rate this session")
         db.endSession(id: id, status: "completed", rating: rating, note: note,
                       openSecondsEnd: applyTime ? nil : openSeconds, elapsedSeconds: elapsed)
-        if applyTime { db.applyPopupTimeToDuration(id: id, seconds: openSeconds) }
+        if applyTime { db.addToDuration(id: id, seconds: openSeconds) }
     }
 
     /// A rating (1–10) field over an optional note field, for the rating modals,

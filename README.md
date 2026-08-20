@@ -181,16 +181,16 @@ rebuilds the binary and reloads the agent.
   `focus`, `rating` (1–10, nullable),
   `status`, `note` (optional free text entered when rating), `open_seconds_start`
   / `open_seconds_end` (how long the session-start and ending/rating popups stayed
-  open, in whole seconds; **accumulated** — if a popup is shown more than once for
-  the session, e.g. time's-up → "Add time" → later rate, the seconds sum rather
-  than overwrite; `NULL` when a session was closed without any popup, e.g.
-  auto-proceed or a launch-time sweep). Planned durations are entered in whole
+  open, in whole seconds; **accumulated** — each popup span is credited either to
+  end-popup-open (banked) or to the duration; `NULL`/`0:00` in the history window
+  means no popup overhead was recorded). Planned durations are entered in whole
   minutes but stored as seconds (×60), and shown as `M:SS` in the history window.
-  The rating modal has an **"Apply this time to the previous focus session"**
-  checkbox — when ticked, that popup's open-seconds are added to the session's
-  `seconds` (duration) instead, and its `open_seconds_end` is set to `0`. At
-  time's-up, ticking it and clicking **Add time** applies the popup-open-so-far to
-  the duration *immediately* (and restarts the "Open for" counter).
+  The rating (and time's-up) modal has an **"Apply this time to the previous focus
+  session"** checkbox — when ticked, that popup span is added to the session's
+  `seconds` (duration) and **not** to `open_seconds_end`; when unticked it's banked
+  as `open_seconds_end`. This is decided per span, so it composes across multiple
+  time's-up "Add time" cycles (each Add-time click credits the span so far
+  immediately and restarts the "Open for" counter).
 - **`queue`** — pending focuses (`created_at`, `seconds`, `focus`, `position`);
   ordered by `position` (right-click a row in the queue window to re-order).
   "Add to queue" appends (max position + 1); a front pre-empt inserts at min − 1.
