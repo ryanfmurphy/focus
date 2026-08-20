@@ -1014,7 +1014,22 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         promptForFocus(reason: "after-session")
     }
 
+    // Menu actions that are guarded by `showing` (they open their own prompt), so
+    // they do nothing while another prompt is already up — disabled in that case.
+    private static let showingBlockedActions: Set<Selector> = [
+        #selector(addNextFocus), #selector(completeTask), #selector(abortTask),
+        #selector(addTimeToCurrent), #selector(deferTask), #selector(changeFocus),
+        #selector(preemptNextFocus), #selector(clearQueue), #selector(rateUnrated),
+        #selector(showSettings), #selector(deleteHistoryItems),
+    ]
+
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        // While a prompt is open, actions that would spawn another prompt are guarded
+        // by `showing` and would silently no-op — disable them so the menu shows that.
+        // (See history / See queue / Show current task / Quit still work.)
+        if showing, let action = menuItem.action, Self.showingBlockedActions.contains(action) {
+            return false
+        }
         // Complete / Abort / Defer / Pre-empt act on a running session.
         if menuItem.action == #selector(completeTask) || menuItem.action == #selector(abortTask)
             || menuItem.action == #selector(addTimeToCurrent) || menuItem.action == #selector(deferTask) {
