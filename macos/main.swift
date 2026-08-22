@@ -1707,6 +1707,14 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         if let focus = currentFocus, let dl = deadline {
             let remaining = Int(dl.timeIntervalSinceNow.rounded())
             if remaining <= 0 {
+                // Don't raise the (non-app-modal) time's-up panel while a menu /
+                // tracking loop is up: our event pump would nest inside it and the
+                // open menu would swallow keyboard input. Dismiss the menu and defer
+                // to the next tick, which runs in the normal run-loop mode.
+                if RunLoop.current.currentMode == .eventTracking {
+                    statusItem.menu?.cancelTracking()
+                    return
+                }
                 timeUp(focus: focus)
                 return
             }
