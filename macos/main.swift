@@ -2075,19 +2075,24 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.button?.title = "🎯"   // fixed icon; never changes, so it never relayouts
         let menu = NSMenu()
-        menu.addItem(withTitle: "Add to queue", action: #selector(addNextFocus), keyEquivalent: "")
+        // The running task (these grey out when idle, except changeFocus → "Set focus").
         menu.addItem(withTitle: "Complete task", action: #selector(completeTask), keyEquivalent: "")
-        menu.addItem(withTitle: "Abort task", action: #selector(abortTask), keyEquivalent: "")
-        menu.addItem(withTitle: "Add time to current", action: #selector(addTimeToCurrent), keyEquivalent: "")
+        menu.addItem(withTitle: "Add time", action: #selector(addTimeToCurrent), keyEquivalent: "")
         menu.addItem(withTitle: "Defer task", action: #selector(deferTask), keyEquivalent: "")
+        menu.addItem(withTitle: "Abort task", action: #selector(abortTask), keyEquivalent: "")
         menu.addItem(withTitle: "Pre-empt this task", action: #selector(changeFocus), keyEquivalent: "")
-        menu.addItem(withTitle: "Pre-empt next task", action: #selector(preemptNextFocus), keyEquivalent: "")
         menu.addItem(.separator())
-        menu.addItem(withTitle: "See history", action: #selector(showHistory), keyEquivalent: "")
+        // The queue.
+        menu.addItem(withTitle: "Add to queue", action: #selector(addNextFocus), keyEquivalent: "")
+        menu.addItem(withTitle: "Pre-empt next task", action: #selector(preemptNextFocus), keyEquivalent: "")
         menu.addItem(withTitle: "See queue", action: #selector(showQueue), keyEquivalent: "")
         menu.addItem(withTitle: "Clear queue", action: #selector(clearQueue), keyEquivalent: "")
+        menu.addItem(.separator())
+        // Review.
+        menu.addItem(withTitle: "See history", action: #selector(showHistory), keyEquivalent: "")
         menu.addItem(withTitle: "Rate unrated sessions", action: #selector(rateUnrated), keyEquivalent: "")
         menu.addItem(.separator())
+        // App.
         menu.addItem(withTitle: "Show current task", action: #selector(toggleShowPill), keyEquivalent: "")
         menu.addItem(withTitle: "Settings", action: #selector(showSettings), keyEquivalent: "")
         menu.addItem(withTitle: "Quit focus", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")

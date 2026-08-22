@@ -112,20 +112,24 @@ based on state):
 
 | Item | When | What it does |
 |------|------|--------------|
-| **Add to queue** | always | Append a focus to the end of the queue |
+| *— the running task (greyed out when idle) —* | | |
 | **Complete task** | session active | Mark completed, rate 1–10, record the elapsed time as its duration (Original Duration is kept), advance to the next focus |
-| **Abort task** | session active | Rate it, mark interrupted (records elapsed time), advance |
-| **Add time to current** | session active | Add N minutes to the running session (same as "Add time" at time's up) |
+| **Add time** | session active | Add N minutes to the running session (same as "Add time" at time's up) |
 | **Defer task** | session active | Mark the current one **deferred** ("to be continued") and append a fresh "… (continued)" copy — with its **full original duration** — to the **back** of the queue, then advance to the next focus |
+| **Abort task** | session active | Rate it, mark interrupted (records elapsed time), advance |
 | **Pre-empt this task** | session active | Interrupt the current one (its remaining time is re-queued to the front as "… (continued)") and start a new focus now |
 | **Set focus** | idle | Start an ad-hoc focus (same item as Pre-empt this task, relabeled) |
+| *— the queue —* | | |
+| **Add to queue** | always | Append a focus to the end of the queue |
 | **Pre-empt next task** | always | Add a new focus to the **front** of the queue (jumps ahead of whatever's queued next) without disturbing the running session; also logs a pre-empt |
-| **See history (N)** | always | Table of past sessions (time · duration · original · rating · status · focus · start/end popup-open · note); select rows and ⌘C to copy as TSV, or right-click to **Delete** them (with confirmation); N = total recorded |
 | **See queue (N)** | always | Table of pending queued focuses, next-up first; right-click a row to move it up / down / to top / to bottom or delete it, select a row and press Delete to remove it, or select rows and ⌘C to copy them (duration · focus) as TSV (N = current length) |
 | **Clear queue** | queue non-empty | Empty the queue (with confirmation) |
+| *— review —* | | |
+| **See history (N)** | always | Table of past sessions (time · duration · original · rating · status · focus · start/end popup-open · note); select rows and ⌘C to copy as TSV, or right-click to **Delete** them (with confirmation); N = total recorded |
 | **Rate unrated sessions (N)** | N > 0 | Loop through deferred/unrated completed sessions oldest-first and rate each |
+| *— app —* | | |
 | **Show current task** | always | Checkbox — toggles the floating corner pill on/off (persisted). Menu-bar icon and all timing/logging are unaffected |
-| **Settings** | always | Toggle the three global preference checkboxes without starting a session |
+| **Settings** | always | Toggle the four global preference checkboxes without starting a session |
 | **Quit focus** | always | Quit the app |
 
 The countdown keeps updating even while the menu is open.
