@@ -794,6 +794,14 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
 
     // ---- return handling ----
     func onReturn(_ reason: String) {
+        // If a menu is open, don't raise the (non-app-modal) prompt nested in its
+        // tracking loop — the menu would swallow keyboard input. Dismiss it and retry
+        // once we're back in the normal run-loop mode.
+        if RunLoop.current.currentMode == .eventTracking {
+            statusItem.menu?.cancelTracking()
+            DispatchQueue.main.async { [weak self] in self?.onReturn(reason) }
+            return
+        }
         guard !showing else { return }
         // A session already running is left alone: the countdown is wall-clock
         // based, so it just resumes after lock/sleep. If it expired while away,
@@ -1124,10 +1132,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         alert.addButton(withTitle: "Start")             // .alertFirstButtonReturn
         alert.addButton(withTitle: "Pre-empt with new") // .alertSecondButtonReturn
         // Always shown, but disabled when there's no other queued item to pick.
-        let pickButton = alert.addButton(withTitle: "Pre-empt from queue…")  // .alertThirdButtonReturn
+        let pickButton = alert.addButton(withTitle: "Pre-empt from queue…")  // index 2
         pickButton.isEnabled = db.queueCount() > 1
-        alert.window.level = .floating
-        alert.window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
 
         var autoTimer: Timer?
         var elapsedTimer: Timer?
@@ -1139,13 +1145,13 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             alert.accessoryView = label
             var remaining = 10
             label.stringValue = "Will automatically proceed with this focus in \(remaining) seconds."
-            // .common mode so it fires while the modal is up; stopModal with the
-            // first-button code ends runModal exactly as a "Start" click would.
+            // .common mode so it fires while the panel is up; setting panelResult to
+            // the first button's index ends the pump exactly as a "Start" click would.
             let timer = Timer(timeInterval: 1, repeats: true) { t in
                 remaining -= 1
                 if remaining <= 0 {
                     t.invalidate()
-                    NSApp.stopModal(withCode: .alertFirstButtonReturn)
+                    self.panelResult = 0
                 } else {
                     label.stringValue = "Will automatically proceed with this focus in \(remaining) second\(remaining == 1 ? "" : "s")."
                 }
@@ -1163,11 +1169,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             elapsedTimer = startElapsedTimer(label).timer
         }
 
-        let response = alert.runModal()
+        // Non-app-modal so the 🎯 menu stays usable while this prompt is up.
+        let response = runFloatingAlert(alert)   // 0 = Start, 1 = Pre-empt with new, 2 = from queue
         autoTimer?.invalidate()
         elapsedTimer?.invalidate()
 
-        if response == .alertSecondButtonReturn {
+        if response == 1 {
             // Pre-empt with new: leave the queued item where it is (still the front,
             // since we never removed it) and run an ad-hoc focus right now instead.
             if let (focus, seconds, openStart) = askFocusAndMinutes(
@@ -1180,8 +1187,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
                 return
             }
             // Cancelled the pre-empt → fall through and start the queued one.
-        } else if response == .alertThirdButtonReturn {
-            // Pre-empt from queue: pick any queued focus and start it now instead of
+        } else if response == 2 {
+            // Pre-empt from queue: pick any focus and start it now instead of
             // the front one (which stays queued). Same as a normal front-fetch, just
             // for the chosen item.
             if let chosen = pickFromQueue() {
@@ -1279,15 +1286,13 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             let alert = makeAlert()
             alert.messageText = title
             alert.informativeText = info
-            alert.addButton(withTitle: confirm)             // .alertFirstButtonReturn
-            if cancellable { alert.addButton(withTitle: "Cancel") }
+            alert.addButton(withTitle: confirm)             // index 0
+            if cancellable { alert.addButton(withTitle: "Cancel") }   // index 1
             alert.accessoryView = accessory
-            alert.window.level = .floating
-            alert.window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-            alert.window.initialFirstResponder = focusField
-            let response = alert.runModal()
+            // Non-app-modal so the 🎯 menu stays usable while the prompt is up.
+            let clicked = runFloatingAlert(alert, firstResponder: focusField)
 
-            if cancellable && response == .alertSecondButtonReturn { return nil }
+            if cancellable && clicked == 1 { return nil }
 
             let answer = focusField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
             let minutes = Int(minutesField.stringValue.trimmingCharacters(in: .whitespaces)) ?? 0
@@ -2029,10 +2034,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             alert.informativeText = "Focus: \(focus)\n\nRate it 1–10 (optional note):"
             alert.addButton(withTitle: "Save")
             alert.accessoryView = accessory
-            alert.window.level = .floating
-            alert.window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-            alert.window.initialFirstResponder = ratingField
-            alert.runModal()
+            // Non-app-modal so the 🎯 menu stays usable while the prompt is up.
+            _ = runFloatingAlert(alert, firstResponder: ratingField)
             rating = Int(ratingField.stringValue.trimmingCharacters(in: .whitespaces)) ?? 0
         }
         return (rating, noteField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines),
