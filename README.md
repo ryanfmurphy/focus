@@ -23,7 +23,8 @@ There's also an early **iPhone** port (SwiftUI + Live Activity) scaffolded under
 - **Always-present focus** — a floating pill in the top-right of the screen shows
   `🎯 <focus>  MM:SS / MM:SS` (time remaining / session total), above other windows
   and across all Spaces; **drag it** anywhere to reposition (it stays put for the
-  rest of the session); plus a `🎯` menu-bar item.
+  rest of the session), or **double-click it** to rename the current focus inline
+  (Enter saves, Esc cancels); plus a `🎯` menu-bar item.
 - **Timer** — counts down (wall-clock based, so it survives sleep/lock); at zero
   it chimes, optionally sends a phone notification, and asks you to rate the
   session 1–10 (with an optional free-text **note**). You can **add more time**
