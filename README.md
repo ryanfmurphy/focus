@@ -122,7 +122,7 @@ based on state):
 | **Set focus** | idle | Start an ad-hoc focus (same item as Switch focus now, relabeled) |
 | *— the queue —* | | |
 | **Add to queue** | always | Append a focus to the end of the queue |
-| **Add focus to front** | always | Add a new focus to the **front** of the queue (jumps ahead of whatever's queued next) without disturbing the running session; also logs a pre-empt |
+| **Add to front** | always | Add a new focus to the **front** of the queue (jumps ahead of whatever's queued next) without disturbing the running session; also logs a pre-empt |
 | **See queue (N)** | always | Table of pending queued focuses, next-up first; right-click a row to move it up / down / to top / to bottom or delete it, select a row and press Delete to remove it, or select rows and ⌘C to copy them (duration · focus) as TSV (N = current length) |
 | **Clear queue** | queue non-empty | Empty the queue (with confirmation) |
 | *— review —* | | |
@@ -204,7 +204,7 @@ rebuilds the binary and reloads the agent.
 - **`preempts`** — one row per pre-empt (`at`, `preempted_session_id`,
   `new_session_id`); `preempted_session_id` is `NULL` when nothing was running
   (pre-empting before a queued task starts), and both are `NULL` for an
-  "Add focus to front" queue jump (nothing interrupted, nothing started yet).
+  "Add to front" queue jump (nothing interrupted, nothing started yet).
 
 **Status values:** `completed` (finished/rated, or auto-proceeded with a null
 rating pending), `interrupted` (aborted, pre-empted, or swept on next launch after

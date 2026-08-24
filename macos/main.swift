@@ -950,7 +950,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         showing = true
         defer { showing = false }
         guard let (focus, seconds, _) = askFocusAndMinutes(
-            title: "Add focus to front",
+            title: "Add to front",
             info: "This goes to the front of the queue — it runs before whatever's queued next.",
             confirm: "Add to front", cancellable: true) else { return }
         db.enqueueFront(focus: focus, seconds: seconds, originalSessionId: nil)
@@ -2121,7 +2121,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         menu.addItem(.separator())
         // The queue.
         menu.addItem(withTitle: "Add to queue", action: #selector(addNextFocus), keyEquivalent: "")
-        menu.addItem(withTitle: "Add focus to front", action: #selector(preemptNextFocus), keyEquivalent: "")
+        menu.addItem(withTitle: "Add to front", action: #selector(preemptNextFocus), keyEquivalent: "")
         menu.addItem(withTitle: "See queue", action: #selector(showQueue), keyEquivalent: "")
         menu.addItem(withTitle: "Clear queue", action: #selector(clearQueue), keyEquivalent: "")
         menu.addItem(.separator())
