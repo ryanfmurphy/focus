@@ -690,19 +690,10 @@ final class QueuePickSource: NSObject, NSTableViewDataSource, NSTableViewDelegat
     }
 }
 
-// Borderless HUD window for the pill. Borderless windows can't become key by
-// default; allow it only while editing the focus name so normal use never steals
-// focus from whatever you're working in.
-final class PillWindow: NSWindow {
-    var editable = false
-    override var canBecomeKey: Bool { editable }
-}
-
 // MARK: - App
 
 final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSource,
-                           NSTableViewDelegate, NSMenuItemValidation, NSWindowDelegate,
-                           NSTextFieldDelegate {
+                           NSTableViewDelegate, NSMenuItemValidation, NSWindowDelegate {
     private let db = DB()
 
     // ---- session state ----
@@ -722,11 +713,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
 
     // ---- ui ----
     private var statusItem: NSStatusItem!
-    private var hudWindow: PillWindow!
+    private var hudWindow: NSWindow!
     private var hudLabel: NSTextField!
-    private var editingFocus = false           // double-click the pill to rename the focus
-    private var focusEditField: NSTextField?
-    private var cancelFocusEditFlag = false     // Esc → cancel instead of commit
     private var hudAnchorTopRight: NSPoint? // set once the user drags the pill; layout keeps this corner fixed
     private var hudProgrammaticMove = false // guards windowDidMove during our own setFrame
     private var uiTimer: Timer?
@@ -1005,6 +993,28 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         if let extra = askMinutes() { extendSession(by: extra) }
     }
 
+    // Rename the running task's focus (a small prompt pre-filled with the current name).
+    @objc func renameTask() {
+        guard !showing, let id = sessionId, let current = currentFocus else { return }
+        showing = true
+        defer { showing = false }
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 320, height: 24))
+        field.stringValue = current
+        let alert = makeAlert()
+        alert.messageText = "Rename task"
+        alert.informativeText = "Rename the current focus."
+        alert.addButton(withTitle: "Save")     // index 0
+        alert.addButton(withTitle: "Cancel")   // index 1
+        alert.accessoryView = field
+        guard runFloatingAlert(alert, firstResponder: field) == 0 else { return }
+        let newName = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !newName.isEmpty, newName != current {
+            currentFocus = newName
+            db.renameSession(id: id, focus: newName)
+            tick()   // repaint the pill
+        }
+    }
+
     /// Log an "Add time" event, bump the planned total, and shift the deadline.
     /// Adjusts from whichever is later — now or the current deadline — so it applies
     /// the full `extra` when the timer's already up, or on top of remaining time.
@@ -1049,8 +1059,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     private static let showingBlockedActions: Set<Selector> = [
         #selector(addNextFocus), #selector(completeTask), #selector(abortTask),
         #selector(addTimeToCurrent), #selector(deferTask), #selector(changeFocus),
-        #selector(preemptNextFocus), #selector(clearQueue), #selector(rateUnrated),
-        #selector(showSettings), #selector(deleteHistoryItems),
+        #selector(renameTask), #selector(preemptNextFocus), #selector(clearQueue),
+        #selector(rateUnrated), #selector(showSettings), #selector(deleteHistoryItems),
     ]
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
@@ -1060,9 +1070,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         if showing, let action = menuItem.action, Self.showingBlockedActions.contains(action) {
             return false
         }
-        // Complete / Abort / Defer / Pre-empt act on a running session.
+        // Complete / Abort / Defer / Rename / Add time act on a running session.
         if menuItem.action == #selector(completeTask) || menuItem.action == #selector(abortTask)
-            || menuItem.action == #selector(addTimeToCurrent) || menuItem.action == #selector(deferTask) {
+            || menuItem.action == #selector(addTimeToCurrent) || menuItem.action == #selector(deferTask)
+            || menuItem.action == #selector(renameTask) {
             return currentFocus != nil
         }
         if menuItem.action == #selector(deleteHistoryItems) {
@@ -1731,7 +1742,6 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
 
     // ---- per-second update ----
     private func tick() {
-        if editingFocus { return }   // don't overwrite / relayout the pill while renaming
         if let focus = currentFocus, let dl = deadline {
             let remaining = Int(dl.timeIntervalSinceNow.rounded())
             if remaining <= 0 {
@@ -2104,6 +2114,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         // The running task (these grey out when idle, except changeFocus → "Set focus").
         menu.addItem(withTitle: "Complete task", action: #selector(completeTask), keyEquivalent: "")
         menu.addItem(withTitle: "Add time", action: #selector(addTimeToCurrent), keyEquivalent: "")
+        menu.addItem(withTitle: "Rename task", action: #selector(renameTask), keyEquivalent: "")
         menu.addItem(withTitle: "Defer task", action: #selector(deferTask), keyEquivalent: "")
         menu.addItem(withTitle: "Abort task", action: #selector(abortTask), keyEquivalent: "")
         menu.addItem(withTitle: "Switch focus now", action: #selector(changeFocus), keyEquivalent: "")
@@ -2129,8 +2140,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     }
 
     private func buildHUD() {
-        hudWindow = PillWindow(contentRect: NSRect(x: 0, y: 0, width: 240, height: 34),
-                               styleMask: .borderless, backing: .buffered, defer: false)
+        hudWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 240, height: 34),
+                             styleMask: .borderless, backing: .buffered, defer: false)
         hudWindow.isOpaque = false
         hudWindow.backgroundColor = .clear
         hudWindow.hasShadow = true
@@ -2157,94 +2168,6 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
 
         blur.addSubview(hudLabel)
         hudWindow.contentView = blur
-
-        // Double-click the pill to rename the current focus inline.
-        let dbl = NSClickGestureRecognizer(target: self, action: #selector(beginEditingFocus))
-        dbl.numberOfClicksRequired = 2
-        blur.addGestureRecognizer(dbl)
-    }
-
-    // ---- edit the focus name inline (double-click the pill) ----
-    @objc private func beginEditingFocus() {
-        guard !editingFocus, !showing, let focus = currentFocus,
-              let blur = hudWindow.contentView else { return }
-        editingFocus = true
-
-        let padX: CGFloat = 14, editWidth: CGFloat = 220
-        let h = hudWindow.frame.height
-        let field = NSTextField(frame: NSRect(x: padX, y: (h - 22) / 2, width: editWidth, height: 22))
-        field.stringValue = focus
-        field.font = hudLabel.font
-        field.textColor = .white
-        field.drawsBackground = true
-        field.backgroundColor = NSColor(white: 1, alpha: 0.15)
-        field.isBezeled = false
-        field.focusRingType = .none
-        field.usesSingleLineMode = true
-        field.delegate = self
-        blur.addSubview(field)
-        focusEditField = field
-        hudLabel.isHidden = true
-
-        // Widen the pill to fit the editor, keeping its top-right corner anchored.
-        var wf = hudWindow.frame
-        wf.origin.x = wf.maxX - (editWidth + padX * 2)
-        wf.size.width = editWidth + padX * 2
-        hudProgrammaticMove = true
-        hudWindow.setFrame(wf, display: true)
-        hudProgrammaticMove = false
-
-        hudWindow.editable = true          // let the borderless window take key for typing
-        NSApp.activate(ignoringOtherApps: true)
-        hudWindow.makeKeyAndOrderFront(nil)
-        hudWindow.makeFirstResponder(field)
-        field.selectText(nil)
-    }
-
-    private func commitFocusEdit() {
-        guard editingFocus, let field = focusEditField else { return }
-        let newName = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        let id = sessionId
-        endFocusEdit()
-        if !newName.isEmpty, newName != currentFocus, let id = id {
-            currentFocus = newName
-            db.renameSession(id: id, focus: newName)
-        }
-        tick()   // repaint the pill (and re-layout to the new width)
-    }
-
-    private func endFocusEdit() {
-        focusEditField?.removeFromSuperview()
-        focusEditField = nil
-        hudLabel.isHidden = false
-        editingFocus = false
-        hudWindow.editable = false
-        hudWindow.resignKey()
-    }
-
-    // Enter commits, Esc cancels; clicking away also ends editing (→ commit). All of
-    // them end via resigning first responder, so teardown happens once, in
-    // controlTextDidEndEditing (not mid-command, which is fragile).
-    func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
-        guard control === focusEditField else { return false }
-        if commandSelector == #selector(NSResponder.insertNewline(_:)) {
-            hudWindow.makeFirstResponder(nil); return true
-        }
-        if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
-            cancelFocusEditFlag = true; hudWindow.makeFirstResponder(nil); return true
-        }
-        return false
-    }
-
-    func controlTextDidEndEditing(_ obj: Notification) {
-        guard editingFocus else { return }
-        if cancelFocusEditFlag {
-            cancelFocusEditFlag = false
-            endFocusEdit()
-            tick()
-        } else {
-            commitFocusEdit()
-        }
     }
 
     private func layoutHUD() {
