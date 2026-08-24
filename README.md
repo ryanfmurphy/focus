@@ -30,8 +30,8 @@ There's also an early **iPhone** port (SwiftUI + Live Activity) scaffolded under
   instead of finishing.
 - **A queue** — line up future focuses; each session start pulls the next queued
   item (a confirm screen), or asks you to improvise if the queue is empty.
-- **Pre-empt / complete / abort** — interrupt the running task in the way that
-  fits (see [Menu reference](#menu-reference)).
+- **Complete / abort / defer / switch** — end or hand off the running task in the
+  way that fits (see [Menu reference](#menu-reference)).
 - **History & review** — browse every past session (and the pending queue) in
   native table windows; batch-rate any sessions whose rating you deferred.
 
@@ -117,11 +117,11 @@ based on state):
 | **Add time** | session active | Add N minutes to the running session (same as "Add time" at time's up) |
 | **Defer task** | session active | Mark the current one **deferred** ("to be continued") and append a fresh "… (continued)" copy — with its **full original duration** — to the **back** of the queue, then advance to the next focus |
 | **Abort task** | session active | Rate it, mark interrupted (records elapsed time), advance |
-| **Pre-empt this task** | session active | Interrupt the current one (its remaining time is re-queued to the front as "… (continued)") and start a new focus now |
-| **Set focus** | idle | Start an ad-hoc focus (same item as Pre-empt this task, relabeled) |
+| **Switch focus now** | session active | Interrupt the current one (its remaining time is re-queued to the front as "… (continued)") and start a new focus now |
+| **Set focus** | idle | Start an ad-hoc focus (same item as Switch focus now, relabeled) |
 | *— the queue —* | | |
 | **Add to queue** | always | Append a focus to the end of the queue |
-| **Pre-empt next task** | always | Add a new focus to the **front** of the queue (jumps ahead of whatever's queued next) without disturbing the running session; also logs a pre-empt |
+| **Add focus to front** | always | Add a new focus to the **front** of the queue (jumps ahead of whatever's queued next) without disturbing the running session; also logs a pre-empt |
 | **See queue (N)** | always | Table of pending queued focuses, next-up first; right-click a row to move it up / down / to top / to bottom or delete it, select a row and press Delete to remove it, or select rows and ⌘C to copy them (duration · focus) as TSV (N = current length) |
 | **Clear queue** | queue non-empty | Empty the queue (with confirmation) |
 | *— review —* | | |
@@ -202,8 +202,8 @@ rebuilds the binary and reloads the agent.
   `seconds`); the session's total `seconds` is also bumped.
 - **`preempts`** — one row per pre-empt (`at`, `preempted_session_id`,
   `new_session_id`); `preempted_session_id` is `NULL` when nothing was running
-  (pre-empting before a queued task starts), and both are `NULL` for a
-  "Pre-empt next task" queue jump (nothing interrupted, nothing started yet).
+  (pre-empting before a queued task starts), and both are `NULL` for an
+  "Add focus to front" queue jump (nothing interrupted, nothing started yet).
 
 **Status values:** `completed` (finished/rated, or auto-proceeded with a null
 rating pending), `interrupted` (aborted, pre-empted, or swept on next launch after
@@ -221,8 +221,8 @@ something's queued, otherwise a fresh prompt — so you can flow session to sess
 The timer is wall-clock based, so lock / sleep / closing the lid don't disturb a
 running session, and returning won't re-prompt while one is active. If the
 *process* itself dies mid-session (crash, reboot, reinstall), the next launch
-offers three choices: **Resume** it, **Pre-empt** (re-queue its remaining time to
-the front and start a new focus now), or **Start fresh** (abandon it — with an
+offers three choices: **Resume** it, **Switch focus** (re-queue its remaining time
+to the front and start a new focus now), or **Start fresh** (abandon it — with an
 optional confirm to also clear the queue — then prompt for a new focus). If its
 time elapsed while away, it's completed and sent to the rating queue instead.
 

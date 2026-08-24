@@ -848,9 +848,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         let alert = makeAlert()
         alert.messageText = "Resume focus?"
         alert.informativeText = "\(s.focus)\n\n\(mmss(remaining)) remaining (of \(mmss(s.seconds)))"
-        alert.addButton(withTitle: "Resume")        // .alertFirstButtonReturn
-        alert.addButton(withTitle: "Pre-empt…")     // .alertSecondButtonReturn
-        alert.addButton(withTitle: "Start fresh…")  // .alertThirdButtonReturn
+        alert.addButton(withTitle: "Resume")            // .alertFirstButtonReturn
+        alert.addButton(withTitle: "Switch focus…")     // .alertSecondButtonReturn
+        alert.addButton(withTitle: "Start fresh…")      // .alertThirdButtonReturn
         alert.window.level = .floating
         alert.window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         let response = alert.runModal()
@@ -905,7 +905,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         NSApp.activate(ignoringOtherApps: true)
 
         let preempting = sessionId != nil
-        let title = preempting ? "Pre-empt with a new focus" : "Set focus"
+        let title = preempting ? "Switch to a new focus" : "Set focus"
         let info = preempting
             ? "This runs now; the current focus goes to the front of the queue."
             : "What's your one focus right now, and for how long?"
@@ -940,7 +940,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         showing = true
         defer { showing = false }
         guard let (focus, seconds, _) = askFocusAndMinutes(
-            title: "Pre-empt the queue",
+            title: "Add focus to front",
             info: "This goes to the front of the queue — it runs before whatever's queued next.",
             confirm: "Add to front", cancellable: true) else { return }
         db.enqueueFront(focus: focus, seconds: seconds, originalSessionId: nil)
@@ -1051,7 +1051,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             return true
         }
         if menuItem.action == #selector(changeFocus) {
-            menuItem.title = currentFocus != nil ? "Pre-empt this task" : "Set focus"
+            menuItem.title = currentFocus != nil ? "Switch focus now" : "Set focus"
         }
         if menuItem.action == #selector(showHistory) {
             menuItem.title = "See history (\(db.sessionCount()))"
@@ -1130,9 +1130,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         alert.messageText = "Next focus"
         alert.informativeText = "\(item.focus)\n\n\(mmss(item.seconds))"
         alert.addButton(withTitle: "Start")             // .alertFirstButtonReturn
-        alert.addButton(withTitle: "Pre-empt with new") // .alertSecondButtonReturn
+        alert.addButton(withTitle: "Start a different focus") // index 1
         // Always shown, but disabled when there's no other queued item to pick.
-        let pickButton = alert.addButton(withTitle: "Pre-empt from queue…")  // index 2
+        let pickButton = alert.addButton(withTitle: "Pick another queued focus…")  // index 2
         pickButton.isEnabled = db.queueCount() > 1
 
         var autoTimer: Timer?
@@ -1178,7 +1178,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             // Pre-empt with new: leave the queued item where it is (still the front,
             // since we never removed it) and run an ad-hoc focus right now instead.
             if let (focus, seconds, openStart) = askFocusAndMinutes(
-                title: "Pre-empt with a new focus",
+                title: "Start a different focus",
                 info: "This runs now; the queued focus stays next in line.",
                 confirm: "Start", cancellable: true) {
                 beginSession(reason: "preempt", seconds: seconds, focus: focus, openSecondsStart: openStart)
@@ -1243,7 +1243,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         table.frame = scroll.bounds
 
         let alert = makeAlert()
-        alert.messageText = "Pre-empt from queue"
+        alert.messageText = "Pick another queued focus"
         alert.informativeText = "Click a queued focus to start it now (it's removed from the queue; the others stay)."
         alert.addButton(withTitle: "Cancel")
         alert.accessoryView = scroll
@@ -2083,11 +2083,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         menu.addItem(withTitle: "Add time", action: #selector(addTimeToCurrent), keyEquivalent: "")
         menu.addItem(withTitle: "Defer task", action: #selector(deferTask), keyEquivalent: "")
         menu.addItem(withTitle: "Abort task", action: #selector(abortTask), keyEquivalent: "")
-        menu.addItem(withTitle: "Pre-empt this task", action: #selector(changeFocus), keyEquivalent: "")
+        menu.addItem(withTitle: "Switch focus now", action: #selector(changeFocus), keyEquivalent: "")
         menu.addItem(.separator())
         // The queue.
         menu.addItem(withTitle: "Add to queue", action: #selector(addNextFocus), keyEquivalent: "")
-        menu.addItem(withTitle: "Pre-empt next task", action: #selector(preemptNextFocus), keyEquivalent: "")
+        menu.addItem(withTitle: "Add focus to front", action: #selector(preemptNextFocus), keyEquivalent: "")
         menu.addItem(withTitle: "See queue", action: #selector(showQueue), keyEquivalent: "")
         menu.addItem(withTitle: "Clear queue", action: #selector(clearQueue), keyEquivalent: "")
         menu.addItem(.separator())
