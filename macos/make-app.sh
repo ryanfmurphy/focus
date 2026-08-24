@@ -37,8 +37,10 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 PLIST
 
 # --- Launcher executable (a shell script) -----------------------------------
-# Start the agent if it's stopped; no-op if it's already running (kickstart
-# without -k won't restart it, so a live session isn't interrupted).
+# Start the agent. Use -k so it starts even right after a clean quit: without -k,
+# a kickstart fired while the just-quit process is still exiting is a no-op
+# ("already running"), and then KeepAlive (SuccessfulExit=false) leaves it stopped
+# — so nothing launches. -k kills any lingering/exiting instance and starts fresh.
 cat > "$APP/Contents/MacOS/Focus" <<'LAUNCH'
 #!/bin/bash
 LABEL="com.murftown.focus"
@@ -46,9 +48,9 @@ UID_="$(id -u)"
 TARGET="gui/$UID_/$LABEL"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 if launchctl print "$TARGET" >/dev/null 2>&1; then
-    launchctl kickstart "$TARGET" 2>/dev/null || true   # launch if stopped; else no-op
+    launchctl kickstart -k "$TARGET" 2>/dev/null || true   # start (restart if still running)
 elif [ -f "$PLIST" ]; then
-    launchctl bootstrap "gui/$UID_" "$PLIST"             # load it (RunAtLoad starts it)
+    launchctl bootstrap "gui/$UID_" "$PLIST"               # not loaded → load it (RunAtLoad starts it)
 else
     osascript -e 'display alert "Focus is not installed" message "Run macos/install.sh first."'
 fi
