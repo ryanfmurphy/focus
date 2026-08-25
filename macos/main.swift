@@ -139,6 +139,17 @@ final class DB {
             new_session_id       INTEGER
         );
         """)
+        // One row per pause. `ended_at` is NULL while paused (that open row is the
+        // persisted "currently paused" state); `seconds` is stamped on resume.
+        exec("""
+        CREATE TABLE IF NOT EXISTS pauses (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id INTEGER NOT NULL,
+            started_at TEXT NOT NULL,
+            ended_at   TEXT,
+            seconds    INTEGER
+        );
+        """)
         // Duration columns switched from minutes to integer seconds (×60), for
         // consistency with the open_seconds_* columns. Add the new column, back-fill
         // once from the old minute column, then drop it. Each statement no-ops
@@ -317,6 +328,50 @@ final class DB {
             sqlite3_step(upd)
         }
         sqlite3_finalize(upd)
+    }
+
+    /// Open a pause (row with NULL ended_at) for a session.
+    func startPause(sessionId: Int64, at: Date) {
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "INSERT INTO pauses (session_id, started_at) VALUES (?,?);", -1, &stmt, nil) == SQLITE_OK else { return }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_int64(stmt, 1, sessionId)
+        sqlite3_bind_text(stmt, 2, isoParser.string(from: at), -1, SQLITE_TRANSIENT)
+        sqlite3_step(stmt)
+    }
+
+    /// Close the open pause for a session (resume), stamping its duration in seconds.
+    func endPause(sessionId: Int64, seconds: Int) {
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "UPDATE pauses SET ended_at=?, seconds=? WHERE session_id=? AND ended_at IS NULL;", -1, &stmt, nil) == SQLITE_OK else { return }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, isoNow(), -1, SQLITE_TRANSIENT)
+        sqlite3_bind_int(stmt, 2, Int32(seconds))
+        sqlite3_bind_int64(stmt, 3, sessionId)
+        sqlite3_step(stmt)
+    }
+
+    /// Close any open pause for a session at launch (the process died mid-pause),
+    /// computing its duration from the timestamps — the downtime counts as pause.
+    func closeOpenPause(sessionId: Int64) {
+        let sql = "UPDATE pauses SET ended_at=?, seconds=CAST(ROUND((julianday(?) - julianday(started_at)) * 86400) AS INTEGER) WHERE session_id=? AND ended_at IS NULL;"
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
+        defer { sqlite3_finalize(stmt) }
+        let now = isoNow()
+        sqlite3_bind_text(stmt, 1, now, -1, SQLITE_TRANSIENT)
+        sqlite3_bind_text(stmt, 2, now, -1, SQLITE_TRANSIENT)
+        sqlite3_bind_int64(stmt, 3, sessionId)
+        sqlite3_step(stmt)
+    }
+
+    /// Total seconds a session has spent paused (closed pauses only).
+    func totalPausedSeconds(sessionId: Int64) -> Int {
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "SELECT COALESCE(SUM(seconds), 0) FROM pauses WHERE session_id=? AND ended_at IS NOT NULL;", -1, &stmt, nil) == SQLITE_OK else { return 0 }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_int64(stmt, 1, sessionId)
+        return sqlite3_step(stmt) == SQLITE_ROW ? Int(sqlite3_column_int(stmt, 0)) : 0
     }
 
     /// Record a pre-empt: `preemptedSessionId` = the interrupted session (nil if
@@ -703,6 +758,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     private var sessionStart: Date?   // when the current session began (for elapsed time)
     private var sessionSeconds: Int?  // planned duration of the current session in seconds (incl. added time)
     private var sessionOriginalId: Int64?  // chain root if this session continues an interrupted one
+    private var pausedAt: Date?       // start of the current pause (nil = running)
 
     // Debounce guards for the return-prompt (wake + unlock + session often fire
     // together). `showing` also stops any modal from stacking on another.
@@ -840,7 +896,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             return
         }
 
-        let deadline = start.addingTimeInterval(Double(candidate.seconds))
+        // If it was paused when the process died, close that pause (the downtime
+        // counts as pause) so the deadline reconstructs to the frozen remaining;
+        // it then resumes as a normal running session.
+        db.closeOpenPause(sessionId: candidate.id)
+        let paused = db.totalPausedSeconds(sessionId: candidate.id)
+        let deadline = start.addingTimeInterval(Double(candidate.seconds + paused))
         if deadline > Date() {
             offerResume(candidate, deadline: deadline)     // still time left
         } else {
@@ -900,6 +961,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         sessionStart = isoParser.date(from: s.startedAt) ?? Date()
         sessionSeconds = s.seconds
         sessionOriginalId = s.originalSessionId
+        pausedAt = nil                       // resumes running (any open pause was closed)
     }
 
     // "Set focus" is an explicit ad-hoc entry — it bypasses the queue.
@@ -926,12 +988,13 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             title: title, info: info, confirm: "Start", cancellable: preempting) else { return }
 
         var preemptedId: Int64? = nil
-        if preempting, let id = sessionId, let curFocus = currentFocus, let dl = deadline {
+        if preempting, let id = sessionId, let curFocus = currentFocus {
             preemptedId = id
-            let remaining = max(1, Int(dl.timeIntervalSinceNow.rounded()))
-            let elapsed = max(0, Int(Date().timeIntervalSince(sessionStart ?? Date()).rounded()))
+            let remaining = max(1, remainingSeconds())        // frozen if paused
+            let elapsed = elapsedFocusSeconds()               // excludes pause time
             // Complete the existing record as interrupted, recording elapsed seconds.
             db.markInterrupted(id: id, elapsedSeconds: elapsed)
+            finalizePause()
             // Queue a fresh copy for the remaining time to resume next, carrying
             // the chain root (this session's original, or itself if it's the root).
             db.enqueueFront(focus: continuedName(curFocus), seconds: remaining,
@@ -965,11 +1028,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     @objc func deferTask() {
         guard !showing, let id = sessionId, let focus = currentFocus else { return }
         showing = true
-        let elapsed = max(0, Int(Date().timeIntervalSince(sessionStart ?? Date()).rounded()))
+        let elapsed = elapsedFocusSeconds()   // excludes pause time
         let full = db.plannedSecondsAtStart(id: id)
         let orig = sessionOriginalId ?? id
+        finalizePause()
         currentFocus = nil; deadline = nil; sessionId = nil
-        sessionStart = nil; sessionSeconds = nil; sessionOriginalId = nil
+        sessionStart = nil; sessionSeconds = nil; sessionOriginalId = nil; pausedAt = nil
         hudWindow.orderOut(nil)
         db.markDeferred(id: id, elapsedSeconds: elapsed)
         db.enqueue(focus: continuedName(focus), seconds: full, originalSessionId: orig)
@@ -1015,6 +1079,46 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         }
     }
 
+    // ---- pause / resume ----
+    @objc func togglePause() {
+        guard !showing, let id = sessionId else { return }
+        if let p = pausedAt {
+            // Resume: shift the deadline forward by the pause so the remaining time is
+            // preserved, and close the pause record (stamping its duration).
+            let paused = Int(Date().timeIntervalSince(p).rounded())
+            deadline = deadline?.addingTimeInterval(Double(max(0, paused)))
+            db.endPause(sessionId: id, seconds: max(0, paused))
+            pausedAt = nil
+        } else {
+            // Pause: freeze here. tick() stops the countdown while pausedAt is set.
+            pausedAt = Date()
+            db.startPause(sessionId: id, at: pausedAt!)
+        }
+        tick()   // repaint the pill (running ⇄ paused)
+    }
+
+    /// Actual focus time so far = wall-clock since start, minus all pause time
+    /// (closed pauses + any pause currently open).
+    private func elapsedFocusSeconds() -> Int {
+        guard let start = sessionStart else { return 0 }
+        var paused = sessionId.map { db.totalPausedSeconds(sessionId: $0) } ?? 0
+        if let p = pausedAt { paused += Int(Date().timeIntervalSince(p).rounded()) }
+        return max(0, Int(Date().timeIntervalSince(start).rounded()) - paused)
+    }
+
+    /// Remaining time — the frozen value while paused, else deadline − now.
+    private func remainingSeconds() -> Int {
+        guard let dl = deadline else { return 0 }
+        return Int(dl.timeIntervalSince(pausedAt ?? Date()).rounded())
+    }
+
+    /// Close any open pause when a session ends, so the record isn't left dangling.
+    private func finalizePause() {
+        guard let id = sessionId, let p = pausedAt else { return }
+        db.endPause(sessionId: id, seconds: max(0, Int(Date().timeIntervalSince(p).rounded())))
+        pausedAt = nil
+    }
+
     /// Log an "Add time" event, bump the planned total, and shift the deadline.
     /// Adjusts from whichever is later — now or the current deadline — so it applies
     /// the full `extra` when the timer's already up, or on top of remaining time.
@@ -1023,8 +1127,13 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         guard let id = sessionId else { return }
         db.addTime(sessionId: id, seconds: extra)
         sessionSeconds = (sessionSeconds ?? 0) + extra
-        let base = max(Date(), deadline ?? Date())
-        deadline = base.addingTimeInterval(Double(extra))
+        if pausedAt != nil {
+            // Paused: extend the frozen deadline directly (the timer isn't "up").
+            deadline = (deadline ?? Date()).addingTimeInterval(Double(extra))
+        } else {
+            let base = max(Date(), deadline ?? Date())
+            deadline = base.addingTimeInterval(Double(extra))
+        }
         tick()
     }
 
@@ -1042,9 +1151,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     @objc func abortTask() {
         guard !showing, let id = sessionId, let focus = currentFocus else { return }
         showing = true
-        let elapsed = max(0, Int(Date().timeIntervalSince(sessionStart ?? Date()).rounded()))
+        let elapsed = elapsedFocusSeconds()   // excludes pause time
+        finalizePause()
         currentFocus = nil; deadline = nil; sessionId = nil
-        sessionStart = nil; sessionSeconds = nil; sessionOriginalId = nil
+        sessionStart = nil; sessionSeconds = nil; sessionOriginalId = nil; pausedAt = nil
         hudWindow.orderOut(nil)
         let (rating, note, openSeconds, applyTime) = promptRating(focus: "\(focus) · \(mmss(elapsed))", title: "Rate this session")
         db.markInterrupted(id: id, elapsedSeconds: elapsed, rating: rating, note: note,
@@ -1059,8 +1169,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     private static let showingBlockedActions: Set<Selector> = [
         #selector(addNextFocus), #selector(completeTask), #selector(abortTask),
         #selector(addTimeToCurrent), #selector(deferTask), #selector(changeFocus),
-        #selector(renameTask), #selector(preemptNextFocus), #selector(clearQueue),
-        #selector(rateUnrated), #selector(showSettings), #selector(deleteHistoryItems),
+        #selector(renameTask), #selector(togglePause), #selector(preemptNextFocus),
+        #selector(clearQueue), #selector(rateUnrated), #selector(showSettings),
+        #selector(deleteHistoryItems),
     ]
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
@@ -1074,6 +1185,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         if menuItem.action == #selector(completeTask) || menuItem.action == #selector(abortTask)
             || menuItem.action == #selector(addTimeToCurrent) || menuItem.action == #selector(deferTask)
             || menuItem.action == #selector(renameTask) {
+            return currentFocus != nil
+        }
+        if menuItem.action == #selector(togglePause) {
+            menuItem.title = pausedAt != nil ? "Resume" : "Pause"
             return currentFocus != nil
         }
         if menuItem.action == #selector(deleteHistoryItems) {
@@ -1354,6 +1469,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         sessionStart = Date()
         sessionSeconds = seconds
         sessionOriginalId = originalSessionId
+        pausedAt = nil
         deadline = Date().addingTimeInterval(Double(seconds))
         sessionId = db.startSession(reason: reason, seconds: seconds, focus: focus,
                                     originalSessionId: originalSessionId)
@@ -1743,6 +1859,16 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     // ---- per-second update ----
     private func tick() {
         if let focus = currentFocus, let dl = deadline {
+            if let p = pausedAt {
+                // Paused: freeze the countdown (held remaining) with a ⏸ indicator.
+                let remaining = max(0, Int(dl.timeIntervalSince(p).rounded()))
+                let time = showTotalOnPillEnabled ? "\(mmss(remaining)) / \(mmss(sessionSeconds ?? remaining))"
+                                                  : mmss(remaining)
+                hudLabel.stringValue = "⏸ \(focus)    \(time) (paused)"
+                layoutHUD()
+                if showPillEnabled { hudWindow.orderFrontRegardless() } else { hudWindow.orderOut(nil) }
+                return
+            }
             let remaining = Int(dl.timeIntervalSinceNow.rounded())
             if remaining <= 0 {
                 // A prompt is already up (incl. the time's-up panel itself, which
@@ -1997,13 +2123,15 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     /// time actually used as the Duration (Original Duration is untouched).
     private func rateAndComplete() {
         guard let id = sessionId, let focus = currentFocus else { return }
-        let elapsed = max(0, Int(Date().timeIntervalSince(sessionStart ?? Date()).rounded()))
+        let elapsed = elapsedFocusSeconds()   // excludes pause time
+        finalizePause()
         currentFocus = nil
         deadline = nil
         sessionId = nil
         sessionStart = nil
         sessionSeconds = nil
         sessionOriginalId = nil
+        pausedAt = nil
         hudWindow.orderOut(nil)
         let (rating, note, openSeconds, applyTime) = promptRating(focus: focus, title: "Rate this session")
         db.endSession(id: id, status: "completed", rating: rating, note: note,
@@ -2117,6 +2245,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         let menu = NSMenu()
         // The running task (these grey out when idle, except changeFocus → "Set focus").
         menu.addItem(withTitle: "Complete task", action: #selector(completeTask), keyEquivalent: "")
+        menu.addItem(withTitle: "Pause", action: #selector(togglePause), keyEquivalent: "")
         menu.addItem(withTitle: "Add time", action: #selector(addTimeToCurrent), keyEquivalent: "")
         menu.addItem(withTitle: "Rename task", action: #selector(renameTask), keyEquivalent: "")
         menu.addItem(withTitle: "Defer task", action: #selector(deferTask), keyEquivalent: "")

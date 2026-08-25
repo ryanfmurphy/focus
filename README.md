@@ -114,6 +114,7 @@ based on state):
 |------|------|--------------|
 | *— the running task (greyed out when idle) —* | | |
 | **Complete task** | session active | Mark completed, rate 1–10, record the elapsed time as its duration (Original Duration is kept), advance to the next focus |
+| **Pause** / **Resume** | session active | Freeze the countdown (pill shows ⏸ … paused) and resume it later; the deadline shifts forward so no time is lost, and paused time is excluded from a session's recorded duration |
 | **Add time** | session active | Add N minutes to the running session (same as "Add time" at time's up) |
 | **Rename task** | session active | Rename the current focus via a small prompt (updates the pill and the session's `focus`) |
 | **Defer task** | session active | Mark the current one **deferred** ("to be continued") and append a fresh "… (continued)" copy — with its **full original duration** — to the **back** of the queue, then advance to the next focus |
@@ -205,6 +206,11 @@ rebuilds the binary and reloads the agent.
   `new_session_id`); `preempted_session_id` is `NULL` when nothing was running
   (pre-empting before a queued task starts), and both are `NULL` for an
   "Add to front" queue jump (nothing interrupted, nothing started yet).
+- **`pauses`** — one row per Pause (`session_id`, `started_at`, `ended_at`,
+  `seconds`). `ended_at` is `NULL` while paused (that open row *is* the persisted
+  "currently paused" state); `seconds` is stamped on resume. A session's total
+  pause time is `SUM(seconds)` over its closed rows — used to shift the deadline
+  on restart and to exclude pause from recorded durations.
 
 **Status values:** `completed` (finished/rated, or auto-proceeded with a null
 rating pending), `interrupted` (aborted, pre-empted, or swept on next launch after
@@ -220,12 +226,17 @@ something's queued, otherwise a fresh prompt — so you can flow session to sess
 (hands-free with auto-proceed on).
 
 The timer is wall-clock based, so lock / sleep / closing the lid don't disturb a
-running session, and returning won't re-prompt while one is active. If the
-*process* itself dies mid-session (crash, reboot, reinstall), the next launch
-offers three choices: **Resume** it, **Switch focus** (re-queue its remaining time
-to the front and start a new focus now), or **Start fresh** (abandon it — with an
-optional confirm to also clear the queue — then prompt for a new focus). If its
-time elapsed while away, it's completed and sent to the rating queue instead.
+running session, and returning won't re-prompt while one is active. **Pause** is
+the one exception to "wall-clock time always counts": it freezes the countdown by
+shifting the deadline forward on resume, and that pause time is excluded from
+recorded durations — it survives a restart too (a pause open when the process dies
+is closed at next launch, counting the downtime as pause, and the session resumes
+running with the right remaining). If the *process* itself dies mid-session (crash,
+reboot, reinstall), the next launch offers three choices: **Resume** it, **Switch
+focus** (re-queue its remaining time to the front and start a new focus now), or
+**Start fresh** (abandon it — with an optional confirm to also clear the queue —
+then prompt for a new focus). If its time elapsed while away, it's completed and
+sent to the rating queue instead.
 
 ## Configuration
 
