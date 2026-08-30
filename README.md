@@ -48,7 +48,7 @@ cd macos
 ./install.sh
 ```
 
-This compiles `main.swift` to `macos/focus`, copies the LaunchAgent to
+This compiles `main.swift` + `FocusCore.swift` to `macos/focus`, copies the LaunchAgent to
 `~/Library/LaunchAgents/com.murftown.focus.plist`, and (re)loads it. The agent
 has `RunAtLoad` + a conditional `KeepAlive`, so it starts at login and relaunches
 if it *crashes* — but a clean quit (Cmd-Q) stays closed (see
@@ -252,8 +252,31 @@ Re-run `macos/install.sh` after editing.
 
 ```
 macos/
-  main.swift                 # the entire app
+  main.swift                 # the app: AppKit UI, menu, prompts, controller
+  FocusCore.swift            # the data layer: SQLite DB, row structs, pure helpers (no AppKit)
+  tests/main.swift           # headless assertions over FocusCore
+  run-tests.sh               # compile & run the tests
   com.murftown.focus.plist   # LaunchAgent template
   install.sh / uninstall.sh
 ios/                         # early SwiftUI + Live Activity port (see ios/README.md)
 ```
+
+## Tests
+
+The data layer lives in `FocusCore.swift` (the SQLite `DB` class and the pure
+helpers it needs), split out from the AppKit code so it can be compiled and run
+without launching the app. To run the suite:
+
+```sh
+cd macos
+./run-tests.sh
+```
+
+This compiles `FocusCore.swift` + `tests/main.swift` (a plain-`swiftc` assertion
+runner — no XCTest) and runs it; a nonzero exit means something failed. The tests
+open throwaway temp databases via `DB(path:)`, never `~/focus/focus.db`.
+
+They're written as *behavioral* assertions — outcomes like "interrupting records
+actual elapsed but preserves the original estimate", "deferring re-queues the full
+original duration", pause math, and queue ordering — rather than assertions about
+column shape, so they act as a spec that should hold across storage changes.
