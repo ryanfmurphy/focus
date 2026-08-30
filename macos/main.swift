@@ -974,14 +974,74 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         reloadHistory()
     }
 
-    /// Load the active mode's rows, install its columns, and refresh the table.
+    /// Load the active mode's rows, install its columns, apply the sort, and refresh.
     private func reloadHistory() {
         switch historyMode {
         case .tasks:     historyRows = db.taskHistory()
         case .intervals: intervalRows = db.intervalHistory()
         }
         configureHistoryColumns()
+        // Keep the current sort if it still applies to this mode; else fall back to
+        // the mode's default — tasks: Ended desc (most-recently-worked, in-progress
+        // on top); intervals: Started desc (newest interval first).
+        let current = historyTable?.sortDescriptors.first?.key
+        if current == nil || !historyColumnKeys().contains(current!) {
+            let key = historyMode == .tasks ? "ended" : "when"
+            historyTable?.sortDescriptors = [NSSortDescriptor(key: key, ascending: false)]
+        }
+        applyHistorySort()
         historyTable?.reloadData()
+    }
+
+    // Sort keys valid for the active mode's columns.
+    private func historyColumnKeys() -> Set<String> {
+        historyMode == .tasks ? ["when", "ended", "min", "origmin", "ivs", "rating", "status", "focus", "note"]
+                              : ["when", "dur", "rating", "reason", "task"]
+    }
+
+    // Sort the active mode's backing array by the table's current sort descriptor.
+    private func applyHistorySort() {
+        guard let d = historyTable?.sortDescriptors.first, let key = d.key else { return }
+        let asc = d.ascending
+        switch historyMode {
+        case .tasks:     historyRows = historyRows.sorted { taskLess($0, $1, key: key, ascending: asc) }
+        case .intervals: intervalRows = intervalRows.sorted { intervalLess($0, $1, key: key, ascending: asc) }
+        }
+    }
+
+    func tableView(_ tableView: NSTableView, sortDescriptorsDidChange oldDescriptors: [NSSortDescriptor]) {
+        guard tableView === historyTable else { return }
+        applyHistorySort()
+        tableView.reloadData()
+    }
+
+    private func dir<T: Comparable>(_ a: T, _ b: T, _ ascending: Bool) -> Bool { ascending ? a < b : a > b }
+
+    private func taskLess(_ a: TaskHistoryRow, _ b: TaskHistoryRow, key: String, ascending: Bool) -> Bool {
+        switch key {
+        case "when":    return dir(a.startedAt ?? "", b.startedAt ?? "", ascending)
+        // In-progress (nil Ended) sorts as the most recent → top under the default desc.
+        case "ended":   return dir(a.endedAt ?? "\u{FFFF}", b.endedAt ?? "\u{FFFF}", ascending)
+        case "min":     return dir(a.actualSeconds, b.actualSeconds, ascending)
+        case "origmin": return dir(a.estimateSeconds ?? -1, b.estimateSeconds ?? -1, ascending)
+        case "ivs":     return dir(a.intervalCount, b.intervalCount, ascending)
+        case "rating":  return dir(a.rating ?? -1, b.rating ?? -1, ascending)
+        case "status":  return dir(a.status ?? "", b.status ?? "", ascending)
+        case "focus":   return dir(a.focus.lowercased(), b.focus.lowercased(), ascending)
+        case "note":    return dir(a.note ?? "", b.note ?? "", ascending)
+        default:        return dir(a.id, b.id, ascending)
+        }
+    }
+
+    private func intervalLess(_ a: IntervalHistoryRow, _ b: IntervalHistoryRow, key: String, ascending: Bool) -> Bool {
+        switch key {
+        case "when":   return dir(a.startedAt, b.startedAt, ascending)
+        case "dur":    return dir(a.seconds, b.seconds, ascending)
+        case "rating": return dir(a.rating ?? -1, b.rating ?? -1, ascending)
+        case "reason": return dir(a.reason ?? "", b.reason ?? "", ascending)
+        case "task":   return dir(a.taskFocus.lowercased(), b.taskFocus.lowercased(), ascending)
+        default:       return dir(a.id, b.id, ascending)
+        }
     }
 
     private func configureHistoryColumns() {
@@ -990,11 +1050,13 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         func add(_ id: String, _ title: String, width: CGFloat, min: CGFloat, align: NSTextAlignment = .left) {
             let col = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(id))
             col.title = title; col.width = width; col.minWidth = min; col.headerCell.alignment = align
+            col.sortDescriptorPrototype = NSSortDescriptor(key: id, ascending: true)   // click header to sort
             table.addTableColumn(col)
         }
         switch historyMode {
         case .tasks:
             add("when", "Started", width: 140, min: 120)
+            add("ended", "Ended", width: 140, min: 120)
             add("min", "Actual", width: 70, min: 56, align: .right)
             add("origmin", "Estimate", width: 70, min: 56, align: .right)
             add("ivs", "Intervals", width: 70, min: 56, align: .right)
@@ -1032,11 +1094,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             NSPasteboard.general.setString(lines.joined(separator: "\n"), forType: .string)
             return
         }
-        var lines = ["Started\tActual (s)\tEstimate (s)\tIntervals\tRating\tStatus\tFocus\tNote"]
+        var lines = ["Started\tEnded\tActual (s)\tEstimate (s)\tIntervals\tRating\tStatus\tFocus\tNote"]
         for i in indexes where i < historyRows.count {
             let r = historyRows[i]
             let fields = [
                 r.startedAt.map(whenLabel) ?? "",
+                r.endedAt.map(whenLabel) ?? "",
                 "\(r.actualSeconds)",
                 r.estimateSeconds.map { "\($0)" } ?? "",
                 "\(r.intervalCount)",
@@ -1321,6 +1384,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         var align: NSTextAlignment = .left
         switch id {
         case "when":      text = r.startedAt.map(whenLabel) ?? "—"
+        case "ended":     text = r.endedAt.map(whenLabel) ?? "—"
         case "min":       text = mmss(r.actualSeconds); align = .right
         case "origmin":   text = r.estimateSeconds.map { mmss($0) } ?? "—"; align = .right
         case "ivs":       text = "\(r.intervalCount)"; align = .right
