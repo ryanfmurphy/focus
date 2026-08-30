@@ -27,6 +27,10 @@ Subtasks feature builds on.
   **lossless** (each old fragment's rating rides its interval) and per-interval
   rating stays a future option with no further migration. `tasks.rating` is
   seeded from the *last* fragment's rating/note/status.
+- **Resume = continue from remaining** (`estimate − spent`), not a fresh full timer.
+  Defer/pre-empt/queue all resume the same task's remaining; an over-spent task
+  resumes at 0:00 (Add time / Complete). Timer and the queue's "remaining" agree.
+- **Quit-while-paused → relaunch auto-resumes** (unchanged from today).
 - **Estimate** for migrated tasks = the earliest fragment's `original_seconds`
   (the original plan; add-time is not folded in for legacy rows). New tasks bump
   `tasks.estimate_seconds` directly.
@@ -44,10 +48,18 @@ Subtasks feature builds on.
   history-by-task (`taskHistory` → one row per task with actual/interval-count/span).
   Pauses reuse the existing id-agnostic methods (keyed to the interval id in 1c).
   New API re-asserts today's outcomes. — commits `c44701e`, `<this>`
-- [ ] **1c — wire it live.** Call the migration from `init` behind the
-  `intervalCount()==0` guard; rewire `AppController` (beginSession/adopt/end
-  paths/restore) so a continuation attaches an interval to the *same* task.
-  History shows one row per task; `(continued)` naming goes away.
+- [x] **1c — wire it live.** Migration runs from `init` (`1c-0`, `29fcb2b`).
+  FocusCore reads for the controller (`1c prep`, `6c582c3`). `AppController`
+  rewired to track a current **task + open interval**: beginSession creates a task
+  or resumes one (new interval, countdown from remaining), all four end-paths →
+  endInterval + finishTask, defer/pre-empt re-queue the same task by `task_id`,
+  pauses key off the interval, restart reconstructs from the open interval, and
+  See History renders `taskHistory()` (one row per task: Actual / Estimate /
+  Intervals / Rating / Status / Focus / Note). `(continued)` naming is gone. App
+  compiles + all 157 FocusCore tests pass. **Caveat: the controller rewire itself
+  isn't unit-tested — needs a live run.** — commit `<this>`
+  - [ ] **1c-2 (cleanup)** — delete the now-unused old session methods + their
+    tests once a live run confirms the flip.
 - [ ] **2 — display.** History/Queue columns: Estimate / Actual / Remaining;
   queue shows remaining; optional interval/subtask drill-down.
 - [ ] **3 (separate) — subtasks** via `parent_task_id`: second pill, per-subtask

@@ -751,6 +751,9 @@ final class DB {
         SELECT id, COALESCE(original_session_id, id), started_at, ended_at, seconds, reason, open_seconds_start, open_seconds_end, rating
         FROM sessions;
         """)
+        // Point any in-flight queued continuations at their migrated task (the chain
+        // root id == the new task id), so resuming them attaches to the same task.
+        exec("UPDATE queue SET task_id = original_session_id WHERE task_id IS NULL AND original_session_id IS NOT NULL;")
         exec("COMMIT;")
     }
 
