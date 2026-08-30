@@ -39,20 +39,6 @@ func parseDurationSeconds(_ text: String) -> Int? {
     return m * 60 + s
 }
 
-// Given a focus name, produce the name for its continuation: "Foo" -> "Foo (continued)",
-// "Foo (continued)" -> "Foo (continued 2)", "Foo (continued 2)" -> "Foo (continued 3)".
-func continuedName(_ focus: String) -> String {
-    let pattern = "^(.*?)\\s*\\(continued(?: (\\d+))?\\)$"
-    let ns = focus as NSString
-    if let re = try? NSRegularExpression(pattern: pattern),
-       let m = re.firstMatch(in: focus, range: NSRange(location: 0, length: ns.length)) {
-        let base = ns.substring(with: m.range(at: 1))
-        let current = m.range(at: 2).location != NSNotFound
-            ? (Int(ns.substring(with: m.range(at: 2))) ?? 1) : 1
-        return "\(base) (continued \(current + 1))"
-    }
-    return "\(focus) (continued)"
-}
 
 /// Example focuses — one is picked at random for the session-setup field's
 /// placeholder. A deliberate mix of everyday "get it done" tasks and self-care /
@@ -267,38 +253,7 @@ final class DB {
 
     private func exec(_ sql: String) { sqlite3_exec(db, sql, nil, nil, nil) }
 
-    /// Insert a new in-progress session; returns its row id. `seconds` is stamped
-    /// into both `seconds` (the running planned total) and `original_seconds` (fixed).
-    func startSession(reason: String, seconds: Int, focus: String, originalSessionId: Int64?) -> Int64? {
-        let sql = "INSERT INTO sessions (started_at, reason, seconds, original_seconds, focus, original_session_id) VALUES (?,?,?,?,?,?);"
-        var stmt: OpaquePointer?
-        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return nil }
-        defer { sqlite3_finalize(stmt) }
-        sqlite3_bind_text(stmt, 1, isoNow(), -1, SQLITE_TRANSIENT)
-        sqlite3_bind_text(stmt, 2, reason, -1, SQLITE_TRANSIENT)
-        sqlite3_bind_int(stmt, 3, Int32(seconds))
-        sqlite3_bind_int(stmt, 4, Int32(seconds))
-        sqlite3_bind_text(stmt, 5, focus, -1, SQLITE_TRANSIENT)
-        if let o = originalSessionId { sqlite3_bind_int64(stmt, 6, o) } else { sqlite3_bind_null(stmt, 6) }
-        guard sqlite3_step(stmt) == SQLITE_DONE else { return nil }
-        return sqlite3_last_insert_rowid(db)
-    }
 
-    /// Add to a session's accumulated popup-open seconds. COALESCE means the first
-    /// write counts from 0 (so a session closed without any popup stays NULL — the
-    /// column is only ever touched when there's time to add). Multiple openings of
-    /// the same popup (e.g. time's-up → "Add time" → later rate) sum together.
-    private func addOpenSeconds(_ column: String, id: Int64, seconds: Int) {
-        let sql = "UPDATE sessions SET \(column) = COALESCE(\(column), 0) + ? WHERE id=?;"
-        var stmt: OpaquePointer?
-        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
-        defer { sqlite3_finalize(stmt) }
-        sqlite3_bind_int(stmt, 1, Int32(seconds))
-        sqlite3_bind_int64(stmt, 2, id)
-        sqlite3_step(stmt)
-    }
-    func addOpenSecondsStart(id: Int64, seconds: Int) { addOpenSeconds("open_seconds_start", id: id, seconds: seconds) }
-    func addOpenSecondsEnd(id: Int64, seconds: Int)   { addOpenSeconds("open_seconds_end", id: id, seconds: seconds) }
 
     // Bind an optional note (empty → NULL) at the given parameter index.
     private func bindNote(_ stmt: OpaquePointer?, _ idx: Int32, _ note: String) {
@@ -306,122 +261,13 @@ final class DB {
         else { sqlite3_bind_text(stmt, idx, note, -1, SQLITE_TRANSIENT) }
     }
 
-    /// Close out a session with a status, (optionally) a rating, and a note.
-    /// `openSecondsEnd` is how long the ending/rating popup stayed open (nil when
-    /// closed without a popup, e.g. auto-proceed or a launch-time sweep).
-    /// `elapsedSeconds`, when given, overwrites the planned `seconds` with the time
-    /// actually used (e.g. completing a task early) — `original_seconds` is untouched.
-    func endSession(id: Int64, status: String, rating: Int?, note: String = "",
-                    openSecondsEnd: Int? = nil, elapsedSeconds: Int? = nil) {
-        let sql = "UPDATE sessions SET ended_at=?, status=?, rating=?, note=? WHERE id=?;"
-        var stmt: OpaquePointer?
-        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
-        defer { sqlite3_finalize(stmt) }
-        sqlite3_bind_text(stmt, 1, isoNow(), -1, SQLITE_TRANSIENT)
-        sqlite3_bind_text(stmt, 2, status, -1, SQLITE_TRANSIENT)
-        if let r = rating { sqlite3_bind_int(stmt, 3, Int32(r)) } else { sqlite3_bind_null(stmt, 3) }
-        bindNote(stmt, 4, note)
-        sqlite3_bind_int64(stmt, 5, id)
-        sqlite3_step(stmt)
-        if let sec = elapsedSeconds { updatePlannedSeconds(id: id, seconds: sec) }
-        if let e = openSecondsEnd { addOpenSecondsEnd(id: id, seconds: e) }
-    }
 
-    /// Overwrite a session's `seconds` (the actual/planned duration). Leaves
-    /// `original_seconds` alone.
-    private func updatePlannedSeconds(id: Int64, seconds: Int) {
-        var stmt: OpaquePointer?
-        guard sqlite3_prepare_v2(db, "UPDATE sessions SET seconds=? WHERE id=?;", -1, &stmt, nil) == SQLITE_OK else { return }
-        defer { sqlite3_finalize(stmt) }
-        sqlite3_bind_int(stmt, 1, Int32(seconds))
-        sqlite3_bind_int64(stmt, 2, id)
-        sqlite3_step(stmt)
-    }
 
-    /// "Apply this time to the previous focus session": add a popup span to the
-    /// session's duration (without touching end-popup-open time).
-    func addToDuration(id: Int64, seconds: Int) {
-        var stmt: OpaquePointer?
-        guard sqlite3_prepare_v2(db, "UPDATE sessions SET seconds = seconds + ? WHERE id=?;", -1, &stmt, nil) == SQLITE_OK else { return }
-        defer { sqlite3_finalize(stmt) }
-        sqlite3_bind_int(stmt, 1, Int32(seconds))
-        sqlite3_bind_int64(stmt, 2, id)
-        sqlite3_step(stmt)
-    }
 
-    /// Close a session as "interrupted", recording how many seconds it actually
-    /// ran (overwriting the planned seconds), with an optional rating/note.
-    func markInterrupted(id: Int64, elapsedSeconds: Int, rating: Int? = nil, note: String = "",
-                         openSecondsEnd: Int? = nil) {
-        let sql = "UPDATE sessions SET ended_at=?, status='interrupted', seconds=?, rating=?, note=? WHERE id=?;"
-        var stmt: OpaquePointer?
-        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
-        defer { sqlite3_finalize(stmt) }
-        sqlite3_bind_text(stmt, 1, isoNow(), -1, SQLITE_TRANSIENT)
-        sqlite3_bind_int(stmt, 2, Int32(elapsedSeconds))
-        if let r = rating { sqlite3_bind_int(stmt, 3, Int32(r)) } else { sqlite3_bind_null(stmt, 3) }
-        bindNote(stmt, 4, note)
-        sqlite3_bind_int64(stmt, 5, id)
-        sqlite3_step(stmt)
-        if let e = openSecondsEnd { addOpenSecondsEnd(id: id, seconds: e) }
-    }
 
-    /// Close a session as "deferred" (to be continued later), recording how many
-    /// seconds it actually ran. No rating — the work isn't finished, it's paused.
-    func markDeferred(id: Int64, elapsedSeconds: Int) {
-        let sql = "UPDATE sessions SET ended_at=?, status='deferred', seconds=? WHERE id=?;"
-        var stmt: OpaquePointer?
-        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
-        defer { sqlite3_finalize(stmt) }
-        sqlite3_bind_text(stmt, 1, isoNow(), -1, SQLITE_TRANSIENT)
-        sqlite3_bind_int(stmt, 2, Int32(elapsedSeconds))
-        sqlite3_bind_int64(stmt, 3, id)
-        sqlite3_step(stmt)
-    }
 
-    /// The planned duration a session *started* with (the stamped `original_seconds`,
-    /// unaffected by "Add time"). Used to re-queue a deferred task with its full
-    /// original duration.
-    func plannedSecondsAtStart(id: Int64) -> Int {
-        let sql = "SELECT COALESCE(original_seconds, seconds) FROM sessions WHERE id = ?;"
-        var stmt: OpaquePointer?
-        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return 0 }
-        defer { sqlite3_finalize(stmt) }
-        sqlite3_bind_int64(stmt, 1, id)
-        return sqlite3_step(stmt) == SQLITE_ROW ? Int(sqlite3_column_int(stmt, 0)) : 0
-    }
 
-    /// Rename a session's focus (inline edit from the pill).
-    func renameSession(id: Int64, focus: String) {
-        var stmt: OpaquePointer?
-        guard sqlite3_prepare_v2(db, "UPDATE sessions SET focus=? WHERE id=?;", -1, &stmt, nil) == SQLITE_OK else { return }
-        defer { sqlite3_finalize(stmt) }
-        sqlite3_bind_text(stmt, 1, focus, -1, SQLITE_TRANSIENT)
-        sqlite3_bind_int64(stmt, 2, id)
-        sqlite3_step(stmt)
-    }
 
-    /// Log an "Add time" event and bump the session's total seconds.
-    func addTime(sessionId: Int64, seconds: Int) {
-        var ins: OpaquePointer?
-        if sqlite3_prepare_v2(db, "INSERT INTO time_additions (session_id, added_at, seconds) VALUES (?,?,?);",
-                              -1, &ins, nil) == SQLITE_OK {
-            sqlite3_bind_int64(ins, 1, sessionId)
-            sqlite3_bind_text(ins, 2, isoNow(), -1, SQLITE_TRANSIENT)
-            sqlite3_bind_int(ins, 3, Int32(seconds))
-            sqlite3_step(ins)
-        }
-        sqlite3_finalize(ins)
-
-        var upd: OpaquePointer?
-        if sqlite3_prepare_v2(db, "UPDATE sessions SET seconds = seconds + ? WHERE id = ?;",
-                              -1, &upd, nil) == SQLITE_OK {
-            sqlite3_bind_int(upd, 1, Int32(seconds))
-            sqlite3_bind_int64(upd, 2, sessionId)
-            sqlite3_step(upd)
-        }
-        sqlite3_finalize(upd)
-    }
 
     /// Open a pause (row with NULL ended_at) for a session.
     func startPause(sessionId: Int64, at: Date) {
@@ -480,125 +326,12 @@ final class DB {
         sqlite3_step(stmt)
     }
 
-    /// Sessions never closed out (ended_at IS NULL), newest first — i.e. a
-    /// session that was live when the process died (uninstall/crash/reboot).
-    func openSessions() -> [ActiveSession] {
-        let sql = "SELECT id, started_at, seconds, focus, original_session_id FROM sessions WHERE ended_at IS NULL ORDER BY id DESC;"
-        var stmt: OpaquePointer?
-        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
-        defer { sqlite3_finalize(stmt) }
-        var rows: [ActiveSession] = []
-        while sqlite3_step(stmt) == SQLITE_ROW {
-            let focus = sqlite3_column_text(stmt, 3).map { String(cString: $0) } ?? ""
-            let orig = sqlite3_column_type(stmt, 4) == SQLITE_NULL ? nil : sqlite3_column_int64(stmt, 4)
-            rows.append(ActiveSession(id: sqlite3_column_int64(stmt, 0),
-                                      startedAt: sqlite3_column_text(stmt, 1).map { String(cString: $0) } ?? "",
-                                      seconds: Int(sqlite3_column_int(stmt, 2)),
-                                      focus: focus, originalSessionId: orig))
-        }
-        return rows
-    }
 
-    /// Completed sessions with no rating yet (deferred), oldest first.
-    func unratedCompleted() -> [ActiveSession] {
-        let sql = """
-        SELECT id, started_at, seconds, focus, original_session_id FROM sessions
-        WHERE status = 'completed' AND rating IS NULL
-        ORDER BY started_at ASC, id ASC;
-        """
-        var stmt: OpaquePointer?
-        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
-        defer { sqlite3_finalize(stmt) }
-        var rows: [ActiveSession] = []
-        while sqlite3_step(stmt) == SQLITE_ROW {
-            let focus = sqlite3_column_text(stmt, 3).map { String(cString: $0) } ?? ""
-            let orig = sqlite3_column_type(stmt, 4) == SQLITE_NULL ? nil : sqlite3_column_int64(stmt, 4)
-            rows.append(ActiveSession(id: sqlite3_column_int64(stmt, 0),
-                                      startedAt: sqlite3_column_text(stmt, 1).map { String(cString: $0) } ?? "",
-                                      seconds: Int(sqlite3_column_int(stmt, 2)),
-                                      focus: focus, originalSessionId: orig))
-        }
-        return rows
-    }
 
-    func unratedCount() -> Int {
-        var stmt: OpaquePointer?
-        let sql = "SELECT COUNT(*) FROM sessions WHERE status = 'completed' AND rating IS NULL;"
-        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return 0 }
-        defer { sqlite3_finalize(stmt) }
-        return sqlite3_step(stmt) == SQLITE_ROW ? Int(sqlite3_column_int(stmt, 0)) : 0
-    }
 
-    /// Set a rating and note on an already-completed session ("Rate unrated
-    /// sessions"). `openSecondsEnd` accumulates how long that (deferred) rating
-    /// popup stayed open, on top of anything already recorded for the session.
-    func setRating(id: Int64, rating: Int, note: String = "", openSecondsEnd: Int? = nil) {
-        var stmt: OpaquePointer?
-        guard sqlite3_prepare_v2(db, "UPDATE sessions SET rating=?, note=? WHERE id=?;", -1, &stmt, nil) == SQLITE_OK else { return }
-        defer { sqlite3_finalize(stmt) }
-        sqlite3_bind_int(stmt, 1, Int32(rating))
-        bindNote(stmt, 2, note)
-        sqlite3_bind_int64(stmt, 3, id)
-        sqlite3_step(stmt)
-        if let e = openSecondsEnd { addOpenSecondsEnd(id: id, seconds: e) }
-    }
 
-    /// Most recent sessions, newest first, for the history window.
-    func recent(limit: Int = 500) -> [SessionRow] {
-        let sql = """
-        SELECT id, started_at, ended_at, seconds, focus, rating, status, note,
-               open_seconds_start, open_seconds_end, original_seconds
-        FROM sessions ORDER BY id DESC LIMIT ?;
-        """
-        var stmt: OpaquePointer?
-        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
-        defer { sqlite3_finalize(stmt) }
-        sqlite3_bind_int(stmt, 1, Int32(limit))
 
-        func text(_ col: Int32) -> String? {
-            guard let c = sqlite3_column_text(stmt, col) else { return nil }
-            return String(cString: c)
-        }
 
-        func intOrNil(_ col: Int32) -> Int? {
-            sqlite3_column_type(stmt, col) == SQLITE_NULL ? nil : Int(sqlite3_column_int(stmt, col))
-        }
-        var rows: [SessionRow] = []
-        while sqlite3_step(stmt) == SQLITE_ROW {
-            rows.append(SessionRow(
-                id: sqlite3_column_int64(stmt, 0),
-                startedAt: text(1) ?? "",
-                endedAt: text(2),
-                seconds: Int(sqlite3_column_int(stmt, 3)),
-                focus: text(4) ?? "",
-                rating: intOrNil(5),
-                status: text(6),
-                note: text(7),
-                openSecondsStart: intOrNil(8),
-                openSecondsEnd: intOrNil(9),
-                originalSeconds: intOrNil(10)))
-        }
-        return rows
-    }
-
-    /// Permanently delete the given sessions from history.
-    func deleteSessions(ids: [Int64]) {
-        guard !ids.isEmpty else { return }
-        let placeholders = ids.map { _ in "?" }.joined(separator: ",")
-        var stmt: OpaquePointer?
-        guard sqlite3_prepare_v2(db, "DELETE FROM sessions WHERE id IN (\(placeholders));", -1, &stmt, nil) == SQLITE_OK else { return }
-        defer { sqlite3_finalize(stmt) }
-        for (i, id) in ids.enumerated() { sqlite3_bind_int64(stmt, Int32(i + 1), id) }
-        sqlite3_step(stmt)
-    }
-
-    /// Total number of recorded sessions (for the history menu label).
-    func sessionCount() -> Int {
-        var stmt: OpaquePointer?
-        guard sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM sessions;", -1, &stmt, nil) == SQLITE_OK else { return 0 }
-        defer { sqlite3_finalize(stmt) }
-        return sqlite3_step(stmt) == SQLITE_ROW ? Int(sqlite3_column_int(stmt, 0)) : 0
-    }
 
     // MARK: - Queue
 
@@ -628,38 +361,7 @@ final class DB {
         return rows
     }
 
-    /// Append a focus to the end of the queue (position = current max + 1).
-    /// `originalSessionId` carries the chain root when appending a deferred task's
-    /// continuation (nil for a plain new "Add to queue").
-    func enqueue(focus: String, seconds: Int, originalSessionId: Int64? = nil) {
-        let sql = "INSERT INTO queue (created_at, seconds, focus, original_session_id, position) VALUES (?,?,?,?, (SELECT COALESCE(MAX(position), 0) + 1 FROM queue));"
-        var stmt: OpaquePointer?
-        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
-        defer { sqlite3_finalize(stmt) }
-        sqlite3_bind_text(stmt, 1, isoNow(), -1, SQLITE_TRANSIENT)
-        sqlite3_bind_int(stmt, 2, Int32(seconds))
-        sqlite3_bind_text(stmt, 3, focus, -1, SQLITE_TRANSIENT)
-        if let o = originalSessionId { sqlite3_bind_int64(stmt, 4, o) } else { sqlite3_bind_null(stmt, 4) }
-        sqlite3_step(stmt)
-    }
 
-    /// Insert at the FRONT of the queue (used when pre-empting the current focus):
-    /// position = current min - 1. `originalSessionId` carries the chain root onto
-    /// the eventual resumed session.
-    func enqueueFront(focus: String, seconds: Int, originalSessionId: Int64?) {
-        let sql = """
-        INSERT INTO queue (created_at, seconds, focus, original_session_id, position)
-        VALUES (?, ?, ?, ?, (SELECT COALESCE(MIN(position), 0) - 1 FROM queue));
-        """
-        var stmt: OpaquePointer?
-        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return }
-        defer { sqlite3_finalize(stmt) }
-        sqlite3_bind_text(stmt, 1, isoNow(), -1, SQLITE_TRANSIENT)
-        sqlite3_bind_int(stmt, 2, Int32(seconds))
-        sqlite3_bind_text(stmt, 3, focus, -1, SQLITE_TRANSIENT)
-        if let o = originalSessionId { sqlite3_bind_int64(stmt, 4, o) } else { sqlite3_bind_null(stmt, 4) }
-        sqlite3_step(stmt)
-    }
 
     /// Persist a new front-to-back order: `ids` in the desired order get
     /// position 0, 1, 2, … in one transaction.
@@ -722,6 +424,33 @@ final class DB {
         guard sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM intervals;", -1, &stmt, nil) == SQLITE_OK else { return 0 }
         defer { sqlite3_finalize(stmt) }
         return sqlite3_step(stmt) == SQLITE_ROW ? Int(sqlite3_column_int(stmt, 0)) : 0
+    }
+
+    /// Insert a legacy `sessions` row directly. The app no longer writes `sessions`;
+    /// this exists only to build old-schema fixtures for the migration tests.
+    @discardableResult
+    func insertLegacySession(seconds: Int, focus: String, originalSeconds: Int? = nil,
+                             status: String? = nil, rating: Int? = nil, note: String? = nil,
+                             originalSessionId: Int64? = nil, openSecondsEnd: Int? = nil,
+                             reason: String = "launch") -> Int64 {
+        let sql = "INSERT INTO sessions (started_at, ended_at, reason, seconds, original_seconds, focus, status, rating, note, original_session_id, open_seconds_end) VALUES (?,?,?,?,?,?,?,?,?,?,?);"
+        var s: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &s, nil) == SQLITE_OK else { return 0 }
+        defer { sqlite3_finalize(s) }
+        let now = isoNow()
+        sqlite3_bind_text(s, 1, now, -1, SQLITE_TRANSIENT)
+        if status != nil { sqlite3_bind_text(s, 2, now, -1, SQLITE_TRANSIENT) } else { sqlite3_bind_null(s, 2) }
+        sqlite3_bind_text(s, 3, reason, -1, SQLITE_TRANSIENT)
+        sqlite3_bind_int(s, 4, Int32(seconds))
+        if let o = originalSeconds { sqlite3_bind_int(s, 5, Int32(o)) } else { sqlite3_bind_null(s, 5) }
+        sqlite3_bind_text(s, 6, focus, -1, SQLITE_TRANSIENT)
+        if let st = status { sqlite3_bind_text(s, 7, st, -1, SQLITE_TRANSIENT) } else { sqlite3_bind_null(s, 7) }
+        if let r = rating { sqlite3_bind_int(s, 8, Int32(r)) } else { sqlite3_bind_null(s, 8) }
+        if let n = note { sqlite3_bind_text(s, 9, n, -1, SQLITE_TRANSIENT) } else { sqlite3_bind_null(s, 9) }
+        if let osid = originalSessionId { sqlite3_bind_int64(s, 10, osid) } else { sqlite3_bind_null(s, 10) }
+        if let oe = openSecondsEnd { sqlite3_bind_int(s, 11, Int32(oe)) } else { sqlite3_bind_null(s, 11) }
+        sqlite3_step(s)
+        return sqlite3_last_insert_rowid(db)
     }
 
     /// Whether a legacy `sessions` table exists (a pre-refactor DB).
@@ -1165,27 +894,7 @@ struct QueueItem {
     let taskId: Int64?           // new model: the task to resume (nil = mint a fresh task)
 }
 
-struct ActiveSession {
-    let id: Int64
-    let startedAt: String
-    let seconds: Int
-    let focus: String
-    let originalSessionId: Int64?
-}
 
-struct SessionRow {
-    let id: Int64
-    let startedAt: String
-    let endedAt: String?
-    let seconds: Int
-    let focus: String
-    let rating: Int?
-    let status: String?
-    let note: String?
-    let openSecondsStart: Int?
-    let openSecondsEnd: Int?
-    let originalSeconds: Int?   // nil for old interrupted/deferred rows (unrecoverable)
-}
 
 // New model. `TaskRow` (not `Task`, to avoid shadowing Swift's concurrency type)
 // is the unit of identity/estimate/rating; `Interval` is one timed chunk of work.

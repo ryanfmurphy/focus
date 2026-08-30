@@ -58,8 +58,12 @@ Subtasks feature builds on.
   Intervals / Rating / Status / Focus / Note). `(continued)` naming is gone. App
   compiles + all 157 FocusCore tests pass. **Caveat: the controller rewire itself
   isn't unit-tested — needs a live run.** — commit `<this>`
-  - [ ] **1c-2 (cleanup)** — delete the now-unused old session methods + their
-    tests once a live run confirms the flip.
+  - [x] **1c-2 (cleanup)** — deleted the ~21 dead old-session DB methods
+    (startSession/endSession/markInterrupted/markDeferred/addTime/addToDuration/
+    plannedSecondsAtStart/renameSession/recent/openSessions/setRating/… + enqueue/
+    enqueueFront) and the SessionRow/ActiveSession structs + continuedName. Kept a
+    small `insertLegacySession` fixture writer for the migration tests. FocusCore
+    dropped ~300 lines; redundant old behavioral tests removed. 139 assertions pass.
 - [~] **2 — display.** History rollup columns (Actual/Estimate/Intervals) done in
   1c. Added a **Tasks ⇄ Intervals** toggle to See History: Intervals shows the
   global chronological interval timeline (Started/Duration/Rating/Reason/Task),
