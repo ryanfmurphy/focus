@@ -277,6 +277,82 @@ section("Data persists across reopen; reopening re-runs migrations harmlessly") 
     eq(r.originalSeconds ?? -1, 1500, "original survived")
 }
 
+// MARK: - New-model write API (Stage 1b): tasks + intervals lifecycle
+
+section("startTask opens a task with one live interval; spent/remaining are right") {
+    let db = freshDB()
+    guard let (tid, iid) = db.startTask(reason: "launch", estimateSeconds: 1500, focus: "Write tests") else {
+        ok(false, "startTask returned ids"); return
+    }
+    let t = db.task(id: tid)
+    ok(t != nil, "task exists")
+    eq(t?.focus ?? "", "Write tests", "focus stored")
+    eq(t?.estimateSeconds ?? -1, 1500, "estimate stored")
+    ok(t?.status == nil, "status NULL while active")
+    ok(t?.rating == nil, "no rating while active")
+    eq(db.intervals(forTask: tid).count, 1, "one interval")
+    ok(db.openInterval(taskId: tid)?.id == iid, "the interval is open (underway)")
+    eq(db.spentSeconds(taskId: tid), 0, "spent 0 until an interval closes")
+    eq(db.remainingSeconds(taskId: tid), 1500, "remaining = full estimate")
+}
+
+section("Add time bumps the TASK estimate (remaining), not spent") {
+    let db = freshDB()
+    let (tid, _) = db.startTask(reason: "launch", estimateSeconds: 1500, focus: "A")!
+    db.addTimeToTask(id: tid, seconds: 300)
+    eq(db.task(id: tid)?.estimateSeconds ?? -1, 1800, "estimate bumped by 300")
+    eq(db.remainingSeconds(taskId: tid), 1800, "remaining grows with estimate")
+    eq(db.spentSeconds(taskId: tid), 0, "spent unaffected by add-time")
+}
+
+section("Working across intervals accumulates on the same task (cohesion)") {
+    let db = freshDB()
+    let (tid, i1) = db.startTask(reason: "launch", estimateSeconds: 1500, focus: "Deep work")!
+    db.endInterval(id: i1, elapsedSeconds: 600)          // first chunk
+    eq(db.spentSeconds(taskId: tid), 600, "spent = first chunk")
+    eq(db.remainingSeconds(taskId: tid), 900, "remaining = estimate − spent")
+    ok(db.openInterval(taskId: tid) == nil, "no open interval between chunks (paused/queued)")
+    let i2 = db.startInterval(taskId: tid, reason: "resume")!  // resume same task
+    eq(db.intervals(forTask: tid).count, 2, "two intervals, one task — no new (continued) task")
+    db.endInterval(id: i2, elapsedSeconds: 800)
+    eq(db.spentSeconds(taskId: tid), 1400, "spent sums both chunks")
+    eq(db.remainingSeconds(taskId: tid), 100, "remaining reflects both chunks")
+}
+
+section("Complete / interrupt / defer set the task's headline rating (not per-interval)") {
+    let db = freshDB()
+    let c = db.startTask(reason: "launch", estimateSeconds: 1500, focus: "C")!
+    db.endInterval(id: c.intervalId, elapsedSeconds: 1490, openSecondsEnd: 8)
+    db.finishTask(id: c.taskId, status: "completed", rating: 9, note: "nailed it")
+    let ct = db.task(id: c.taskId)
+    eq(ct?.status ?? "", "completed", "completed status")
+    eq(ct?.rating ?? -1, 9, "task rating set")
+    eq(ct?.note ?? "", "nailed it", "task note set")
+    eq(db.openInterval(taskId: c.taskId)?.id ?? -1, -1, "interval closed")
+    eq(db.intervals(forTask: c.taskId).first?.openSecondsEnd ?? -1, 8, "end popup-open recorded on interval")
+
+    let a = db.startTask(reason: "launch", estimateSeconds: 900, focus: "Abort me")!
+    db.endInterval(id: a.intervalId, elapsedSeconds: 120)
+    db.finishTask(id: a.taskId, status: "interrupted", rating: 3, note: "gave up")
+    eq(db.task(id: a.taskId)?.rating ?? -1, 3, "abort can still carry a task rating")
+
+    let d = db.startTask(reason: "launch", estimateSeconds: 900, focus: "Defer me")!
+    db.endInterval(id: d.intervalId, elapsedSeconds: 200)
+    db.finishTask(id: d.taskId, status: "deferred")
+    eq(db.task(id: d.taskId)?.status ?? "", "deferred", "deferred status")
+    ok(db.task(id: d.taskId)?.rating == nil, "defer leaves rating unset")
+}
+
+section("Apply-time credits an interval; rename edits the task") {
+    let db = freshDB()
+    let (tid, iid) = db.startTask(reason: "launch", estimateSeconds: 1500, focus: "Old name")!
+    db.endInterval(id: iid, elapsedSeconds: 600)
+    db.addToInterval(id: iid, seconds: 42)
+    eq(db.spentSeconds(taskId: tid), 642, "apply-time adds to the interval's actual")
+    db.renameTask(id: tid, focus: "New name")
+    eq(db.task(id: tid)?.focus ?? "", "New name", "rename updates the task focus")
+}
+
 // MARK: - Migration: sessions -> tasks + intervals
 
 section("migrateSessionsToTasks merges a continued chain into one task") {

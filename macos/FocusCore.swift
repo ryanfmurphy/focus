@@ -791,6 +791,141 @@ final class DB {
         }
         return rows
     }
+
+    // MARK: - Tasks + intervals: write API (Stage 1b)
+    // Mirrors the old session flows in task/interval terms. Not yet called by the
+    // app (that's 1c) — built and tested first. A "task" is worked in one or more
+    // "intervals"; the active work is a task with an open (unfinished) interval.
+
+    /// Create a task and open its first interval. Returns both ids.
+    func startTask(reason: String, estimateSeconds: Int, focus: String,
+                   parentTaskId: Int64? = nil) -> (taskId: Int64, intervalId: Int64)? {
+        var t: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "INSERT INTO tasks (parent_task_id, created_at, focus, estimate_seconds) VALUES (?,?,?,?);", -1, &t, nil) == SQLITE_OK else { return nil }
+        if let p = parentTaskId { sqlite3_bind_int64(t, 1, p) } else { sqlite3_bind_null(t, 1) }
+        sqlite3_bind_text(t, 2, isoNow(), -1, SQLITE_TRANSIENT)
+        sqlite3_bind_text(t, 3, focus, -1, SQLITE_TRANSIENT)
+        sqlite3_bind_int(t, 4, Int32(estimateSeconds))
+        let done = sqlite3_step(t) == SQLITE_DONE
+        sqlite3_finalize(t)
+        guard done else { return nil }
+        let taskId = sqlite3_last_insert_rowid(db)
+        guard let intervalId = startInterval(taskId: taskId, reason: reason) else { return nil }
+        return (taskId, intervalId)
+    }
+
+    /// Open a new interval (work chunk) on an existing task — the resume/continue
+    /// path. Attaching to the SAME task (instead of spawning a "(continued)" row)
+    /// is what makes a task cohesive. Returns the new interval id.
+    func startInterval(taskId: Int64, reason: String) -> Int64? {
+        var s: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "INSERT INTO intervals (task_id, started_at, reason) VALUES (?,?,?);", -1, &s, nil) == SQLITE_OK else { return nil }
+        defer { sqlite3_finalize(s) }
+        sqlite3_bind_int64(s, 1, taskId)
+        sqlite3_bind_text(s, 2, isoNow(), -1, SQLITE_TRANSIENT)
+        sqlite3_bind_text(s, 3, reason, -1, SQLITE_TRANSIENT)
+        guard sqlite3_step(s) == SQLITE_DONE else { return nil }
+        return sqlite3_last_insert_rowid(db)
+    }
+
+    /// Accumulate popup-open seconds on an interval (COALESCE from 0, like sessions).
+    private func addIntervalOpenSeconds(_ column: String, id: Int64, seconds: Int) {
+        var s: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "UPDATE intervals SET \(column)=COALESCE(\(column),0)+? WHERE id=?;", -1, &s, nil) == SQLITE_OK else { return }
+        defer { sqlite3_finalize(s) }
+        sqlite3_bind_int(s, 1, Int32(seconds)); sqlite3_bind_int64(s, 2, id); sqlite3_step(s)
+    }
+    func addIntervalOpenSecondsStart(id: Int64, seconds: Int) { addIntervalOpenSeconds("open_seconds_start", id: id, seconds: seconds) }
+    func addIntervalOpenSecondsEnd(id: Int64, seconds: Int)   { addIntervalOpenSeconds("open_seconds_end", id: id, seconds: seconds) }
+
+    /// Close an interval, stamping its ACTUAL elapsed seconds (+ optional end popup-open).
+    func endInterval(id: Int64, elapsedSeconds: Int, openSecondsEnd: Int? = nil) {
+        var s: OpaquePointer?
+        if sqlite3_prepare_v2(db, "UPDATE intervals SET ended_at=?, seconds=? WHERE id=?;", -1, &s, nil) == SQLITE_OK {
+            sqlite3_bind_text(s, 1, isoNow(), -1, SQLITE_TRANSIENT)
+            sqlite3_bind_int(s, 2, Int32(elapsedSeconds))
+            sqlite3_bind_int64(s, 3, id)
+            sqlite3_step(s)
+        }
+        sqlite3_finalize(s)
+        if let e = openSecondsEnd { addIntervalOpenSecondsEnd(id: id, seconds: e) }
+    }
+
+    /// "Apply this popup time": credit seconds to an interval's actual elapsed
+    /// (the new-model equivalent of addToDuration).
+    func addToInterval(id: Int64, seconds: Int) {
+        var s: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "UPDATE intervals SET seconds = COALESCE(seconds,0) + ? WHERE id=?;", -1, &s, nil) == SQLITE_OK else { return }
+        defer { sqlite3_finalize(s) }
+        sqlite3_bind_int(s, 1, Int32(seconds)); sqlite3_bind_int64(s, 2, id); sqlite3_step(s)
+    }
+
+    /// Mark a task finished. `status` ∈ {completed, interrupted, deferred}. Optional
+    /// rating/note (rating stays nil for deferred). Does NOT close the interval —
+    /// call endInterval first for the chunk being closed.
+    func finishTask(id: Int64, status: String, rating: Int? = nil, note: String = "") {
+        var s: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "UPDATE tasks SET status=?, rating=?, note=? WHERE id=?;", -1, &s, nil) == SQLITE_OK else { return }
+        defer { sqlite3_finalize(s) }
+        sqlite3_bind_text(s, 1, status, -1, SQLITE_TRANSIENT)
+        if let r = rating { sqlite3_bind_int(s, 2, Int32(r)) } else { sqlite3_bind_null(s, 2) }
+        bindNote(s, 3, note)
+        sqlite3_bind_int64(s, 4, id)
+        sqlite3_step(s)
+    }
+
+    /// Add time to a task's estimate (the countdown target grows). The estimate is
+    /// now the source of truth, so no separate log is kept (unlike old add-time,
+    /// which existed to reconstruct original_seconds).
+    func addTimeToTask(id: Int64, seconds: Int) {
+        var s: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "UPDATE tasks SET estimate_seconds = COALESCE(estimate_seconds,0) + ? WHERE id=?;", -1, &s, nil) == SQLITE_OK else { return }
+        defer { sqlite3_finalize(s) }
+        sqlite3_bind_int(s, 1, Int32(seconds)); sqlite3_bind_int64(s, 2, id); sqlite3_step(s)
+    }
+
+    /// Rename a task's focus.
+    func renameTask(id: Int64, focus: String) {
+        var s: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "UPDATE tasks SET focus=? WHERE id=?;", -1, &s, nil) == SQLITE_OK else { return }
+        defer { sqlite3_finalize(s) }
+        sqlite3_bind_text(s, 1, focus, -1, SQLITE_TRANSIENT); sqlite3_bind_int64(s, 2, id); sqlite3_step(s)
+    }
+
+    /// One task by id.
+    func task(id: Int64) -> TaskRow? {
+        var s: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "SELECT id, parent_task_id, created_at, focus, estimate_seconds, status, rating, note FROM tasks WHERE id=?;", -1, &s, nil) == SQLITE_OK else { return nil }
+        defer { sqlite3_finalize(s) }
+        sqlite3_bind_int64(s, 1, id)
+        guard sqlite3_step(s) == SQLITE_ROW else { return nil }
+        func intOrNil(_ c: Int32) -> Int? { sqlite3_column_type(s, c) == SQLITE_NULL ? nil : Int(sqlite3_column_int(s, c)) }
+        func int64OrNil(_ c: Int32) -> Int64? { sqlite3_column_type(s, c) == SQLITE_NULL ? nil : sqlite3_column_int64(s, c) }
+        func text(_ c: Int32) -> String? { sqlite3_column_text(s, c).map { String(cString: $0) } }
+        return TaskRow(id: sqlite3_column_int64(s, 0), parentTaskId: int64OrNil(1), createdAt: text(2),
+                       focus: text(3) ?? "", estimateSeconds: intOrNil(4), status: text(5),
+                       rating: intOrNil(6), note: text(7))
+    }
+
+    /// Total ACTUAL seconds worked on a task (sum of its CLOSED intervals).
+    func spentSeconds(taskId: Int64) -> Int {
+        var s: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "SELECT COALESCE(SUM(seconds),0) FROM intervals WHERE task_id=? AND ended_at IS NOT NULL;", -1, &s, nil) == SQLITE_OK else { return 0 }
+        defer { sqlite3_finalize(s) }
+        sqlite3_bind_int64(s, 1, taskId)
+        return sqlite3_step(s) == SQLITE_ROW ? Int(sqlite3_column_int(s, 0)) : 0
+    }
+
+    /// Remaining seconds on a task's estimate: estimate − spent.
+    func remainingSeconds(taskId: Int64) -> Int {
+        guard let t = task(id: taskId) else { return 0 }
+        return (t.estimateSeconds ?? 0) - spentSeconds(taskId: taskId)
+    }
+
+    /// The open (unfinished) interval on a task, if any — the chunk currently underway.
+    func openInterval(taskId: Int64) -> Interval? {
+        intervals(forTask: taskId).first { $0.endedAt == nil }
+    }
 }
 
 struct QueueItem {
