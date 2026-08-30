@@ -6,7 +6,7 @@ cd "$(dirname "$0")"
 PLIST="$HOME/Library/LaunchAgents/com.murftown.focus.plist"
 
 echo "Building..."
-swiftc main.swift -o focus
+swiftc main.swift FocusCore.swift -o focus
 
 echo "Installing LaunchAgent -> $PLIST"
 cp com.murftown.focus.plist "$PLIST"
