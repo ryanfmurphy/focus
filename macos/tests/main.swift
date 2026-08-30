@@ -353,6 +353,46 @@ section("Apply-time credits an interval; rename edits the task") {
     eq(db.task(id: tid)?.focus ?? "", "New name", "rename updates the task focus")
 }
 
+section("enqueueTask: fresh items mint a task later, deferred items carry task_id") {
+    let db = freshDB()
+    db.enqueueTask(focus: "Fresh A", estimateSeconds: 600)                 // no task yet
+    db.enqueueTask(focus: "Fresh B", estimateSeconds: 300)
+    db.enqueueTask(focus: "Resume me", estimateSeconds: 1500, taskId: 42)  // resume existing task 42
+    eq(db.queueItems().map { $0.focus }, ["Fresh A", "Fresh B", "Resume me"], "FIFO order")
+    ok(db.queueItems()[0].taskId == nil, "fresh item has no task_id")
+    eq(db.queueItems()[2].taskId ?? -1, 42, "deferred item carries its task_id")
+    db.enqueueTask(focus: "Urgent", estimateSeconds: 120, front: true)
+    eq(db.queueItems().map { $0.focus }, ["Urgent", "Fresh A", "Fresh B", "Resume me"], "front: jumps the queue")
+    eq(db.frontOfQueue()?.focus ?? "", "Urgent", "front is Urgent")
+    ok(db.frontOfQueue()?.taskId == nil, "front carries its (nil) task_id")
+}
+
+section("taskHistory rolls up one row per task with actual/interval-count/span") {
+    let db = freshDB()
+    // A two-interval task and a one-interval task.
+    let (t1, i1) = db.startTask(reason: "launch", estimateSeconds: 1500, focus: "Big task")!
+    db.endInterval(id: i1, elapsedSeconds: 600)
+    let i1b = db.startInterval(taskId: t1, reason: "resume")!
+    db.endInterval(id: i1b, elapsedSeconds: 800)
+    db.finishTask(id: t1, status: "completed", rating: 8, note: "done")
+    let (t2, i2) = db.startTask(reason: "launch", estimateSeconds: 1200, focus: "Small task")!
+    db.endInterval(id: i2, elapsedSeconds: 1100)
+    db.finishTask(id: t2, status: "completed", rating: 6)
+
+    let hist = db.taskHistory()
+    eq(hist.count, 2, "one row per task")
+    guard let big = hist.first(where: { $0.id == t1 }) else { ok(false, "big task in history"); return }
+    eq(big.focus, "Big task", "focus")
+    eq(big.estimateSeconds ?? -1, 1500, "estimate")
+    eq(big.actualSeconds, 1400, "actual = sum of both intervals (600+800)")
+    eq(big.intervalCount, 2, "interval count")
+    eq(big.rating ?? -1, 8, "task rating")
+    ok(big.startedAt != nil && big.endedAt != nil, "has a start/end span")
+    guard let small = hist.first(where: { $0.id == t2 }) else { ok(false, "small task in history"); return }
+    eq(small.actualSeconds, 1100, "single-interval actual")
+    eq(small.intervalCount, 1, "single interval")
+}
+
 // MARK: - Migration: sessions -> tasks + intervals
 
 section("migrateSessionsToTasks merges a continued chain into one task") {

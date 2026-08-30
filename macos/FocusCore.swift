@@ -256,6 +256,9 @@ final class DB {
         );
         """)
         exec("ALTER TABLE intervals ADD COLUMN rating INTEGER;")  // for any DB that made `intervals` before this column
+        // A queued item may reference an existing task to RESUME (deferred/pre-empted)
+        // — task_id set — or be a fresh focus that mints a task when started (NULL).
+        exec("ALTER TABLE queue ADD COLUMN task_id INTEGER;")
     }
 
     private func exec(_ sql: String) { sqlite3_exec(db, sql, nil, nil, nil) }
@@ -605,7 +608,7 @@ final class DB {
 
     /// All queued focuses, front (next up) first.
     func queueItems() -> [QueueItem] {
-        let sql = "SELECT id, seconds, focus, original_session_id FROM queue ORDER BY position ASC, id ASC;"
+        let sql = "SELECT id, seconds, focus, original_session_id, task_id FROM queue ORDER BY position ASC, id ASC;"
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
         defer { sqlite3_finalize(stmt) }
@@ -613,9 +616,10 @@ final class DB {
         while sqlite3_step(stmt) == SQLITE_ROW {
             let focus = sqlite3_column_text(stmt, 2).map { String(cString: $0) } ?? ""
             let orig = sqlite3_column_type(stmt, 3) == SQLITE_NULL ? nil : sqlite3_column_int64(stmt, 3)
+            let taskId = sqlite3_column_type(stmt, 4) == SQLITE_NULL ? nil : sqlite3_column_int64(stmt, 4)
             rows.append(QueueItem(id: sqlite3_column_int64(stmt, 0),
                                   seconds: Int(sqlite3_column_int(stmt, 1)),
-                                  focus: focus, originalSessionId: orig))
+                                  focus: focus, originalSessionId: orig, taskId: taskId))
         }
         return rows
     }
@@ -673,16 +677,17 @@ final class DB {
 
     /// The next queued focus (front of the FIFO), or nil if the queue is empty.
     func frontOfQueue() -> QueueItem? {
-        let sql = "SELECT id, seconds, focus, original_session_id FROM queue ORDER BY position ASC, id ASC LIMIT 1;"
+        let sql = "SELECT id, seconds, focus, original_session_id, task_id FROM queue ORDER BY position ASC, id ASC LIMIT 1;"
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return nil }
         defer { sqlite3_finalize(stmt) }
         guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
         let focus = sqlite3_column_text(stmt, 2).map { String(cString: $0) } ?? ""
         let orig = sqlite3_column_type(stmt, 3) == SQLITE_NULL ? nil : sqlite3_column_int64(stmt, 3)
+        let taskId = sqlite3_column_type(stmt, 4) == SQLITE_NULL ? nil : sqlite3_column_int64(stmt, 4)
         return QueueItem(id: sqlite3_column_int64(stmt, 0),
                          seconds: Int(sqlite3_column_int(stmt, 1)),
-                         focus: focus, originalSessionId: orig)
+                         focus: focus, originalSessionId: orig, taskId: taskId)
     }
 
     func removeFromQueue(id: Int64) {
@@ -926,6 +931,56 @@ final class DB {
     func openInterval(taskId: Int64) -> Interval? {
         intervals(forTask: taskId).first { $0.endedAt == nil }
     }
+
+    /// Enqueue a focus. `taskId` set = resume that existing task (deferred/pre-empted);
+    /// nil = a fresh focus that mints a task when started. `front` inserts at the head.
+    func enqueueTask(focus: String, estimateSeconds: Int, taskId: Int64? = nil, front: Bool = false) {
+        let pos = front ? "(SELECT COALESCE(MIN(position), 0) - 1 FROM queue)"
+                        : "(SELECT COALESCE(MAX(position), 0) + 1 FROM queue)"
+        let sql = "INSERT INTO queue (created_at, seconds, focus, task_id, position) VALUES (?,?,?,?, \(pos));"
+        var s: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &s, nil) == SQLITE_OK else { return }
+        defer { sqlite3_finalize(s) }
+        sqlite3_bind_text(s, 1, isoNow(), -1, SQLITE_TRANSIENT)
+        sqlite3_bind_int(s, 2, Int32(estimateSeconds))
+        sqlite3_bind_text(s, 3, focus, -1, SQLITE_TRANSIENT)
+        if let t = taskId { sqlite3_bind_int64(s, 4, t) } else { sqlite3_bind_null(s, 4) }
+        sqlite3_step(s)
+    }
+
+    /// History rolled up to one row per task, newest first: each task with its
+    /// aggregate actual time, interval count, and start/end span. This is what the
+    /// tasks-based See History view renders (one row per task, not per fragment).
+    func taskHistory(limit: Int = 500) -> [TaskHistoryRow] {
+        let sql = """
+        SELECT t.id, t.focus, t.estimate_seconds, t.status, t.rating, t.note,
+               COALESCE(SUM(iv.seconds), 0), COUNT(iv.id),
+               MIN(iv.started_at), MAX(iv.ended_at)
+        FROM tasks t LEFT JOIN intervals iv ON iv.task_id = t.id
+        GROUP BY t.id ORDER BY t.id DESC LIMIT ?;
+        """
+        var s: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &s, nil) == SQLITE_OK else { return [] }
+        defer { sqlite3_finalize(s) }
+        sqlite3_bind_int(s, 1, Int32(limit))
+        func intOrNil(_ c: Int32) -> Int? { sqlite3_column_type(s, c) == SQLITE_NULL ? nil : Int(sqlite3_column_int(s, c)) }
+        func text(_ c: Int32) -> String? { sqlite3_column_text(s, c).map { String(cString: $0) } }
+        var rows: [TaskHistoryRow] = []
+        while sqlite3_step(s) == SQLITE_ROW {
+            rows.append(TaskHistoryRow(
+                id: sqlite3_column_int64(s, 0),
+                focus: text(1) ?? "",
+                estimateSeconds: intOrNil(2),
+                status: text(3),
+                rating: intOrNil(4),
+                note: text(5),
+                actualSeconds: Int(sqlite3_column_int(s, 6)),
+                intervalCount: Int(sqlite3_column_int(s, 7)),
+                startedAt: text(8),
+                endedAt: text(9)))
+        }
+        return rows
+    }
 }
 
 struct QueueItem {
@@ -933,6 +988,7 @@ struct QueueItem {
     let seconds: Int
     let focus: String
     let originalSessionId: Int64?
+    let taskId: Int64?           // new model: the task to resume (nil = mint a fresh task)
 }
 
 struct ActiveSession {
@@ -980,4 +1036,18 @@ struct Interval {
     let openSecondsStart: Int?
     let openSecondsEnd: Int?
     let rating: Int?          // optional per-interval rating (unused in the UI for now)
+}
+
+// One row per task for the See History view: the task plus its rolled-up totals.
+struct TaskHistoryRow {
+    let id: Int64
+    let focus: String
+    let estimateSeconds: Int?
+    let status: String?
+    let rating: Int?
+    let note: String?
+    let actualSeconds: Int    // Σ of the task's interval seconds
+    let intervalCount: Int
+    let startedAt: String?    // first interval start
+    let endedAt: String?      // last interval end
 }

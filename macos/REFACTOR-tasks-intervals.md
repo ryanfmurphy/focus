@@ -37,9 +37,13 @@ Subtasks feature builds on.
   empty), `migrateSessionsToTasks()` (not yet wired into `init`), read helpers,
   tests. App untouched. *Verified on a copy of the real DB: 425 sessions → 352
   tasks + 425 intervals, 38 merged chains.* — commit `0a67440`
-- [ ] **1b — port the DB API** to tasks+intervals (start task / attach interval /
-  end paths / queue / history / pauses), preserving observable behavior. Rewrite
-  the test suite against the new API using the current outcomes as the spec.
+- [x] **1b — port the DB API** to tasks+intervals (still additive, app untouched).
+  Part 1: lifecycle (startTask / startInterval / endInterval / addToInterval /
+  finishTask / addTimeToTask / renameTask + task/spent/remaining/openInterval reads).
+  Part 2: queue-by-task (`enqueueTask`, `queue.task_id`, `QueueItem.taskId`) and
+  history-by-task (`taskHistory` → one row per task with actual/interval-count/span).
+  Pauses reuse the existing id-agnostic methods (keyed to the interval id in 1c).
+  New API re-asserts today's outcomes. — commits `c44701e`, `<this>`
 - [ ] **1c — wire it live.** Call the migration from `init` behind the
   `intervalCount()==0` guard; rewire `AppController` (beginSession/adopt/end
   paths/restore) so a continuation attaches an interval to the *same* task.
