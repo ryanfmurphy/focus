@@ -171,12 +171,50 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     private var intervalStart: Date?   // when the current interval began (for elapsed time)
     private var estimateSeconds: Int?  // the task's estimate (for the pill's "/ total")
     private var spentBefore: Int?      // seconds spent on this task in PRIOR closed intervals
-    private var pausedAt: Date?        // start of the current pause (nil = running)
+    private var pausedAt: Date?        // start of the current pause (nil = running) — freezes the WHOLE stack
 
-    /// Clear all live task/interval state (back to idle).
+    // Subtasks: the leaf task lives in the vars above; its ancestors (parent, grand-
+    // parent, … root) keep ticking concurrently and live here, root first. A subtask
+    // pushes the current leaf onto this stack; finishing a subtask pops back to it.
+    private struct Frame {
+        let taskId: Int64
+        let intervalId: Int64
+        let intervalStart: Date
+        let estimateSeconds: Int
+        let spentBefore: Int
+        var deadline: Date            // var: shifts on pause/resume
+        let focus: String
+    }
+    private var ancestors: [Frame] = []
+
+    /// Clear all live task/interval state, including the ancestor stack (back to idle).
     private func clearSessionState() {
         currentFocus = nil; deadline = nil; taskId = nil; intervalId = nil
         intervalStart = nil; estimateSeconds = nil; spentBefore = nil; pausedAt = nil
+        ancestors.removeAll()
+    }
+
+    /// Snapshot the current leaf as a Frame (for pushing when starting a subtask).
+    private func leafFrame() -> Frame? {
+        guard let tid = taskId, let iid = intervalId, let start = intervalStart,
+              let est = estimateSeconds, let dl = deadline, let f = currentFocus else { return nil }
+        return Frame(taskId: tid, intervalId: iid, intervalStart: start,
+                     estimateSeconds: est, spentBefore: spentBefore ?? 0, deadline: dl, focus: f)
+    }
+
+    /// Load a Frame into the leaf vars.
+    private func setLeaf(_ f: Frame) {
+        taskId = f.taskId; intervalId = f.intervalId; intervalStart = f.intervalStart
+        estimateSeconds = f.estimateSeconds; spentBefore = f.spentBefore
+        deadline = f.deadline; currentFocus = f.focus
+    }
+
+    /// Pop the nearest ancestor back into the leaf vars. Returns false if none.
+    @discardableResult
+    private func popAncestorToLeaf() -> Bool {
+        guard let parent = ancestors.popLast() else { return false }
+        setLeaf(parent)
+        return true
     }
 
     /// Wall-time of an interval row from its start to now — for closing orphan/
@@ -312,33 +350,56 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     private func restoreOrPrompt() {
         let open = db.openIntervals()   // newest first
 
-        // Any older open intervals are stale orphans from past deaths — close them.
-        for stale in open.dropFirst() {
-            db.endInterval(id: stale.id, elapsedSeconds: intervalElapsed(stale))
-        }
-
-        guard let iv = open.first,
-              let task = db.task(id: iv.taskId),
-              let start = isoParser.date(from: iv.startedAt) else {
-            // Nothing (or unparseable) to resume — clean up and prompt normally.
-            if let iv = open.first { db.endInterval(id: iv.id, elapsedSeconds: intervalElapsed(iv)) }
+        guard let leafIv = open.first, let leafTask = db.task(id: leafIv.taskId),
+              isoParser.date(from: leafIv.startedAt) != nil else {
+            // Nothing valid to resume — sweep any strays and prompt normally.
+            for iv in open { db.endInterval(id: iv.id, elapsedSeconds: intervalElapsed(iv)) }
             onReturn("launch")
             return
         }
 
-        // If it was paused when the process died, close that pause (the downtime
-        // counts as pause) so the deadline reconstructs to the frozen remaining; it
-        // then resumes as a normal running interval. Remaining continues from the
-        // task's estimate minus what prior CLOSED intervals already spent.
-        db.closeOpenPause(sessionId: iv.id)
-        let paused = db.totalPausedSeconds(sessionId: iv.id)
-        let remainingAtStart = (task.estimateSeconds ?? 0) - db.spentSeconds(taskId: iv.taskId)
-        let deadline = start.addingTimeInterval(Double(remainingAtStart + paused))
-        if deadline > Date() {
-            offerResume(task: task, interval: iv, deadline: deadline)   // still time left
+        // The active stack = the leaf plus its ancestors (walk parent_task_id up);
+        // each level has its own open interval. Anything open outside the chain is an
+        // orphan from a past death → sweep it.
+        let chain = [leafTask] + db.ancestorTasks(of: leafTask.id)   // [leaf, parent, … root]
+        let chainIds = Set(chain.map { $0.id })
+        var openByTask: [Int64: Interval] = [:]
+        for iv in open where openByTask[iv.taskId] == nil { openByTask[iv.taskId] = iv }
+        for iv in open where !chainIds.contains(iv.taskId) {
+            db.endInterval(id: iv.id, elapsedSeconds: intervalElapsed(iv))
+        }
+
+        // Reconstruct a running frame for a task: close any open pause (downtime counts
+        // as pause) and rebuild the deadline from estimate − prior-spent (+ paused).
+        func frame(for task: TaskRow) -> Frame? {
+            guard let iv = openByTask[task.id], let start = isoParser.date(from: iv.startedAt) else { return nil }
+            db.closeOpenPause(sessionId: iv.id)
+            let paused = db.totalPausedSeconds(sessionId: iv.id)
+            let spent = db.spentSeconds(taskId: task.id)
+            let dl = start.addingTimeInterval(Double((task.estimateSeconds ?? 0) - spent + paused))
+            return Frame(taskId: task.id, intervalId: iv.id, intervalStart: start,
+                         estimateSeconds: task.estimateSeconds ?? 0, spentBefore: spent, deadline: dl, focus: task.focus)
+        }
+        guard let leaf = frame(for: leafTask) else {
+            db.endInterval(id: leafIv.id, elapsedSeconds: intervalElapsed(leafIv)); onReturn("launch"); return
+        }
+        // ancestors want root … parent (chain is leaf-first, so drop leaf and reverse).
+        ancestors = chain.dropFirst().reversed().compactMap { frame(for: $0) }
+
+        if ancestors.isEmpty {
+            // Single task — keep the familiar Resume / Switch / Start-fresh prompt.
+            // (Don't pre-set the leaf: adopt does that, and Start-fresh needs
+            // currentFocus to stay nil so onReturn prompts.)
+            if leaf.deadline > Date() {
+                offerResume(task: leafTask, interval: leafIv, deadline: leaf.deadline)
+            } else {
+                adopt(task: leafTask, interval: leafIv, deadline: leaf.deadline)
+                tick()
+            }
         } else {
-            // Expired while away → adopt and let tick()'s timeUp run the rating.
-            adopt(task: task, interval: iv, deadline: deadline)
+            // A subtask stack was live — auto-adopt the whole stack (no resume prompt).
+            setLeaf(leaf)
+            pausedAt = nil
             tick()
         }
     }
@@ -506,16 +567,21 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     @objc func togglePause() {
         guard !showing, let id = intervalId else { return }
         if let p = pausedAt {
-            // Resume: shift the deadline forward by the pause so the remaining time is
-            // preserved, and close the pause record (stamping its duration).
-            let paused = Int(Date().timeIntervalSince(p).rounded())
-            deadline = deadline?.addingTimeInterval(Double(max(0, paused)))
-            db.endPause(sessionId: id, seconds: max(0, paused))
+            // Resume: shift every level's deadline forward by the pause (remaining is
+            // preserved) and close each level's pause record. The whole stack resumes.
+            let paused = max(0, Int(Date().timeIntervalSince(p).rounded()))
+            deadline = deadline?.addingTimeInterval(Double(paused))
+            db.endPause(sessionId: id, seconds: paused)
+            for i in ancestors.indices {
+                ancestors[i].deadline = ancestors[i].deadline.addingTimeInterval(Double(paused))
+                db.endPause(sessionId: ancestors[i].intervalId, seconds: paused)
+            }
             pausedAt = nil
         } else {
-            // Pause: freeze here. tick() stops the countdown while pausedAt is set.
+            // Pause: freeze the whole stack. tick() stops all countdowns while paused.
             pausedAt = Date()
             db.startPause(sessionId: id, at: pausedAt!)
+            for f in ancestors { db.startPause(sessionId: f.intervalId, at: pausedAt!) }
         }
         tick()   // repaint the pill (running ⇄ paused)
     }
@@ -560,13 +626,14 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         tick()
     }
 
-    // Finish the current task: mark completed, rate it, then advance to the next.
+    // Finish the current task: mark completed, rate it, then advance — back to the
+    // parent subtask (if any) or on to the next focus.
     @objc func completeTask() {
         guard !showing, taskId != nil else { return }
         showing = true
-        rateAndComplete()   // rate + end as completed
+        let hadParent = rateAndComplete()   // rate + end as completed; pops to parent if a subtask
         showing = false
-        promptForFocus(reason: "after-session")
+        if hadParent { tick() } else { promptForFocus(reason: "after-session") }
     }
 
     // Abort the current task: rate it, mark interrupted (recording elapsed),
@@ -576,21 +643,24 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         showing = true
         let elapsed = elapsedFocusSeconds()   // excludes pause time
         finalizePause()
-        clearSessionState()
+        // Return to the parent now (it keeps ticking, shown behind the rating); if
+        // there's no parent, clear the leaf so the pill hides during the prompt.
+        let hadParent = popAncestorToLeaf()
+        if !hadParent { clearSessionState() }
         hudWindow.orderOut(nil)
         let (rating, note, openSeconds, applyTime) = promptRating(focus: "\(focus) · \(mmss(elapsed))", title: "Rate this session")
         db.endInterval(id: iid, elapsedSeconds: elapsed, openSecondsEnd: applyTime ? nil : openSeconds)
         if applyTime { db.addToInterval(id: iid, seconds: openSeconds) }
         db.finishTask(id: tid, status: "interrupted", rating: rating, note: note)
         showing = false
-        promptForFocus(reason: "after-session")
+        if hadParent { tick() } else { promptForFocus(reason: "after-session") }
     }
 
     // Menu actions that are guarded by `showing` (they open their own prompt), so
     // they do nothing while another prompt is already up — disabled in that case.
     private static let showingBlockedActions: Set<Selector> = [
         #selector(addNextFocus), #selector(completeTask), #selector(abortTask),
-        #selector(addTimeToCurrent), #selector(changeFocus),
+        #selector(addTimeToCurrent), #selector(changeFocus), #selector(addSubtask),
         #selector(renameTask), #selector(togglePause), #selector(preemptNextFocus),
         #selector(clearQueue), #selector(rateUnrated), #selector(showSettings),
         #selector(deleteHistoryItems), #selector(abandonHistoryTask),
@@ -603,9 +673,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         if showing, let action = menuItem.action, Self.showingBlockedActions.contains(action) {
             return false
         }
-        // Complete / Abort / Rename / Add time act on a running session.
+        // Complete / Abort / Rename / Add time / Add subtask act on a running session.
         if menuItem.action == #selector(completeTask) || menuItem.action == #selector(abortTask)
-            || menuItem.action == #selector(addTimeToCurrent)
+            || menuItem.action == #selector(addTimeToCurrent) || menuItem.action == #selector(addSubtask)
             || menuItem.action == #selector(renameTask) {
             return currentFocus != nil
         }
@@ -627,6 +697,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         }
         if menuItem.action == #selector(changeFocus) {
             menuItem.title = currentFocus != nil ? "Switch focus now" : "Set focus"
+            // Whole-stack switch while inside a subtask is S3 — disable it for now.
+            if currentFocus != nil && !ancestors.isEmpty { return false }
         }
         if menuItem.action == #selector(showHistory) {
             menuItem.title = "See history (\(db.taskCount()))"
@@ -890,10 +962,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     /// Next "(continued)" name: "X" → "X (continued)" → "X (continued 2)" → "X (continued 3)"…
 
     // Start a focus. `resumeTaskId` set = resume that existing task with a NEW
-    // interval (countdown continues from its remaining). nil = a fresh task with
-    // `seconds` as its estimate (full countdown).
+    // interval (countdown continues from its remaining). `parentTaskId` set = this is
+    // a subtask (a fresh task under a parent; the parent keeps ticking as an ancestor
+    // — the caller pushes it first). Otherwise a fresh top-level task, which clears
+    // any leftover ancestor stack.
     private func beginSession(reason: String, seconds: Int, focus: String, resumeTaskId: Int64? = nil,
-                              openSecondsStart: Int? = nil) {
+                              parentTaskId: Int64? = nil, openSecondsStart: Int? = nil) {
         currentFocus = focus
         intervalStart = Date()
         pausedAt = nil
@@ -905,16 +979,32 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             deadline = Date().addingTimeInterval(Double(remaining))
             intervalId = db.startInterval(taskId: tid, reason: reason)
         } else {
+            if parentTaskId == nil { ancestors.removeAll() }   // fresh top-level → no stack
             estimateSeconds = seconds
             spentBefore = 0
             deadline = Date().addingTimeInterval(Double(seconds))
-            let ids = db.startTask(reason: reason, estimateSeconds: seconds, focus: focus)
+            let ids = db.startTask(reason: reason, estimateSeconds: seconds, focus: focus, parentTaskId: parentTaskId)
             taskId = ids?.taskId
             intervalId = ids?.intervalId
         }
         if let iid = intervalId, let s = openSecondsStart { db.addIntervalOpenSecondsStart(id: iid, seconds: s) }
         if pushoverEnabled { sendPushover(title: "Focus started", message: "\(focus) — \(mmss(seconds))") }
         tick()
+    }
+
+    // Start a subtask under the current task: push the current leaf onto the ancestor
+    // stack (it keeps ticking), then run a fresh child task now.
+    @objc func addSubtask() {
+        guard !showing, let parent = taskId, let frame = leafFrame() else { return }
+        showing = true
+        defer { showing = false }
+        guard case let .entered(focus, seconds, openStart) = askFocusAndMinutes(
+            title: "Add subtask",
+            info: "Runs under the current task — the parent keeps ticking toward its own estimate.",
+            confirm: "Start", cancellable: true) else { return }
+        ancestors.append(frame)
+        beginSession(reason: "subtask", seconds: seconds, focus: focus,
+                     parentTaskId: parent, openSecondsStart: openStart)
     }
 
     // ---- history ----
@@ -1479,47 +1569,53 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
 
     // ---- per-second update ----
     private func tick() {
-        if let focus = currentFocus, let dl = deadline {
-            if let p = pausedAt {
-                // Paused: freeze the countdown (held remaining) with a ⏸ indicator.
-                let remaining = max(0, Int(dl.timeIntervalSince(p).rounded()))
-                let time = showTotalOnPillEnabled ? "\(mmss(remaining)) / \(mmss(estimateSeconds ?? remaining))"
-                                                  : mmss(remaining)
-                hudLabel.stringValue = "⏸ \(focus)    \(time) (paused)"
-                layoutHUD()
-                if showPillEnabled { hudWindow.orderFrontRegardless() } else { hudWindow.orderOut(nil) }
-                return
-            }
+        guard let focus = currentFocus, let dl = deadline else { hudWindow.orderOut(nil); return }
+
+        // Only the LEAF triggers time's-up (it's what you're actively doing). Ancestors
+        // past their deadline just show overtime and wait until they become the leaf.
+        if pausedAt == nil {
             let remaining = Int(dl.timeIntervalSinceNow.rounded())
             if remaining <= 0 {
-                // A prompt is already up (incl. the time's-up panel itself, which
-                // keeps remaining ≤ 0): do nothing — leave the menu alone so it stays
-                // usable, and don't re-enter timeUp.
-                if showing { return }
-                // About to raise the time's-up panel: don't do it while a menu /
-                // tracking loop is up (our event pump would nest inside it and the
-                // open menu would swallow keyboard input). Dismiss the menu and defer
-                // to the next tick, which runs in the normal run-loop mode.
-                if RunLoop.current.currentMode == .eventTracking {
+                if showing { return }                                    // a prompt is up; leave things be
+                if RunLoop.current.currentMode == .eventTracking {       // menu open → defer to next tick
                     statusItem.menu?.cancelTracking()
                     return
                 }
                 timeUp(focus: focus)
                 return
             }
-            // Optionally append "/ total" — e.g. 3:00 / 5:00 = 3 min left of a 5 min session.
-            let time = showTotalOnPillEnabled ? "\(mmss(remaining)) / \(mmss(estimateSeconds ?? remaining))"
-                                              : mmss(remaining)
-            hudLabel.stringValue = "🎯 \(focus)    \(time)"
-            layoutHUD()
-            if showPillEnabled {
-                hudWindow.orderFrontRegardless()
-            } else {
-                hudWindow.orderOut(nil)
-            }
-        } else {
-            hudWindow.orderOut(nil)
         }
+
+        hudLabel.attributedStringValue = pillAttributedString()
+        layoutHUD()
+        if showPillEnabled { hudWindow.orderFrontRegardless() } else { hudWindow.orderOut(nil) }
+    }
+
+    /// Build the pill text for the whole stack: ancestors (root at top) then the leaf,
+    /// each with its own countdown. A level past its deadline shows red "+overtime".
+    private func pillAttributedString() -> NSAttributedString {
+        let out = NSMutableAttributedString()
+        let ref = pausedAt ?? Date()
+        func line(focus: String, deadline: Date, estimate: Int, isLeaf: Bool) -> NSAttributedString {
+            let rem = Int(deadline.timeIntervalSince(ref).rounded())
+            let over = rem < 0
+            let timeStr = over ? "+\(mmss(-rem))"
+                               : (showTotalOnPillEnabled ? "\(mmss(rem)) / \(mmss(estimate))" : mmss(rem))
+            let icon = isLeaf ? (pausedAt != nil ? "⏸ " : "🎯 ") : "↳ "
+            let suffix = (isLeaf && pausedAt != nil) ? " (paused)" : ""
+            let font = isLeaf ? NSFont.systemFont(ofSize: 14, weight: .semibold)
+                              : NSFont.systemFont(ofSize: 12, weight: .medium)
+            let color: NSColor = over ? .systemRed : (isLeaf ? .white : NSColor(white: 1, alpha: 0.7))
+            return NSAttributedString(string: "\(icon)\(focus)    \(timeStr)\(suffix)",
+                                      attributes: [.font: font, .foregroundColor: color])
+        }
+        for f in ancestors {   // root … immediate parent
+            out.append(line(focus: f.focus, deadline: f.deadline, estimate: f.estimateSeconds, isLeaf: false))
+            out.append(NSAttributedString(string: "\n"))
+        }
+        out.append(line(focus: currentFocus ?? "", deadline: deadline ?? Date(),
+                        estimate: estimateSeconds ?? 0, isLeaf: true))
+        return out
     }
 
     // ---- notify preferences (persisted) ----
@@ -1643,11 +1739,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             let tid = taskId, iid = intervalId
             let elapsed = elapsedFocusSeconds()
             finalizePause()
-            clearSessionState()
+            let hadParent = popAncestorToLeaf()
+            if !hadParent { clearSessionState() }
             if let iid = iid { db.endInterval(id: iid, elapsedSeconds: elapsed) }
             if let tid = tid { db.finishTask(id: tid, status: "completed") }   // rating deferred to "Rate unrated"
             showing = false
-            promptForFocus(reason: "after-session")
+            if hadParent { tick() } else { promptForFocus(reason: "after-session") }
             return
         }
 
@@ -1662,15 +1759,16 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             let tid = taskId, iid = intervalId
             let elapsed = elapsedFocusSeconds()
             finalizePause()
-            clearSessionState()
+            let hadParent = popAncestorToLeaf()
+            if !hadParent { clearSessionState() }
             if let iid = iid {
                 db.endInterval(id: iid, elapsedSeconds: elapsed, openSecondsEnd: applyTime ? nil : openSeconds)
                 if applyTime { db.addToInterval(id: iid, seconds: openSeconds) }
             }
             if let tid = tid { db.finishTask(id: tid, status: "completed", rating: rating, note: note) }
-            // Roll straight into the next session: having rated, set a new focus.
+            // Back to the parent subtask (if any) or on to the next focus.
             showing = false
-            promptForFocus(reason: "after-session")
+            if hadParent { tick() } else { promptForFocus(reason: "after-session") }
         }
     }
 
@@ -1740,19 +1838,22 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         }
     }
 
-    /// Force a rating, then close the current session out as completed and clear
-    /// its state. Caller must already hold `showing`. Completing early records the
-    /// time actually used as the Duration (Original Duration is untouched).
-    private func rateAndComplete() {
-        guard let tid = taskId, let iid = intervalId, let focus = currentFocus else { return }
+    /// Force a rating, close the leaf as completed, and pop back to the parent (if a
+    /// subtask) or clear the leaf. Returns whether a parent was popped. Caller holds
+    /// `showing`. Completing early records the time actually used as the interval's.
+    @discardableResult
+    private func rateAndComplete() -> Bool {
+        guard let tid = taskId, let iid = intervalId, let focus = currentFocus else { return false }
         let elapsed = elapsedFocusSeconds()   // excludes pause time
         finalizePause()
-        clearSessionState()
+        let hadParent = popAncestorToLeaf()
+        if !hadParent { clearSessionState() }
         hudWindow.orderOut(nil)
         let (rating, note, openSeconds, applyTime) = promptRating(focus: focus, title: "Rate this session")
         db.endInterval(id: iid, elapsedSeconds: elapsed, openSecondsEnd: applyTime ? nil : openSeconds)
         if applyTime { db.addToInterval(id: iid, seconds: openSeconds) }
         db.finishTask(id: tid, status: "completed", rating: rating, note: note)
+        return hadParent
     }
 
     /// A rating (1–10) field over an optional note field, for the rating modals,
@@ -1863,6 +1964,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         menu.addItem(withTitle: "Complete task", action: #selector(completeTask), keyEquivalent: "")
         menu.addItem(withTitle: "Pause", action: #selector(togglePause), keyEquivalent: "")
         menu.addItem(withTitle: "Add time", action: #selector(addTimeToCurrent), keyEquivalent: "")
+        menu.addItem(withTitle: "Add subtask", action: #selector(addSubtask), keyEquivalent: "")
         menu.addItem(withTitle: "Rename task", action: #selector(renameTask), keyEquivalent: "")
         menu.addItem(withTitle: "Abort task", action: #selector(abortTask), keyEquivalent: "")
         menu.addItem(withTitle: "Switch focus now", action: #selector(changeFocus), keyEquivalent: "")
@@ -1913,6 +2015,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         hudLabel.backgroundColor = .clear
         hudLabel.isBezeled = false
         hudLabel.isEditable = false
+        hudLabel.maximumNumberOfLines = 0          // allow a line per stack level (subtasks)
+        hudLabel.cell?.usesSingleLineMode = false
+        hudLabel.cell?.wraps = false               // explicit newlines, don't wrap
 
         blur.addSubview(hudLabel)
         hudWindow.contentView = blur

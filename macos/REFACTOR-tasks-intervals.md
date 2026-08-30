@@ -104,9 +104,16 @@ clocks**: starting a subtask does NOT pause the parent — both count down at on
 ### Implementation stages
 - [ ] **S1 — FocusCore reads**: `ancestorTasks(of:)` (the parent_task_id walk),
   `childTasks(of:)`, tests. Safe/additive.
-- [ ] **S2 — controller stack**: replace the single current task/interval with a
-  stack; "Add subtask" push; tick renders multiple pills + parent overtime; pause
-  freezes the stack; Complete/Abandon pop to parent.
+- [x] **S2 — controller stack** (built; needs live testing). Leaf stays in the
+  existing state vars; ancestors ride an `ancestors: [Frame]` stack. "Add subtask"
+  pushes the leaf and starts a concurrent child. The pill is now a multi-line
+  attributed string (root on top, subtask leaf prominent below, ancestors tinted,
+  overtime in red "+M:SS"). Pause freezes/resumes the whole stack. Complete/Abort/
+  time's-up close the leaf then pop to the parent (which keeps ticking; overtime
+  fires on return). Restart rebuilds the whole stack via the `parent_task_id` walk
+  (single task keeps the Resume prompt; a subtask stack auto-adopts). Switch-during-
+  subtask is disabled (S3). *Known edges: add-subtask-while-paused; abort-while-
+  paused-with-stack.*
 - [ ] **S3 — whole-stack pre-empt (re-queue root) + resume/restart rebuild the stack via the walk.**
 - [ ] **S4 — History**: show subtasks nested/attributed under the parent (total
   incl. subtasks = the parent's own actual).
