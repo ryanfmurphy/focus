@@ -54,6 +54,51 @@ func continuedName(_ focus: String) -> String {
     return "\(focus) (continued)"
 }
 
+/// Example focuses — one is picked at random for the session-setup field's
+/// placeholder. A deliberate mix of everyday "get it done" tasks and self-care /
+/// mindfulness / health prompts, so the nudge cuts both ways.
+let focusSuggestions: [String] = [
+    // Work & everyday tasks
+    "Reply to overdue emails",
+    "Write the weekly status update",
+    "Review the open pull request",
+    "Draft the project proposal",
+    "Pay the bills",
+    "Plan tomorrow's schedule",
+    "Reach inbox zero",
+    "Outline the presentation",
+    "Fix the failing test",
+    "Book the dentist appointment",
+    "Do the laundry",
+    "Tidy the kitchen",
+    "Update the budget",
+    "Prep for the 1:1",
+    "Read a chapter",
+    "Declutter the desk",
+    // Self-care, mindfulness & health
+    "Meditate for 10 minutes",
+    "Take a mindful walk",
+    "Stretch and loosen up",
+    "Do some deep breathing",
+    "Drink a glass of water",
+    "Step away from the screen",
+    "Do a slow body scan",
+    "Journal three gratitudes",
+    "Go for a run",
+    "Do a little yoga",
+    "Rest your eyes (20-20-20)",
+    "Make tea and pause",
+    "Sit quietly, no phone",
+    "Get some sunlight",
+    "Call a friend",
+    "Take a short nap",
+]
+
+/// A random example focus for the placeholder text.
+func randomFocusSuggestion() -> String {
+    focusSuggestions.randomElement() ?? "Ship the focus pill"
+}
+
 // MARK: - Storage
 
 final class DB {

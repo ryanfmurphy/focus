@@ -822,7 +822,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         NSApp.activate(ignoringOtherApps: true)
 
         let focusField = NSTextField(frame: NSRect(x: 0, y: 34, width: 320, height: 24))
-        focusField.placeholderString = "e.g. Ship the focus pill"
+        focusField.placeholderString = "e.g. \(randomFocusSuggestion())"
 
         let minutesLabel = NSTextField(labelWithString: "Minutes:")
         minutesLabel.frame = NSRect(x: 0, y: 2, width: 60, height: 24)

@@ -89,6 +89,15 @@ section("parseDurationSeconds (plain minutes, or M:SS when a colon is present)")
     ok(parseDurationSeconds("2:xx") == nil, "non-numeric seconds rejected")
 }
 
+section("focus suggestions (random placeholder)") {
+    ok(!focusSuggestions.isEmpty, "suggestion list is non-empty")
+    ok(focusSuggestions.allSatisfy { !$0.trimmingCharacters(in: .whitespaces).isEmpty }, "no blank suggestions")
+    eq(Set(focusSuggestions).count, focusSuggestions.count, "no duplicate suggestions")
+    let draws = (0..<200).map { _ in randomFocusSuggestion() }
+    ok(draws.allSatisfy { focusSuggestions.contains($0) }, "every random pick is from the list")
+    ok(Set(draws).count > 1, "random picks vary across draws")
+}
+
 // MARK: - Sessions: create / read
 
 section("startSession stamps original == planned and leaves it active") {
