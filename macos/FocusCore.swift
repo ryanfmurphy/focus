@@ -936,6 +936,84 @@ final class DB {
         intervals(forTask: taskId).first { $0.endedAt == nil }
     }
 
+    /// All open (unfinished) intervals across tasks, newest first — work that was
+    /// underway when the process died (restart reconstruction).
+    func openIntervals() -> [Interval] {
+        let sql = "SELECT id, task_id, started_at, ended_at, seconds, reason, open_seconds_start, open_seconds_end, rating FROM intervals WHERE ended_at IS NULL ORDER BY id DESC;"
+        var s: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &s, nil) == SQLITE_OK else { return [] }
+        defer { sqlite3_finalize(s) }
+        func intOrNil(_ c: Int32) -> Int? { sqlite3_column_type(s, c) == SQLITE_NULL ? nil : Int(sqlite3_column_int(s, c)) }
+        func text(_ c: Int32) -> String? { sqlite3_column_text(s, c).map { String(cString: $0) } }
+        var rows: [Interval] = []
+        while sqlite3_step(s) == SQLITE_ROW {
+            rows.append(Interval(id: sqlite3_column_int64(s, 0), taskId: sqlite3_column_int64(s, 1),
+                                 startedAt: text(2) ?? "", endedAt: text(3),
+                                 seconds: Int(sqlite3_column_int(s, 4)), reason: text(5),
+                                 openSecondsStart: intOrNil(6), openSecondsEnd: intOrNil(7), rating: intOrNil(8)))
+        }
+        return rows
+    }
+
+    /// Delete tasks and their intervals by task id (history view delete).
+    func deleteTasks(ids: [Int64]) {
+        guard !ids.isEmpty else { return }
+        let ph = ids.map { _ in "?" }.joined(separator: ",")
+        for sql in ["DELETE FROM intervals WHERE task_id IN (\(ph));", "DELETE FROM tasks WHERE id IN (\(ph));"] {
+            var s: OpaquePointer?
+            if sqlite3_prepare_v2(db, sql, -1, &s, nil) == SQLITE_OK {
+                for (i, id) in ids.enumerated() { sqlite3_bind_int64(s, Int32(i + 1), id) }
+                sqlite3_step(s)
+            }
+            sqlite3_finalize(s)
+        }
+    }
+
+    /// Total number of tasks (for the history menu label).
+    func taskCount() -> Int {
+        var s: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM tasks;", -1, &s, nil) == SQLITE_OK else { return 0 }
+        defer { sqlite3_finalize(s) }
+        return sqlite3_step(s) == SQLITE_ROW ? Int(sqlite3_column_int(s, 0)) : 0
+    }
+
+    /// Completed tasks that were never rated, newest first (for "Rate unrated").
+    func unratedCompletedTasks() -> [TaskRow] {
+        let sql = "SELECT id, parent_task_id, created_at, focus, estimate_seconds, status, rating, note FROM tasks WHERE status='completed' AND rating IS NULL ORDER BY id DESC;"
+        var s: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &s, nil) == SQLITE_OK else { return [] }
+        defer { sqlite3_finalize(s) }
+        func intOrNil(_ c: Int32) -> Int? { sqlite3_column_type(s, c) == SQLITE_NULL ? nil : Int(sqlite3_column_int(s, c)) }
+        func int64OrNil(_ c: Int32) -> Int64? { sqlite3_column_type(s, c) == SQLITE_NULL ? nil : sqlite3_column_int64(s, c) }
+        func text(_ c: Int32) -> String? { sqlite3_column_text(s, c).map { String(cString: $0) } }
+        var rows: [TaskRow] = []
+        while sqlite3_step(s) == SQLITE_ROW {
+            rows.append(TaskRow(id: sqlite3_column_int64(s, 0), parentTaskId: int64OrNil(1), createdAt: text(2),
+                                focus: text(3) ?? "", estimateSeconds: intOrNil(4), status: text(5),
+                                rating: intOrNil(6), note: text(7)))
+        }
+        return rows
+    }
+
+    /// Count of completed-but-unrated tasks (menu label).
+    func unratedTaskCount() -> Int {
+        var s: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM tasks WHERE status='completed' AND rating IS NULL;", -1, &s, nil) == SQLITE_OK else { return 0 }
+        defer { sqlite3_finalize(s) }
+        return sqlite3_step(s) == SQLITE_ROW ? Int(sqlite3_column_int(s, 0)) : 0
+    }
+
+    /// Set a task's rating/note (retroactive rating from "Rate unrated").
+    func setTaskRating(id: Int64, rating: Int, note: String = "") {
+        var s: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "UPDATE tasks SET rating=?, note=? WHERE id=?;", -1, &s, nil) == SQLITE_OK else { return }
+        defer { sqlite3_finalize(s) }
+        sqlite3_bind_int(s, 1, Int32(rating))
+        bindNote(s, 2, note)
+        sqlite3_bind_int64(s, 3, id)
+        sqlite3_step(s)
+    }
+
     /// Enqueue a focus. `taskId` set = resume that existing task (deferred/pre-empted);
     /// nil = a fresh focus that mints a task when started. `front` inserts at the head.
     func enqueueTask(focus: String, estimateSeconds: Int, taskId: Int64? = nil, front: Bool = false) {
