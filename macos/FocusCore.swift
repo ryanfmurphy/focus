@@ -259,6 +259,10 @@ final class DB {
         // A queued item may reference an existing task to RESUME (deferred/pre-empted)
         // — task_id set — or be a fresh focus that mints a task when started (NULL).
         exec("ALTER TABLE queue ADD COLUMN task_id INTEGER;")
+
+        // Populate tasks/intervals from legacy `sessions` (once, guarded, INSERT-only —
+        // the sessions table is left intact as an in-DB fallback).
+        migrateSessionsToTasks()
     }
 
     private func exec(_ sql: String) { sqlite3_exec(db, sql, nil, nil, nil) }
