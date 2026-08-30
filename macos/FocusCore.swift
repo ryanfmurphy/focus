@@ -694,6 +694,15 @@ final class DB {
                          focus: focus, originalSessionId: orig, taskId: taskId)
     }
 
+    /// Remove any queue rows referencing a task (used when giving up on it).
+    func removeQueuedTask(taskId: Int64) {
+        var s: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "DELETE FROM queue WHERE task_id=?;", -1, &s, nil) == SQLITE_OK else { return }
+        defer { sqlite3_finalize(s) }
+        sqlite3_bind_int64(s, 1, taskId)
+        sqlite3_step(s)
+    }
+
     func removeFromQueue(id: Int64) {
         let sql = "DELETE FROM queue WHERE id=?;"
         var stmt: OpaquePointer?
@@ -1083,7 +1092,7 @@ final class DB {
         SELECT t.id, t.focus, t.estimate_seconds, t.status, t.rating, t.note,
                COALESCE(SUM(iv.seconds), 0), COUNT(iv.id),
                MIN(iv.started_at),
-               CASE WHEN t.status IN ('completed','interrupted') THEN MAX(iv.ended_at) END,
+               CASE WHEN t.status IN ('completed','interrupted','abandoned') THEN MAX(iv.ended_at) END,
                MAX(COALESCE(iv.ended_at, iv.started_at))
         FROM tasks t LEFT JOIN intervals iv ON iv.task_id = t.id
         GROUP BY t.id ORDER BY t.id DESC LIMIT ?;

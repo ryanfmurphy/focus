@@ -437,6 +437,24 @@ section("taskHistory Ended = finish time only ('—' while in progress)") {
     ok(th(run).lastActivity != nil, "running task still has a lastActivity")
 }
 
+section("Give up: abandoned task gets a finish time and leaves the queue") {
+    let db = freshDB()
+    let (tid, iid) = db.startTask(reason: "launch", estimateSeconds: 600, focus: "Stale")!
+    db.endInterval(id: iid, elapsedSeconds: 120)                 // worked a bit, then...
+    db.enqueueTask(focus: "Stale", estimateSeconds: 480, taskId: tid)  // ...deferred into the queue
+    ok(db.taskHistory().first { $0.id == tid }?.endedAt == nil, "in-progress → no Ended (floats)")
+
+    // Give up: mark abandoned + drop from queue (what the controller's abandon() does).
+    db.finishTask(id: tid, status: "abandoned")
+    db.removeQueuedTask(taskId: tid)
+
+    let row = db.taskHistory().first { $0.id == tid }
+    ok(row?.endedAt != nil, "abandoned task now has an Ended (finish) time → sorts down")
+    eq(row?.status ?? "", "abandoned", "status shows abandoned")
+    eq(row?.actualSeconds ?? -1, 120, "time worked so far is preserved")
+    ok(db.queueItems().first { $0.taskId == tid } == nil, "removed from the queue")
+}
+
 // MARK: - Migration: sessions -> tasks + intervals
 
 section("migrateSessionsToTasks merges a continued chain into one task") {

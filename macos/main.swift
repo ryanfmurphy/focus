@@ -599,7 +599,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         #selector(addTimeToCurrent), #selector(deferTask), #selector(changeFocus),
         #selector(renameTask), #selector(togglePause), #selector(preemptNextFocus),
         #selector(clearQueue), #selector(rateUnrated), #selector(showSettings),
-        #selector(deleteHistoryItems),
+        #selector(deleteHistoryItems), #selector(abandonHistoryTask),
     ]
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
@@ -621,6 +621,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         }
         if menuItem.action == #selector(deleteHistoryItems) {
             return !historyTargetRows().isEmpty
+        }
+        if menuItem.action == #selector(abandonHistoryTask) {
+            // Only meaningful in Tasks mode, on an in-progress (unfinished) task.
+            guard historyMode == .tasks else { return false }
+            return historyTargetRows().contains { historyRows[$0].endedAt == nil }
         }
         if menuItem.action == #selector(toggleShowPill) {
             menuItem.state = showPillEnabled ? .on : .off
@@ -951,6 +956,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             table.onCopy = { [weak self] indexes in self?.copyHistoryRows(indexes) }
             // Right-click a row (or a selection) to delete it.
             let histMenu = NSMenu()
+            histMenu.addItem(withTitle: "Give up (abandon)", action: #selector(abandonHistoryTask), keyEquivalent: "")
             histMenu.addItem(withTitle: "Delete", action: #selector(deleteHistoryItems), keyEquivalent: "")
             for mi in histMenu.items { mi.target = self }
             table.menu = histMenu
@@ -1161,6 +1167,45 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             db.deleteTasks(ids: rows.map { historyRows[$0].id })
         }
         reloadHistory()
+    }
+
+    // "Give up" on selected in-progress task(s) from See History: mark them
+    // abandoned (a terminal status — kept in history with time worked so far, no
+    // rating) and drop them from the queue, so they stop floating at the top.
+    @objc func abandonHistoryTask() {
+        guard !showing, historyMode == .tasks else { return }
+        let rows = historyTargetRows().filter { historyRows[$0].endedAt == nil }   // in-progress only
+        guard !rows.isEmpty else { return }
+        let ids = rows.map { historyRows[$0].id }
+
+        showing = true
+        defer { showing = false }
+        let n = ids.count
+        let alert = makeAlert()
+        alert.messageText = "Give up on \(n) task\(n == 1 ? "" : "s")?"
+        alert.informativeText = "Marks \(n == 1 ? "it" : "them") abandoned — kept in history with the time worked so far, and removed from the queue. No rating."
+        alert.addButton(withTitle: "Give up")   // .alertFirstButtonReturn
+        alert.addButton(withTitle: "Cancel")
+        alert.window.level = .floating
+        alert.window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        for id in ids { abandon(taskId: id) }
+        reloadHistory()
+    }
+
+    private func abandon(taskId tid: Int64) {
+        if taskId == tid {
+            // It's the currently-running task — stop it too (close interval, clear pill).
+            finalizePause()
+            if let iid = intervalId { db.endInterval(id: iid, elapsedSeconds: elapsedFocusSeconds()) }
+            clearSessionState()
+            hudWindow.orderOut(nil)
+        } else if let iv = db.openInterval(taskId: tid) {
+            db.endInterval(id: iv.id, elapsedSeconds: intervalElapsed(iv))
+        }
+        db.finishTask(id: tid, status: "abandoned")
+        db.removeQueuedTask(taskId: tid)
     }
 
     // TSV has no quoting, so flatten any tabs/newlines in a field to spaces.
