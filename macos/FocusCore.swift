@@ -218,6 +218,39 @@ final class DB {
             seconds - COALESCE((SELECT SUM(seconds) FROM time_additions WHERE session_id = sessions.id), 0)
         WHERE original_seconds IS NULL AND (status IS NULL OR status = 'completed');
         """)
+
+        // --- tasks + intervals (the new model) ---------------------------------
+        // A `task` is the unit of identity/estimate/rating/hierarchy; an `interval`
+        // is one timed chunk of work on a task (today's `sessions` row). These are
+        // created here (empty on a fresh or not-yet-migrated DB); migrateSessions-
+        // ToTasks() populates them from legacy `sessions`. Ids are preserved across
+        // the migration (interval.id == old session.id, task.id == chain-root id),
+        // so the pauses/time_additions/preempts tables keep referring by the same
+        // ids without a repoint.
+        exec("""
+        CREATE TABLE IF NOT EXISTS tasks (
+            id             INTEGER PRIMARY KEY,   -- migrated: = chain-root session id
+            parent_task_id INTEGER,               -- for future subtasks (NULL for now)
+            created_at     TEXT,
+            focus          TEXT,
+            estimate_seconds INTEGER,             -- original planned duration
+            status         TEXT,                  -- completed/interrupted/deferred (NULL while active)
+            rating         INTEGER,               -- 1..10 (one per task)
+            note           TEXT
+        );
+        """)
+        exec("""
+        CREATE TABLE IF NOT EXISTS intervals (
+            id           INTEGER PRIMARY KEY,      -- migrated: = old session id
+            task_id      INTEGER NOT NULL,
+            started_at   TEXT,
+            ended_at     TEXT,
+            seconds      INTEGER,                  -- ACTUAL elapsed for this chunk
+            reason       TEXT,
+            open_seconds_start INTEGER,
+            open_seconds_end   INTEGER
+        );
+        """)
     }
 
     private func exec(_ sql: String) { sqlite3_exec(db, sql, nil, nil, nil) }
@@ -657,6 +690,101 @@ final class DB {
     }
 
     func clearQueue() { sqlite3_exec(db, "DELETE FROM queue;", nil, nil, nil) }
+
+    // MARK: - Tasks + intervals (new model)
+
+    /// Number of intervals — used to detect whether the split migration has run.
+    func intervalCount() -> Int {
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM intervals;", -1, &stmt, nil) == SQLITE_OK else { return 0 }
+        defer { sqlite3_finalize(stmt) }
+        return sqlite3_step(stmt) == SQLITE_ROW ? Int(sqlite3_column_int(stmt, 0)) : 0
+    }
+
+    /// Whether a legacy `sessions` table exists (a pre-refactor DB).
+    private func hasSessionsTable() -> Bool {
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "SELECT 1 FROM sqlite_master WHERE type='table' AND name='sessions';", -1, &stmt, nil) == SQLITE_OK else { return false }
+        defer { sqlite3_finalize(stmt) }
+        return sqlite3_step(stmt) == SQLITE_ROW
+    }
+
+    /// One-time transform of legacy `sessions` rows into `tasks` + `intervals`.
+    /// - Each pre-empt→continued chain (grouped by COALESCE(original_session_id, id))
+    ///   becomes ONE task; every session in it becomes an interval of that task.
+    /// - task.focus/estimate come from the EARLIEST fragment (the clean original name
+    ///   and the duration it was created with); task.status/rating/note come from the
+    ///   LAST fragment — the intentional "collapse per-fragment ratings to one" step.
+    /// - Ids are preserved (task.id = chain-root id, interval.id = old session id),
+    ///   so pauses/time_additions/preempts keep referring by the same ids.
+    /// Idempotent: no-ops if intervals are already populated or there's no `sessions`.
+    func migrateSessionsToTasks() {
+        guard hasSessionsTable(), intervalCount() == 0 else { return }
+        exec("BEGIN;")
+        exec("""
+        INSERT INTO tasks (id, parent_task_id, created_at, focus, estimate_seconds, status, rating, note)
+        SELECT grp.root_id, NULL, first.started_at, first.focus,
+               COALESCE(first.original_seconds, first.seconds),
+               last.status, last.rating, last.note
+        FROM (SELECT COALESCE(original_session_id, id) AS root_id,
+                     MIN(id) AS first_id, MAX(id) AS last_id
+              FROM sessions GROUP BY COALESCE(original_session_id, id)) grp
+        JOIN sessions first ON first.id = grp.first_id
+        JOIN sessions last  ON last.id  = grp.last_id;
+        """)
+        exec("""
+        INSERT INTO intervals (id, task_id, started_at, ended_at, seconds, reason, open_seconds_start, open_seconds_end)
+        SELECT id, COALESCE(original_session_id, id), started_at, ended_at, seconds, reason, open_seconds_start, open_seconds_end
+        FROM sessions;
+        """)
+        exec("COMMIT;")
+    }
+
+    /// All tasks, newest first.
+    func allTasks() -> [TaskRow] {
+        let sql = "SELECT id, parent_task_id, created_at, focus, estimate_seconds, status, rating, note FROM tasks ORDER BY id DESC;"
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
+        defer { sqlite3_finalize(stmt) }
+        func intOrNil(_ c: Int32) -> Int? { sqlite3_column_type(stmt, c) == SQLITE_NULL ? nil : Int(sqlite3_column_int(stmt, c)) }
+        func int64OrNil(_ c: Int32) -> Int64? { sqlite3_column_type(stmt, c) == SQLITE_NULL ? nil : sqlite3_column_int64(stmt, c) }
+        func text(_ c: Int32) -> String? { sqlite3_column_text(stmt, c).map { String(cString: $0) } }
+        var rows: [TaskRow] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            rows.append(TaskRow(id: sqlite3_column_int64(stmt, 0),
+                                parentTaskId: int64OrNil(1),
+                                createdAt: text(2),
+                                focus: text(3) ?? "",
+                                estimateSeconds: intOrNil(4),
+                                status: text(5),
+                                rating: intOrNil(6),
+                                note: text(7)))
+        }
+        return rows
+    }
+
+    /// Intervals for a task, earliest first.
+    func intervals(forTask taskId: Int64) -> [Interval] {
+        let sql = "SELECT id, task_id, started_at, ended_at, seconds, reason, open_seconds_start, open_seconds_end FROM intervals WHERE task_id=? ORDER BY id ASC;"
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_int64(stmt, 1, taskId)
+        func intOrNil(_ c: Int32) -> Int? { sqlite3_column_type(stmt, c) == SQLITE_NULL ? nil : Int(sqlite3_column_int(stmt, c)) }
+        func text(_ c: Int32) -> String? { sqlite3_column_text(stmt, c).map { String(cString: $0) } }
+        var rows: [Interval] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            rows.append(Interval(id: sqlite3_column_int64(stmt, 0),
+                                 taskId: sqlite3_column_int64(stmt, 1),
+                                 startedAt: text(2) ?? "",
+                                 endedAt: text(3),
+                                 seconds: Int(sqlite3_column_int(stmt, 4)),
+                                 reason: text(5),
+                                 openSecondsStart: intOrNil(6),
+                                 openSecondsEnd: intOrNil(7)))
+        }
+        return rows
+    }
 }
 
 struct QueueItem {
@@ -686,4 +814,28 @@ struct SessionRow {
     let openSecondsStart: Int?
     let openSecondsEnd: Int?
     let originalSeconds: Int?   // nil for old interrupted/deferred rows (unrecoverable)
+}
+
+// New model. `TaskRow` (not `Task`, to avoid shadowing Swift's concurrency type)
+// is the unit of identity/estimate/rating; `Interval` is one timed chunk of work.
+struct TaskRow {
+    let id: Int64
+    let parentTaskId: Int64?
+    let createdAt: String?
+    let focus: String
+    let estimateSeconds: Int?
+    let status: String?
+    let rating: Int?
+    let note: String?
+}
+
+struct Interval {
+    let id: Int64
+    let taskId: Int64
+    let startedAt: String
+    let endedAt: String?
+    let seconds: Int          // actual elapsed for this chunk
+    let reason: String?
+    let openSecondsStart: Int?
+    let openSecondsEnd: Int?
 }

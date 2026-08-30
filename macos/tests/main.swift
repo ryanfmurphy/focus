@@ -277,6 +277,54 @@ section("Data persists across reopen; reopening re-runs migrations harmlessly") 
     eq(r.originalSeconds ?? -1, 1500, "original survived")
 }
 
+// MARK: - Migration: sessions -> tasks + intervals
+
+section("migrateSessionsToTasks merges a continued chain into one task") {
+    let db = freshDB()
+    // Seed a legacy shape via the current API: a two-fragment chain + a standalone.
+    let f1 = db.startSession(reason: "launch", seconds: 1500, focus: "Deep work", originalSessionId: nil)!
+    db.markInterrupted(id: f1, elapsedSeconds: 600, rating: 4, note: "got interrupted")
+    let f2 = db.startSession(reason: "resume", seconds: 1500, focus: "Deep work (continued)", originalSessionId: f1)!
+    db.addTime(sessionId: f2, seconds: 300)   // bumps planned; original stays 1500
+    db.endSession(id: f2, status: "completed", rating: 9, note: "done", openSecondsEnd: 5, elapsedSeconds: 800)
+    let s1 = db.startSession(reason: "launch", seconds: 1200, focus: "Quick email", originalSessionId: nil)!
+    db.endSession(id: s1, status: "completed", rating: 7, note: "", elapsedSeconds: 1100)
+
+    db.migrateSessionsToTasks()
+
+    eq(db.allTasks().count, 2, "two tasks (chain collapsed to one) + standalone")
+    eq(db.intervalCount(), 3, "three intervals total")
+
+    let tasks = db.allTasks()
+    guard let chain = tasks.first(where: { $0.id == f1 }) else { ok(false, "chain task exists"); return }
+    eq(chain.focus, "Deep work", "task focus = clean original name (no '(continued)')")
+    eq(chain.estimateSeconds ?? -1, 1500, "estimate = original, not the add-time-bumped total")
+    eq(chain.status ?? "", "completed", "status from the LAST fragment")
+    eq(chain.rating ?? -1, 9, "rating collapsed to the last fragment's (9, not 4)")
+    eq(chain.note ?? "", "done", "note from the last fragment")
+
+    let iv = db.intervals(forTask: f1)
+    eq(iv.map { $0.seconds }, [600, 800], "two intervals, actual elapsed each, earliest first")
+    eq(iv.first?.reason ?? "", "launch", "interval keeps its reason")
+    eq(iv.last?.openSecondsEnd ?? -1, 5, "interval keeps its popup-open seconds")
+
+    guard let solo = tasks.first(where: { $0.id == s1 }) else { ok(false, "standalone task exists"); return }
+    eq(solo.focus, "Quick email", "standalone focus")
+    eq(solo.estimateSeconds ?? -1, 1200, "standalone estimate")
+    eq(solo.rating ?? -1, 7, "standalone rating")
+    eq(db.intervals(forTask: s1).map { $0.seconds }, [1100], "standalone has one interval")
+}
+
+section("migrateSessionsToTasks is idempotent") {
+    let db = freshDB()
+    let id = db.startSession(reason: "launch", seconds: 1500, focus: "A", originalSessionId: nil)!
+    db.endSession(id: id, status: "completed", rating: 5, note: "", elapsedSeconds: 1500)
+    db.migrateSessionsToTasks()
+    db.migrateSessionsToTasks()   // second call must not duplicate
+    eq(db.allTasks().count, 1, "still one task after re-running")
+    eq(db.intervalCount(), 1, "still one interval after re-running")
+}
+
 // MARK: - Summary
 
 print("")
