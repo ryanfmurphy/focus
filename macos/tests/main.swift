@@ -416,6 +416,27 @@ section("intervalHistory: flat timeline joined to task focus; deleteIntervals") 
     ok(db.task(id: t1) != nil, "the task itself is untouched")
 }
 
+section("taskHistory Ended = finish time only ('—' while in progress)") {
+    let db = freshDB()
+    // Finished task → Ended set.
+    let done = db.startTask(reason: "launch", estimateSeconds: 600, focus: "Done")!
+    db.endInterval(id: done.intervalId, elapsedSeconds: 500)
+    db.finishTask(id: done.taskId, status: "completed", rating: 8)
+    // Closed interval but NOT finished (deferred / paused-in-queue) → still no Ended.
+    let (prog, pi) = db.startTask(reason: "launch", estimateSeconds: 600, focus: "InProgress")!
+    db.endInterval(id: pi, elapsedSeconds: 200)
+    // Running task (open interval).
+    let (run, _) = db.startTask(reason: "launch", estimateSeconds: 600, focus: "Running")!
+
+    let hist = db.taskHistory()
+    func th(_ id: Int64) -> TaskHistoryRow { hist.first { $0.id == id }! }
+    ok(th(done.taskId).endedAt != nil, "finished task has an Ended (finish) time")
+    ok(th(prog).endedAt == nil, "closed-interval-but-unfinished task shows no Ended")
+    ok(th(prog).lastActivity != nil, "…but has a lastActivity (for recency sorting)")
+    ok(th(run).endedAt == nil, "running task shows no Ended")
+    ok(th(run).lastActivity != nil, "running task still has a lastActivity")
+}
+
 // MARK: - Migration: sessions -> tasks + intervals
 
 section("migrateSessionsToTasks merges a continued chain into one task") {

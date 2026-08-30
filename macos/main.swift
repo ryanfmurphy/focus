@@ -1020,8 +1020,14 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     private func taskLess(_ a: TaskHistoryRow, _ b: TaskHistoryRow, key: String, ascending: Bool) -> Bool {
         switch key {
         case "when":    return dir(a.startedAt ?? "", b.startedAt ?? "", ascending)
-        // In-progress (nil Ended) sorts as the most recent → top under the default desc.
-        case "ended":   return dir(a.endedAt ?? "\u{FFFF}", b.endedAt ?? "\u{FFFF}", ascending)
+        case "ended":
+            // Finished tasks sort by finish time; unfinished (nil Ended) float to the
+            // top (sentinel), and the unfinished group is tie-broken by recency so the
+            // most-recently-worked in-progress task leads.
+            if a.endedAt == nil && b.endedAt == nil {
+                return dir(a.lastActivity ?? "", b.lastActivity ?? "", ascending)
+            }
+            return dir(a.endedAt ?? "\u{FFFF}", b.endedAt ?? "\u{FFFF}", ascending)
         case "min":     return dir(a.actualSeconds, b.actualSeconds, ascending)
         case "origmin": return dir(a.estimateSeconds ?? -1, b.estimateSeconds ?? -1, ascending)
         case "ivs":     return dir(a.intervalCount, b.intervalCount, ascending)

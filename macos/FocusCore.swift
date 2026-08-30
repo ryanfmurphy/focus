@@ -1074,10 +1074,17 @@ final class DB {
     /// aggregate actual time, interval count, and start/end span. This is what the
     /// tasks-based See History view renders (one row per task, not per fragment).
     func taskHistory(limit: Int = 500) -> [TaskHistoryRow] {
+        // `endedAt` is the task's FINISH time — non-null only when the task reached a
+        // terminal status (completed/interrupted). A task that merely has closed
+        // intervals but is still in progress (deferred / paused-in-queue / running)
+        // has ended=NULL → shows "—". `lastActivity` (the most recent interval
+        // moment, open interval included) is a hidden value for recency sorting.
         let sql = """
         SELECT t.id, t.focus, t.estimate_seconds, t.status, t.rating, t.note,
                COALESCE(SUM(iv.seconds), 0), COUNT(iv.id),
-               MIN(iv.started_at), MAX(iv.ended_at)
+               MIN(iv.started_at),
+               CASE WHEN t.status IN ('completed','interrupted') THEN MAX(iv.ended_at) END,
+               MAX(COALESCE(iv.ended_at, iv.started_at))
         FROM tasks t LEFT JOIN intervals iv ON iv.task_id = t.id
         GROUP BY t.id ORDER BY t.id DESC LIMIT ?;
         """
@@ -1099,7 +1106,8 @@ final class DB {
                 actualSeconds: Int(sqlite3_column_int(s, 6)),
                 intervalCount: Int(sqlite3_column_int(s, 7)),
                 startedAt: text(8),
-                endedAt: text(9)))
+                endedAt: text(9),
+                lastActivity: text(10)))
         }
         return rows
     }
@@ -1183,5 +1191,6 @@ struct TaskHistoryRow {
     let actualSeconds: Int    // Σ of the task's interval seconds
     let intervalCount: Int
     let startedAt: String?    // first interval start
-    let endedAt: String?      // last interval end
+    let endedAt: String?      // FINISH time (nil unless completed/interrupted)
+    let lastActivity: String? // most recent interval moment (open included) — recency sort
 }
