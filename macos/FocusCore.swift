@@ -928,6 +928,41 @@ final class DB {
                        rating: intOrNil(6), note: text(7))
     }
 
+    /// A task's ancestors, nearest first: [parent, grandparent, …, root]. Empty for
+    /// a top-level task. This is the parent_task_id walk used to rebuild the subtask
+    /// stack on resume/restart. Guarded against cycles.
+    func ancestorTasks(of taskId: Int64) -> [TaskRow] {
+        var chain: [TaskRow] = []
+        var next = task(id: taskId)?.parentTaskId
+        var guardCount = 0
+        while let pid = next, guardCount < 100 {
+            guard let parent = task(id: pid) else { break }
+            chain.append(parent)
+            next = parent.parentTaskId
+            guardCount += 1
+        }
+        return chain
+    }
+
+    /// Direct child tasks (subtasks) of a task, oldest first.
+    func childTasks(of taskId: Int64) -> [TaskRow] {
+        let sql = "SELECT id, parent_task_id, created_at, focus, estimate_seconds, status, rating, note FROM tasks WHERE parent_task_id=? ORDER BY id ASC;"
+        var s: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &s, nil) == SQLITE_OK else { return [] }
+        defer { sqlite3_finalize(s) }
+        sqlite3_bind_int64(s, 1, taskId)
+        func intOrNil(_ c: Int32) -> Int? { sqlite3_column_type(s, c) == SQLITE_NULL ? nil : Int(sqlite3_column_int(s, c)) }
+        func int64OrNil(_ c: Int32) -> Int64? { sqlite3_column_type(s, c) == SQLITE_NULL ? nil : sqlite3_column_int64(s, c) }
+        func text(_ c: Int32) -> String? { sqlite3_column_text(s, c).map { String(cString: $0) } }
+        var rows: [TaskRow] = []
+        while sqlite3_step(s) == SQLITE_ROW {
+            rows.append(TaskRow(id: sqlite3_column_int64(s, 0), parentTaskId: int64OrNil(1), createdAt: text(2),
+                                focus: text(3) ?? "", estimateSeconds: intOrNil(4), status: text(5),
+                                rating: intOrNil(6), note: text(7)))
+        }
+        return rows
+    }
+
     /// Total ACTUAL seconds worked on a task (sum of its CLOSED intervals).
     func spentSeconds(taskId: Int64) -> Int {
         var s: OpaquePointer?

@@ -64,8 +64,51 @@ Subtasks feature builds on.
   1c. Added a **Tasks ⇄ Intervals** toggle to See History: Intervals shows the
   global chronological interval timeline (Started/Duration/Rating/Reason/Task),
   with interval-level copy + delete. Queue-remaining display still TODO.
-- [ ] **3 (separate) — subtasks** via `parent_task_id`: second pill, per-subtask
-  timer/rating.
+- [~] **3 (separate) — subtasks** via `parent_task_id` — design locked (below).
+
+## Subtasks — locked design
+
+A **subtask is a task with `parent_task_id` set**, running with **concurrent
+clocks**: starting a subtask does NOT pause the parent — both count down at once.
+
+- **Start**: "Add subtask" while a task is active → prompt focus + duration; it
+  pushes onto an in-memory **stack** (parent → subtask → sub-subtask…). The
+  deepest (leaf) task is what you're actively doing.
+- **Time accounting**: the parent's own interval keeps running through the
+  subtask, so it already *contains* the subtask time. Therefore **parent actual =
+  total effort incl. subtasks — do NOT sum parent + child** (that double-counts the
+  overlap). Subtasks are a breakdown *within* the parent's total.
+- **Parent time's-up mid-subtask**: the parent does NOT interrupt — its pill goes
+  into **overtime (red, counting up)**; its rating prompt fires when the subtask
+  finishes and you return to it.
+- **Pills**: the main task pill on top; the active subtask as a **smaller / tinted
+  pill below** it. Both tick.
+- **Pause** freezes the whole stack. **Restart** reconstructs the running stack by
+  taking the newest open interval as the leaf and **walking `parent_task_id`
+  upward**; every task in the chain has its own open interval to resume. Open
+  intervals not in the chain are swept as orphans.
+- **Finish / Abandon a subtask** → pop to the parent (which keeps ticking), not the
+  idle "what's next?" prompt.
+- **Pre-empt, two levels**:
+  - *Whole task* — "Switch focus now" suspends the **entire stack**, re-queues the
+    **root** to the front, starts a fresh unrelated focus.
+  - *Subtask only* — "Defer subtask" suspends just the **leaf** (re-queues it
+    carrying its `parent_task_id` + remaining), dropping back to the parent.
+  - **Resuming any queued task rebuilds its ancestor stack** via the same
+    `parent_task_id` walk. Wrinkle: resuming a lone subtask while its parent is
+    already the active task should **attach** it, not reconstruct a second copy.
+- **Queue**: subtasks are started ad-hoc; only *deferred* subtasks sit in the queue
+  (carrying the parent link). Rating lives on the child task.
+
+### Implementation stages
+- [ ] **S1 — FocusCore reads**: `ancestorTasks(of:)` (the parent_task_id walk),
+  `childTasks(of:)`, tests. Safe/additive.
+- [ ] **S2 — controller stack**: replace the single current task/interval with a
+  stack; "Add subtask" push; tick renders multiple pills + parent overtime; pause
+  freezes the stack; Complete/Abandon pop to parent.
+- [ ] **S3 — pre-empt/defer levels + resume rebuilds stack + restart stack walk.**
+- [ ] **S4 — History**: show subtasks nested/attributed under the parent (total
+  incl. subtasks = the parent's own actual).
 
 ## Safety
 

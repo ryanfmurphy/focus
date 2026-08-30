@@ -455,6 +455,25 @@ section("Give up: abandoned task gets a finish time and leaves the queue") {
     ok(db.queueItems().first { $0.taskId == tid } == nil, "removed from the queue")
 }
 
+section("subtasks: ancestorTasks walks parent_task_id; childTasks lists children") {
+    let db = freshDB()
+    let (a, _) = db.startTask(reason: "launch", estimateSeconds: 3600, focus: "A")!
+    let (b, _) = db.startTask(reason: "sub", estimateSeconds: 600, focus: "B", parentTaskId: a)!
+    let (c, _) = db.startTask(reason: "sub", estimateSeconds: 300, focus: "C", parentTaskId: b)!
+    let (b2, _) = db.startTask(reason: "sub", estimateSeconds: 200, focus: "B2", parentTaskId: a)!
+
+    eq(db.task(id: b)?.parentTaskId ?? -1, a, "B's parent is A")
+    eq(db.task(id: c)?.parentTaskId ?? -1, b, "C's parent is B")
+    // Ancestors of the deepest task, nearest-first up to the root (the restart walk).
+    eq(db.ancestorTasks(of: c).map { $0.focus }, ["B", "A"], "ancestors of C = [B, A]")
+    eq(db.ancestorTasks(of: a).count, 0, "top-level task has no ancestors")
+    eq(db.ancestorTasks(of: b2).map { $0.focus }, ["A"], "ancestors of B2 = [A]")
+    // Direct children.
+    eq(db.childTasks(of: a).map { $0.focus }, ["B", "B2"], "A's direct children, oldest first")
+    eq(db.childTasks(of: b).map { $0.focus }, ["C"], "B's child")
+    eq(db.childTasks(of: c).count, 0, "leaf has no children")
+}
+
 // MARK: - Migration: sessions -> tasks + intervals
 
 section("migrateSessionsToTasks merges a continued chain into one task") {
