@@ -203,6 +203,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     private var historyWindow: NSWindow?
     private var historyTable: NSTableView?
     private var historyRows: [TaskHistoryRow] = []
+    private var intervalRows: [IntervalHistoryRow] = []
+    private enum HistoryMode { case tasks, intervals }
+    private var historyMode: HistoryMode = .tasks
     private var queueWindow: NSWindow?
     private var queueTable: NSTableView?
     private var queueRows: [QueueItem] = []
@@ -907,8 +910,6 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
 
     // ---- history ----
     @objc func showHistory() {
-        historyRows = db.taskHistory()
-
         if historyWindow == nil {
             let window = NSWindow(
                 contentRect: NSRect(x: 0, y: 0, width: 1040, height: 560),
@@ -918,10 +919,22 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             window.isReleasedWhenClosed = false   // we keep & reuse it
             window.center()
 
-            let scroll = NSScrollView(frame: window.contentView!.bounds)
+            let container = NSView(frame: window.contentView!.bounds)
+            container.autoresizingMask = [.width, .height]
+
+            // Tasks ⇄ Intervals toggle across the top.
+            let toggle = NSSegmentedControl(labels: ["Tasks", "Intervals"],
+                                            trackingMode: .selectOne,
+                                            target: self, action: #selector(historyModeChanged(_:)))
+            toggle.selectedSegment = (historyMode == .intervals ? 1 : 0)
+            toggle.frame = NSRect(x: 12, y: container.bounds.height - 32, width: 220, height: 24)
+            toggle.autoresizingMask = [.minYMargin, .maxXMargin]   // pin to top-left
+
+            let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: container.bounds.width,
+                                                    height: container.bounds.height - 40))
             scroll.autoresizingMask = [.width, .height]
             scroll.hasVerticalScroller = true
-            scroll.hasHorizontalScroller = true   // let wide columns (Focus/Note) scroll
+            scroll.hasHorizontalScroller = true   // let wide columns (Focus/Task/Note) scroll
             scroll.borderType = .noBorder
 
             let table = CopyableTableView()
@@ -929,7 +942,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             table.delegate = self
             table.usesAlternatingRowBackgroundColors = true
             // Keep each column's natural width; total can exceed the window and
-            // scroll horizontally, so Focus/Note aren't squeezed.
+            // scroll horizontally, so wide columns aren't squeezed.
             table.columnAutoresizingStyle = .noColumnAutoresizing
             table.rowHeight = 22
             table.allowsColumnResizing = true
@@ -942,39 +955,83 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             for mi in histMenu.items { mi.target = self }
             table.menu = histMenu
 
-            func addColumn(_ id: String, _ title: String, width: CGFloat, min: CGFloat,
-                           align: NSTextAlignment = .left) {
-                let col = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(id))
-                col.title = title
-                col.width = width
-                col.minWidth = min
-                col.headerCell.alignment = align
-                table.addTableColumn(col)
-            }
-            addColumn("when", "Started", width: 140, min: 120)
-            addColumn("min", "Actual", width: 70, min: 56, align: .right)
-            addColumn("origmin", "Estimate", width: 70, min: 56, align: .right)
-            addColumn("ivs", "Intervals", width: 70, min: 56, align: .right)
-            addColumn("rating", "Rating", width: 60, min: 50, align: .right)
-            addColumn("status", "Status", width: 95, min: 70)
-            addColumn("focus", "Focus", width: 360, min: 150)
-            addColumn("note", "Note", width: 320, min: 100)
-
             scroll.documentView = table
-            window.contentView = scroll
+            container.addSubview(scroll)
+            container.addSubview(toggle)
+            window.contentView = container
 
             historyWindow = window
             historyTable = table
         }
 
-        historyTable?.reloadData()
+        reloadHistory()
         NSApp.activate(ignoringOtherApps: true)
         historyWindow?.makeKeyAndOrderFront(nil)
+    }
+
+    @objc private func historyModeChanged(_ sender: NSSegmentedControl) {
+        historyMode = sender.selectedSegment == 1 ? .intervals : .tasks
+        reloadHistory()
+    }
+
+    /// Load the active mode's rows, install its columns, and refresh the table.
+    private func reloadHistory() {
+        switch historyMode {
+        case .tasks:     historyRows = db.taskHistory()
+        case .intervals: intervalRows = db.intervalHistory()
+        }
+        configureHistoryColumns()
+        historyTable?.reloadData()
+    }
+
+    private func configureHistoryColumns() {
+        guard let table = historyTable else { return }
+        for col in table.tableColumns { table.removeTableColumn(col) }
+        func add(_ id: String, _ title: String, width: CGFloat, min: CGFloat, align: NSTextAlignment = .left) {
+            let col = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(id))
+            col.title = title; col.width = width; col.minWidth = min; col.headerCell.alignment = align
+            table.addTableColumn(col)
+        }
+        switch historyMode {
+        case .tasks:
+            add("when", "Started", width: 140, min: 120)
+            add("min", "Actual", width: 70, min: 56, align: .right)
+            add("origmin", "Estimate", width: 70, min: 56, align: .right)
+            add("ivs", "Intervals", width: 70, min: 56, align: .right)
+            add("rating", "Rating", width: 60, min: 50, align: .right)
+            add("status", "Status", width: 95, min: 70)
+            add("focus", "Focus", width: 360, min: 150)
+            add("note", "Note", width: 320, min: 100)
+        case .intervals:
+            add("when", "Started", width: 140, min: 120)
+            add("dur", "Duration", width: 70, min: 56, align: .right)
+            add("rating", "Rating", width: 60, min: 50, align: .right)
+            add("reason", "Reason", width: 100, min: 70)
+            add("task", "Task", width: 460, min: 150)
+        }
     }
 
     // Copy the selected history rows to the clipboard as TSV (with a header).
     private func copyHistoryRows(_ indexes: IndexSet) {
         guard !indexes.isEmpty else { return }
+        if historyMode == .intervals {
+            var lines = ["Started\tEnded\tDuration (s)\tRating\tReason\tTask"]
+            for i in indexes where i < intervalRows.count {
+                let r = intervalRows[i]
+                let fields = [
+                    whenLabel(r.startedAt),
+                    r.endedAt.map(whenLabel) ?? "",
+                    "\(r.seconds)",
+                    r.rating.map { "\($0)" } ?? "",
+                    r.reason ?? "",
+                    r.taskFocus,
+                ].map(tsvClean)
+                lines.append(fields.joined(separator: "\t"))
+            }
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(lines.joined(separator: "\n"), forType: .string)
+            return
+        }
         var lines = ["Started\tActual (s)\tEstimate (s)\tIntervals\tRating\tStatus\tFocus\tNote"]
         for i in indexes where i < historyRows.count {
             let r = historyRows[i]
@@ -1004,7 +1061,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         if clicked >= 0 && selected.contains(clicked) { rows = selected }
         else if clicked >= 0 { rows = IndexSet(integer: clicked) }
         else { rows = selected }
-        return rows.filter { $0 < historyRows.count }
+        let count = historyMode == .intervals ? intervalRows.count : historyRows.count
+        return rows.filter { $0 < count }
     }
 
     // Delete the right-clicked (or selected) history sessions, after confirming.
@@ -1012,23 +1070,28 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         guard !showing else { return }
         let rows = historyTargetRows()
         guard !rows.isEmpty else { return }
-        let ids = rows.map { historyRows[$0].id }
+        let n = rows.count
+        let noun = historyMode == .intervals ? "interval" : "task"
 
         showing = true
         defer { showing = false }
-        let n = ids.count
         let alert = makeAlert()
-        alert.messageText = "Delete \(n) task\(n == 1 ? "" : "s")?"
-        alert.informativeText = "This permanently removes \(n == 1 ? "this task" : "these tasks") (and its intervals) from history. This can't be undone."
+        alert.messageText = "Delete \(n) \(noun)\(n == 1 ? "" : "s")?"
+        alert.informativeText = historyMode == .intervals
+            ? "This permanently removes \(n == 1 ? "this interval" : "these intervals") — the parent task's totals shrink. This can't be undone."
+            : "This permanently removes \(n == 1 ? "this task" : "these tasks") (and its intervals) from history. This can't be undone."
         alert.addButton(withTitle: "Delete")   // .alertFirstButtonReturn
         alert.addButton(withTitle: "Cancel")
         alert.window.level = .floating
         alert.window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         guard alert.runModal() == .alertFirstButtonReturn else { return }
 
-        db.deleteTasks(ids: ids)
-        historyRows = db.taskHistory()
-        historyTable?.reloadData()
+        if historyMode == .intervals {
+            db.deleteIntervals(ids: rows.map { intervalRows[$0].id })
+        } else {
+            db.deleteTasks(ids: rows.map { historyRows[$0].id })
+        }
+        reloadHistory()
     }
 
     // TSV has no quoting, so flatten any tabs/newlines in a field to spaces.
@@ -1166,7 +1229,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     }
 
     func numberOfRows(in tableView: NSTableView) -> Int {
-        tableView === queueTable ? queueRows.count : historyRows.count
+        tableView === queueTable ? queueRows.count
+            : (historyMode == .intervals ? intervalRows.count : historyRows.count)
     }
 
     // ---- queue reordering (right-click menu on the queue table) ----
@@ -1232,6 +1296,21 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             case "start":  text = est.map { localClockFormatter.string(from: $0.start) } ?? ""; align = .right
             case "finish": text = est.map { localClockFormatter.string(from: $0.finish) } ?? ""; align = .right
             default:       text = q.focus
+            }
+            return historyCell(tableView, id: id, text: text, align: align)
+        }
+
+        if historyMode == .intervals {
+            guard row < intervalRows.count else { return nil }
+            let r = intervalRows[row]
+            let text: String
+            var align: NSTextAlignment = .left
+            switch id {
+            case "when":   text = whenLabel(r.startedAt)
+            case "dur":    text = mmss(r.seconds); align = .right
+            case "rating": text = r.rating.map { "\($0)/10" } ?? "—"; align = .right
+            case "reason": text = r.reason ?? "—"
+            default:       text = r.taskFocus
             }
             return historyCell(tableView, id: id, text: text, align: align)
         }

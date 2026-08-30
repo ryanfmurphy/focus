@@ -393,6 +393,29 @@ section("taskHistory rolls up one row per task with actual/interval-count/span")
     eq(small.intervalCount, 1, "single interval")
 }
 
+section("intervalHistory: flat timeline joined to task focus; deleteIntervals") {
+    let db = freshDB()
+    let (t1, i1) = db.startTask(reason: "launch", estimateSeconds: 1500, focus: "Alpha")!
+    db.endInterval(id: i1, elapsedSeconds: 600)
+    let i2 = db.startInterval(taskId: t1, reason: "resume")!
+    db.endInterval(id: i2, elapsedSeconds: 300)
+    let (_, i3) = db.startTask(reason: "launch", estimateSeconds: 1200, focus: "Beta")!
+    db.endInterval(id: i3, elapsedSeconds: 900)
+
+    let hist = db.intervalHistory()
+    eq(hist.count, 3, "one row per interval (not per task)")
+    // Newest first: i3 (Beta) then i2 then i1 (all created in ascending id order).
+    eq(hist.first?.id ?? -1, i3, "newest interval first")
+    eq(hist.first?.taskFocus ?? "", "Beta", "interval carries its task's focus")
+    ok(hist.contains { $0.id == i1 && $0.taskFocus == "Alpha" }, "Alpha's first interval present with its focus")
+    eq(hist.map { $0.seconds }.reduce(0, +), 1800, "durations are the per-interval actuals")
+
+    db.deleteIntervals(ids: [i2])
+    eq(db.intervalHistory().count, 2, "deleteIntervals removes just that interval")
+    eq(db.spentSeconds(taskId: t1), 600, "task rollup shrinks to the remaining interval")
+    ok(db.task(id: t1) != nil, "the task itself is untouched")
+}
+
 // MARK: - Migration: sessions -> tasks + intervals
 
 section("migrateSessionsToTasks merges a continued chain into one task") {

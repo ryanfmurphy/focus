@@ -958,6 +958,43 @@ final class DB {
         return rows
     }
 
+    /// Every interval joined to its task's focus, newest first — the global
+    /// chronological timeline for the History "Intervals" view.
+    func intervalHistory(limit: Int = 2000) -> [IntervalHistoryRow] {
+        let sql = """
+        SELECT iv.id, iv.task_id, t.focus, iv.started_at, iv.ended_at, iv.seconds, iv.reason, iv.rating
+        FROM intervals iv LEFT JOIN tasks t ON t.id = iv.task_id
+        ORDER BY iv.started_at DESC, iv.id DESC LIMIT ?;
+        """
+        var s: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &s, nil) == SQLITE_OK else { return [] }
+        defer { sqlite3_finalize(s) }
+        sqlite3_bind_int(s, 1, Int32(limit))
+        func intOrNil(_ c: Int32) -> Int? { sqlite3_column_type(s, c) == SQLITE_NULL ? nil : Int(sqlite3_column_int(s, c)) }
+        func text(_ c: Int32) -> String? { sqlite3_column_text(s, c).map { String(cString: $0) } }
+        var rows: [IntervalHistoryRow] = []
+        while sqlite3_step(s) == SQLITE_ROW {
+            rows.append(IntervalHistoryRow(
+                id: sqlite3_column_int64(s, 0), taskId: sqlite3_column_int64(s, 1),
+                taskFocus: text(2) ?? "", startedAt: text(3) ?? "", endedAt: text(4),
+                seconds: Int(sqlite3_column_int(s, 5)), reason: text(6), rating: intOrNil(7)))
+        }
+        return rows
+    }
+
+    /// Delete individual intervals by id (Intervals-view delete — e.g. a bogus
+    /// left-running chunk). The parent task's rollup shrinks accordingly.
+    func deleteIntervals(ids: [Int64]) {
+        guard !ids.isEmpty else { return }
+        let ph = ids.map { _ in "?" }.joined(separator: ",")
+        var s: OpaquePointer?
+        if sqlite3_prepare_v2(db, "DELETE FROM intervals WHERE id IN (\(ph));", -1, &s, nil) == SQLITE_OK {
+            for (i, id) in ids.enumerated() { sqlite3_bind_int64(s, Int32(i + 1), id) }
+            sqlite3_step(s)
+        }
+        sqlite3_finalize(s)
+    }
+
     /// Delete tasks and their intervals by task id (history view delete).
     func deleteTasks(ids: [Int64]) {
         guard !ids.isEmpty else { return }
@@ -1121,6 +1158,18 @@ struct Interval {
     let openSecondsStart: Int?
     let openSecondsEnd: Int?
     let rating: Int?          // optional per-interval rating (unused in the UI for now)
+}
+
+// One row per interval for the History "Intervals" timeline (interval + its task's focus).
+struct IntervalHistoryRow {
+    let id: Int64
+    let taskId: Int64
+    let taskFocus: String
+    let startedAt: String
+    let endedAt: String?
+    let seconds: Int
+    let reason: String?
+    let rating: Int?
 }
 
 // One row per task for the See History view: the task plus its rolled-up totals.

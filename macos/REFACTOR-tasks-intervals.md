@@ -60,8 +60,10 @@ Subtasks feature builds on.
   isn't unit-tested — needs a live run.** — commit `<this>`
   - [ ] **1c-2 (cleanup)** — delete the now-unused old session methods + their
     tests once a live run confirms the flip.
-- [ ] **2 — display.** History/Queue columns: Estimate / Actual / Remaining;
-  queue shows remaining; optional interval/subtask drill-down.
+- [~] **2 — display.** History rollup columns (Actual/Estimate/Intervals) done in
+  1c. Added a **Tasks ⇄ Intervals** toggle to See History: Intervals shows the
+  global chronological interval timeline (Started/Duration/Rating/Reason/Task),
+  with interval-level copy + delete. Queue-remaining display still TODO.
 - [ ] **3 (separate) — subtasks** via `parent_task_id`: second pill, per-subtask
   timer/rating.
 
