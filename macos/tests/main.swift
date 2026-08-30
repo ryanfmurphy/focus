@@ -307,6 +307,10 @@ section("migrateSessionsToTasks merges a continued chain into one task") {
     eq(iv.map { $0.seconds }, [600, 800], "two intervals, actual elapsed each, earliest first")
     eq(iv.first?.reason ?? "", "launch", "interval keeps its reason")
     eq(iv.last?.openSecondsEnd ?? -1, 5, "interval keeps its popup-open seconds")
+    // Per-fragment ratings are preserved losslessly on the intervals, even though the
+    // task's headline rating is the last fragment's.
+    eq(iv.first?.rating ?? -1, 4, "first interval keeps its own rating (4)")
+    eq(iv.last?.rating ?? -1, 9, "last interval keeps its own rating (9)")
 
     guard let solo = tasks.first(where: { $0.id == s1 }) else { ok(false, "standalone task exists"); return }
     eq(solo.focus, "Quick email", "standalone focus")

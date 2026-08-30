@@ -248,9 +248,14 @@ final class DB {
             seconds      INTEGER,                  -- ACTUAL elapsed for this chunk
             reason       TEXT,
             open_seconds_start INTEGER,
-            open_seconds_end   INTEGER
+            open_seconds_end   INTEGER,
+            rating       INTEGER                   -- optional per-interval rating (unused
+                                                   -- in the UI for now; kept so the split
+                                                   -- migration is lossless and the option
+                                                   -- stays open — headline rating is on tasks)
         );
         """)
+        exec("ALTER TABLE intervals ADD COLUMN rating INTEGER;")  // for any DB that made `intervals` before this column
     }
 
     private func exec(_ sql: String) { sqlite3_exec(db, sql, nil, nil, nil) }
@@ -733,8 +738,8 @@ final class DB {
         JOIN sessions last  ON last.id  = grp.last_id;
         """)
         exec("""
-        INSERT INTO intervals (id, task_id, started_at, ended_at, seconds, reason, open_seconds_start, open_seconds_end)
-        SELECT id, COALESCE(original_session_id, id), started_at, ended_at, seconds, reason, open_seconds_start, open_seconds_end
+        INSERT INTO intervals (id, task_id, started_at, ended_at, seconds, reason, open_seconds_start, open_seconds_end, rating)
+        SELECT id, COALESCE(original_session_id, id), started_at, ended_at, seconds, reason, open_seconds_start, open_seconds_end, rating
         FROM sessions;
         """)
         exec("COMMIT;")
@@ -765,7 +770,7 @@ final class DB {
 
     /// Intervals for a task, earliest first.
     func intervals(forTask taskId: Int64) -> [Interval] {
-        let sql = "SELECT id, task_id, started_at, ended_at, seconds, reason, open_seconds_start, open_seconds_end FROM intervals WHERE task_id=? ORDER BY id ASC;"
+        let sql = "SELECT id, task_id, started_at, ended_at, seconds, reason, open_seconds_start, open_seconds_end, rating FROM intervals WHERE task_id=? ORDER BY id ASC;"
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
         defer { sqlite3_finalize(stmt) }
@@ -781,7 +786,8 @@ final class DB {
                                  seconds: Int(sqlite3_column_int(stmt, 4)),
                                  reason: text(5),
                                  openSecondsStart: intOrNil(6),
-                                 openSecondsEnd: intOrNil(7)))
+                                 openSecondsEnd: intOrNil(7),
+                                 rating: intOrNil(8)))
         }
         return rows
     }
@@ -838,4 +844,5 @@ struct Interval {
     let reason: String?
     let openSecondsStart: Int?
     let openSecondsEnd: Int?
+    let rating: Int?          // optional per-interval rating (unused in the UI for now)
 }

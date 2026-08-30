@@ -21,9 +21,12 @@ Subtasks feature builds on.
 - **Ids preserved** across migration (`task.id` = chain-root session id,
   `interval.id` = old session id) so the aux tables keep referencing by the same
   ids without a repoint.
-- **Rating collapse**: a chain rated per-fragment collapses to ONE task rating —
-  the *last* fragment's rating/note/status (its most recent judgment). No
-  `intervals.rating` hedge.
+- **Rating**: the headline rating lives on the **task** (one per task — you set it
+  once at completion; interrupt/defer/pre-empt never stop to ask). But
+  `intervals.rating` is kept as a nullable, UI-unused column so the migration is
+  **lossless** (each old fragment's rating rides its interval) and per-interval
+  rating stays a future option with no further migration. `tasks.rating` is
+  seeded from the *last* fragment's rating/note/status.
 - **Estimate** for migrated tasks = the earliest fragment's `original_seconds`
   (the original plan; add-time is not folded in for legacy rows). New tasks bump
   `tasks.estimate_seconds` directly.
@@ -57,6 +60,7 @@ Subtasks feature builds on.
 
 - Orphan continuations (root fragment deleted) take the earliest *surviving*
   fragment's focus, which may still carry `(continued)`. Rare.
-- Mid-chain per-fragment ratings other than the last are dropped (by design).
+- Per-fragment ratings are preserved on `intervals.rating`; the task's headline
+  rating is the last fragment's.
 - Pre-existing bad data (e.g. a session left running for ~24h) carries over as an
   outsized interval — a data-cleanup matter, not a migration bug.
