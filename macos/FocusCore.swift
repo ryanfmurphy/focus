@@ -20,6 +20,25 @@ func mmss(_ seconds: Int) -> String {
 
 func isoNow() -> String { ISO8601DateFormatter().string(from: Date()) }
 
+/// Parse the session-setup duration field. A plain number is whole minutes
+/// ("25" -> 1500). If a colon is present it's MINUTES:SECONDS ("2:30" -> 150,
+/// "0:45" -> 45, ":30" -> 30, "2:" -> 120). Returns total seconds, or nil if it
+/// can't be parsed. Non-negative only.
+func parseDurationSeconds(_ text: String) -> Int? {
+    let t = text.trimmingCharacters(in: .whitespaces)
+    if t.isEmpty { return nil }
+    guard let colon = t.firstIndex(of: ":") else {
+        guard let m = Int(t), m >= 0 else { return nil }
+        return m * 60
+    }
+    let minStr = String(t[..<colon]).trimmingCharacters(in: .whitespaces)
+    let secStr = String(t[t.index(after: colon)...]).trimmingCharacters(in: .whitespaces)
+    let minutes = minStr.isEmpty ? 0 : Int(minStr)
+    let seconds = secStr.isEmpty ? 0 : Int(secStr)
+    guard let m = minutes, let s = seconds, m >= 0, s >= 0 else { return nil }
+    return m * 60 + s
+}
+
 // Given a focus name, produce the name for its continuation: "Foo" -> "Foo (continued)",
 // "Foo (continued)" -> "Foo (continued 2)", "Foo (continued 2)" -> "Foo (continued 3)".
 func continuedName(_ focus: String) -> String {

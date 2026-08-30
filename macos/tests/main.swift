@@ -66,6 +66,29 @@ section("continuedName") {
     eq(continuedName(""), " (continued)", "empty focus")
 }
 
+section("parseDurationSeconds (plain minutes, or M:SS when a colon is present)") {
+    // Plain number = whole minutes.
+    eq(parseDurationSeconds("25") ?? -1, 1500, "plain minutes")
+    eq(parseDurationSeconds("90") ?? -1, 5400, "plain minutes over an hour")
+    eq(parseDurationSeconds("0") ?? -1, 0, "zero minutes parses (caller guards > 0)")
+    eq(parseDurationSeconds("  3 ") ?? -1, 180, "surrounding whitespace trimmed")
+    // Colon = minutes:seconds.
+    eq(parseDurationSeconds("2:30") ?? -1, 150, "the requested case: 2:30 -> 150")
+    eq(parseDurationSeconds("1:05") ?? -1, 65, "1:05 -> 65")
+    eq(parseDurationSeconds("0:45") ?? -1, 45, "0:45 -> 45")
+    eq(parseDurationSeconds(":30") ?? -1, 30, "leading colon means 0 minutes")
+    eq(parseDurationSeconds("2:") ?? -1, 120, "trailing colon means 0 seconds")
+    eq(parseDurationSeconds(" 2:05 ") ?? -1, 125, "whitespace around a M:SS value trimmed")
+    eq(parseDurationSeconds("2:90") ?? -1, 210, "seconds aren't capped (m*60 + s)")
+    // Unparseable -> nil.
+    ok(parseDurationSeconds("") == nil, "empty is nil")
+    ok(parseDurationSeconds("abc") == nil, "non-numeric is nil")
+    ok(parseDurationSeconds("-5") == nil, "negative minutes rejected")
+    ok(parseDurationSeconds("2:-5") == nil, "negative seconds rejected")
+    ok(parseDurationSeconds("1:2:3") == nil, "two colons rejected")
+    ok(parseDurationSeconds("2:xx") == nil, "non-numeric seconds rejected")
+}
+
 // MARK: - Sessions: create / read
 
 section("startSession stamps original == planned and leaves it active") {

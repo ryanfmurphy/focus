@@ -813,9 +813,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         return chosen
     }
 
-    /// Editable "focus + minutes" modal. The field takes whole minutes but the
-    /// returned duration is in seconds (×60). Loops until valid; returns nil only
-    /// if `cancellable` and the user cancels.
+    /// Editable "focus + minutes" modal. The field takes whole minutes, or a
+    /// "M:SS" value (e.g. "2:30" → 150s) if a colon is present; the returned
+    /// duration is in seconds. Loops until valid; returns nil only if
+    /// `cancellable` and the user cancels.
     private func askFocusAndMinutes(title: String, info: String, confirm: String,
                                     cancellable: Bool) -> (focus: String, seconds: Int, openSeconds: Int)? {
         NSApp.activate(ignoringOtherApps: true)
@@ -855,8 +856,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             if cancellable && clicked == 1 { return nil }
 
             let answer = focusField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-            let minutes = Int(minutesField.stringValue.trimmingCharacters(in: .whitespaces)) ?? 0
-            if !answer.isEmpty && minutes > 0 { return (answer, minutes * 60, openSeconds()) }
+            let seconds = parseDurationSeconds(minutesField.stringValue) ?? 0
+            if !answer.isEmpty && seconds > 0 { return (answer, seconds, openSeconds()) }
             // otherwise invalid: loop and ask again
         }
     }
