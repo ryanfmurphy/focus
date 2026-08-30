@@ -89,16 +89,13 @@ clocks**: starting a subtask does NOT pause the parent — both count down at on
   intervals not in the chain are swept as orphans.
 - **Finish / Abandon a subtask** → pop to the parent (which keeps ticking), not the
   idle "what's next?" prompt.
-- **Pre-empt, two levels**:
-  - *Whole task* — "Switch focus now" suspends the **entire stack**, re-queues the
-    **root** to the front, starts a fresh unrelated focus.
-  - *Subtask only* — "Defer subtask" suspends just the **leaf** (re-queues it
-    carrying its `parent_task_id` + remaining), dropping back to the parent.
-  - **Resuming any queued task rebuilds its ancestor stack** via the same
-    `parent_task_id` walk. Wrinkle: resuming a lone subtask while its parent is
-    already the active task should **attach** it, not reconstruct a second copy.
-- **Queue**: subtasks are started ad-hoc; only *deferred* subtasks sit in the queue
-  (carrying the parent link). Rating lives on the child task.
+- **Pre-empt** — "Switch focus now" suspends the **entire stack**, re-queues the
+  **root** to the front, and starts a fresh focus (or one picked from the queue).
+  Resuming that root rebuilds its stack via the `parent_task_id` walk. *(Defer was
+  removed — there's no leaf-only set-aside; to drop a subtask you Complete/Abandon
+  it, or Switch the whole task.)*
+- **Queue**: subtasks are started ad-hoc and are not queued individually. Rating
+  lives on the child task.
 
 ### Implementation stages
 - [ ] **S1 — FocusCore reads**: `ancestorTasks(of:)` (the parent_task_id walk),
@@ -106,7 +103,7 @@ clocks**: starting a subtask does NOT pause the parent — both count down at on
 - [ ] **S2 — controller stack**: replace the single current task/interval with a
   stack; "Add subtask" push; tick renders multiple pills + parent overtime; pause
   freezes the stack; Complete/Abandon pop to parent.
-- [ ] **S3 — pre-empt/defer levels + resume rebuilds stack + restart stack walk.**
+- [ ] **S3 — whole-stack pre-empt (re-queue root) + resume/restart rebuild the stack via the walk.**
 - [ ] **S4 — History**: show subtasks nested/attributed under the parent (total
   incl. subtasks = the parent's own actual).
 

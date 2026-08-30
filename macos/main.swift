@@ -412,13 +412,26 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         let preempting = taskId != nil
         let title = preempting ? "Switch to a new focus" : "Set focus"
         let info = preempting
-            ? "This runs now; the current focus goes to the front of the queue."
+            ? "This runs now; the current focus goes to the front of the queue. Or pick one from the queue."
             : "What's your one focus right now, and for how long?"
 
         // Pre-empt is voluntary → cancellable (cancel leaves the current session
-        // untouched). Idle "Set focus" stays mandatory.
-        guard let (focus, seconds, openStart) = askFocusAndMinutes(
-            title: title, info: info, confirm: "Start", cancellable: preempting) else { return }
+        // untouched) and can pull from the queue. Idle "Set focus" stays mandatory.
+        let newFocus: String
+        let newSeconds: Int
+        var newOpenStart: Int? = nil
+        var resumeId: Int64? = nil
+        switch askFocusAndMinutes(title: title, info: info, confirm: "Start",
+                                  cancellable: preempting, queuePick: preempting) {
+        case .cancelled:
+            return
+        case .entered(let f, let s, let o):
+            newFocus = f; newSeconds = s; newOpenStart = o          // fresh ad-hoc task
+        case .queuePick:
+            guard let item = pickFromQueue() else { return }
+            db.removeFromQueue(id: item.id)
+            newFocus = item.focus; newSeconds = item.seconds; resumeId = item.taskId   // resume that task
+        }
 
         var preemptedInterval: Int64? = nil
         if preempting, let tid = taskId, let iid = intervalId, let curFocus = currentFocus {
@@ -431,8 +444,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             // remaining time — resuming it later just adds another interval.
             db.enqueueTask(focus: curFocus, estimateSeconds: remaining, taskId: tid, front: true)
         }
-        beginSession(reason: preempting ? "preempt" : "manual", seconds: seconds, focus: focus,
-                     openSecondsStart: openStart)
+        beginSession(reason: preempting ? "preempt" : "manual", seconds: newSeconds, focus: newFocus,
+                     resumeTaskId: resumeId, openSecondsStart: newOpenStart)
         if preempting { db.recordPreempt(preemptedSessionId: preemptedInterval, newSessionId: intervalId) }
     }
 
@@ -443,31 +456,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         guard !showing else { return }
         showing = true
         defer { showing = false }
-        guard let (focus, seconds, _) = askFocusAndMinutes(
+        guard case let .entered(focus, seconds, _) = askFocusAndMinutes(
             title: "Add to front",
             info: "This goes to the front of the queue — it runs before whatever's queued next.",
             confirm: "Add to front", cancellable: true) else { return }
         db.enqueueTask(focus: focus, estimateSeconds: seconds, front: true)
         db.recordPreempt(preemptedSessionId: nil, newSessionId: nil)
-    }
-
-    // Defer the current task "to be continued": mark it deferred (recording the
-    // elapsed time), append a fresh (continued) copy with the task's FULL original
-    // duration to the END of the queue, then advance to the next focus. Unlike
-    // pre-empt, it doesn't start a new focus now and re-queues the full time (at the
-    // back) rather than the remaining time (at the front).
-    @objc func deferTask() {
-        guard !showing, let tid = taskId, let iid = intervalId, let focus = currentFocus else { return }
-        showing = true
-        let elapsed = elapsedFocusSeconds()   // excludes pause time
-        let remaining = max(1, remainingSeconds())
-        finalizePause()
-        db.endInterval(id: iid, elapsedSeconds: elapsed)   // close this chunk; task stays in-progress
-        db.enqueueTask(focus: focus, estimateSeconds: remaining, taskId: tid, front: false)  // back of queue
-        clearSessionState()
-        hudWindow.orderOut(nil)
-        showing = false
-        promptForFocus(reason: "after-session")
     }
 
     // Toggle the floating corner pill on/off (persisted). The menu-bar icon and
@@ -596,7 +590,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     // they do nothing while another prompt is already up — disabled in that case.
     private static let showingBlockedActions: Set<Selector> = [
         #selector(addNextFocus), #selector(completeTask), #selector(abortTask),
-        #selector(addTimeToCurrent), #selector(deferTask), #selector(changeFocus),
+        #selector(addTimeToCurrent), #selector(changeFocus),
         #selector(renameTask), #selector(togglePause), #selector(preemptNextFocus),
         #selector(clearQueue), #selector(rateUnrated), #selector(showSettings),
         #selector(deleteHistoryItems), #selector(abandonHistoryTask),
@@ -609,9 +603,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         if showing, let action = menuItem.action, Self.showingBlockedActions.contains(action) {
             return false
         }
-        // Complete / Abort / Defer / Rename / Add time act on a running session.
+        // Complete / Abort / Rename / Add time act on a running session.
         if menuItem.action == #selector(completeTask) || menuItem.action == #selector(abortTask)
-            || menuItem.action == #selector(addTimeToCurrent) || menuItem.action == #selector(deferTask)
+            || menuItem.action == #selector(addTimeToCurrent)
             || menuItem.action == #selector(renameTask) {
             return currentFocus != nil
         }
@@ -670,7 +664,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         guard !showing else { return }
         showing = true
         defer { showing = false }
-        if let (focus, seconds, _) = askFocusAndMinutes(
+        if case let .entered(focus, seconds, _) = askFocusAndMinutes(
             title: "Add next focus",
             info: "Queue a focus to run after the current one.",
             confirm: "Add to queue", cancellable: true) {
@@ -695,7 +689,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             return
         }
 
-        guard let (answer, seconds, openStart) = askFocusAndMinutes(
+        guard case let .entered(answer, seconds, openStart) = askFocusAndMinutes(
             title: "Welcome back",
             info: "What's your one focus right now, and for how long?",
             confirm: "Start", cancellable: false) else { return }
@@ -758,7 +752,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         if response == 1 {
             // Pre-empt with new: leave the queued item where it is (still the front,
             // since we never removed it) and run an ad-hoc focus right now instead.
-            if let (focus, seconds, openStart) = askFocusAndMinutes(
+            if case let .entered(focus, seconds, openStart) = askFocusAndMinutes(
                 title: "Start a different focus",
                 info: "This runs now; the queued focus stays next in line.",
                 confirm: "Start", cancellable: true) {
@@ -834,12 +828,18 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         return chosen
     }
 
+    private enum FocusEntry {
+        case entered(focus: String, seconds: Int, openSeconds: Int)
+        case queuePick            // user chose to pick an existing queued focus instead
+        case cancelled
+    }
+
     /// Editable "focus + minutes" modal. The field takes whole minutes, or a
     /// "M:SS" value (e.g. "2:30" → 150s) if a colon is present; the returned
-    /// duration is in seconds. Loops until valid; returns nil only if
-    /// `cancellable` and the user cancels.
+    /// duration is in seconds. Loops until valid. With `queuePick` (and a non-empty
+    /// queue) it also offers a "Pick from queue…" button → `.queuePick`.
     private func askFocusAndMinutes(title: String, info: String, confirm: String,
-                                    cancellable: Bool) -> (focus: String, seconds: Int, openSeconds: Int)? {
+                                    cancellable: Bool, queuePick: Bool = false) -> FocusEntry {
         NSApp.activate(ignoringOtherApps: true)
 
         let focusField = NSTextField(frame: NSRect(x: 0, y: 34, width: 320, height: 24))
@@ -864,21 +864,25 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         let (elapsedTimer, openSeconds, _) = startElapsedTimer(elapsed)
         defer { elapsedTimer.invalidate() }
 
+        let showQueueButton = queuePick && db.queueCount() > 0
         while true {
             let alert = makeAlert()
             alert.messageText = title
             alert.informativeText = info
             alert.addButton(withTitle: confirm)             // index 0
-            if cancellable { alert.addButton(withTitle: "Cancel") }   // index 1
+            var queueIndex = -1, cancelIndex = -1
+            if showQueueButton { alert.addButton(withTitle: "Pick from queue…"); queueIndex = alert.buttons.count - 1 }
+            if cancellable { alert.addButton(withTitle: "Cancel"); cancelIndex = alert.buttons.count - 1 }
             alert.accessoryView = accessory
             // Non-app-modal so the 🎯 menu stays usable while the prompt is up.
             let clicked = runFloatingAlert(alert, firstResponder: focusField)
 
-            if cancellable && clicked == 1 { return nil }
+            if clicked == cancelIndex { return .cancelled }
+            if clicked == queueIndex { return .queuePick }
 
             let answer = focusField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
             let seconds = parseDurationSeconds(minutesField.stringValue) ?? 0
-            if !answer.isEmpty && seconds > 0 { return (answer, seconds, openSeconds()) }
+            if !answer.isEmpty && seconds > 0 { return .entered(focus: answer, seconds: seconds, openSeconds: openSeconds()) }
             // otherwise invalid: loop and ask again
         }
     }
@@ -1860,7 +1864,6 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         menu.addItem(withTitle: "Pause", action: #selector(togglePause), keyEquivalent: "")
         menu.addItem(withTitle: "Add time", action: #selector(addTimeToCurrent), keyEquivalent: "")
         menu.addItem(withTitle: "Rename task", action: #selector(renameTask), keyEquivalent: "")
-        menu.addItem(withTitle: "Defer task", action: #selector(deferTask), keyEquivalent: "")
         menu.addItem(withTitle: "Abort task", action: #selector(abortTask), keyEquivalent: "")
         menu.addItem(withTitle: "Switch focus now", action: #selector(changeFocus), keyEquivalent: "")
         menu.addItem(.separator())

@@ -117,9 +117,8 @@ based on state):
 | **Pause** / **Resume** | session active | Freeze the countdown (pill shows ⏸ … paused) and resume it later; the deadline shifts forward so no time is lost, and paused time is excluded from a session's recorded duration |
 | **Add time** | session active | Add N minutes to the running session (same as "Add time" at time's up) |
 | **Rename task** | session active | Rename the current focus via a small prompt (updates the pill and the session's `focus`) |
-| **Defer task** | session active | Mark the current one **deferred** ("to be continued") and append a fresh "… (continued)" copy — with its **full original duration** — to the **back** of the queue, then advance to the next focus |
 | **Abort task** | session active | Rate it, mark interrupted (records elapsed time), advance |
-| **Switch focus now** | session active | Interrupt the current one (its remaining time is re-queued to the front as "… (continued)") and start a new focus now |
+| **Switch focus now** | session active | Re-queue the current task (its remaining time) to the front and start a new focus now — or pick an existing one from the queue |
 | **Set focus** | idle | Start an ad-hoc focus (same item as Switch focus now, relabeled) |
 | *— the queue —* | | |
 | **Add to queue** | always | Append a focus to the end of the queue |
