@@ -1405,6 +1405,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
 
     private func configureHistoryColumns() {
         guard let outline = historyOutline else { return }
+        outline.outlineTableColumn = nil   // else the current outline column survives removeTableColumn
         for col in outline.tableColumns { outline.removeTableColumn(col) }
         var first: NSTableColumn?
         func add(_ id: String, _ title: String, width: CGFloat, min: CGFloat, align: NSTextAlignment = .left) {
