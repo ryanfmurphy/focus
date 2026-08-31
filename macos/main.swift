@@ -1046,7 +1046,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     /// Show a "See Queue"-style picker (in a floating modal) of all queued focuses,
     /// with the same Est. start/finish schedule. Returns the one the user clicks,
     /// or nil if they cancel.
-    private func pickFromQueue(filter: ((QueueItem) -> Bool)? = nil) -> QueueItem? {
+    private func pickFromQueue(filter: ((QueueItem) -> Bool)? = nil, showParentChain: Bool = true) -> QueueItem? {
         let items = filter.map { f in db.queueItems().filter(f) } ?? db.queueItems()
         guard !items.isEmpty else { return nil }
 
@@ -1063,7 +1063,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
                                      duration: mmss(item.seconds),
                                      start: localClockFormatter.string(from: start),
                                      finish: localClockFormatter.string(from: finish),
-                                     focusDisplay: queueDisplayName(item)))
+                                     focusDisplay: showParentChain ? queueDisplayName(item) : item.focus))
         }
 
         var chosen: QueueItem?
@@ -1228,7 +1228,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         guard !showing, let leaf = taskId else { return }
         showing = true
         defer { showing = false }
-        guard let item = pickFromQueue(filter: { $0.taskId.flatMap { self.db.task(id: $0)?.parentTaskId } == leaf }) else { return }
+        // All candidates are subtasks of THIS task, so skip the redundant parent prefix.
+        guard let item = pickFromQueue(filter: { $0.taskId.flatMap { self.db.task(id: $0)?.parentTaskId } == leaf },
+                                       showParentChain: false) else { return }
         db.removeFromQueue(id: item.id)
         resumeStackIfPaused()
         startSubtaskUnderLeaf(reason: "subtask", seconds: item.seconds, focus: item.focus,
