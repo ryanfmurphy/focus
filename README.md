@@ -116,12 +116,14 @@ based on state):
 | **Complete task** | session active | Mark completed, rate 1–10, record the elapsed time as its duration (Original Duration is kept), advance to the next focus |
 | **Pause** / **Resume** | session active | Freeze the countdown (pill shows ⏸ … paused) and resume it later; the deadline shifts forward so no time is lost, and paused time is excluded from a session's recorded duration |
 | **Add time** | session active | Add N minutes to the running task (the parent, and any ancestors, auto-extend to keep covering it) |
-| **Add subtask** | session active | Start a concurrent subtask under the current task; both count down (parent keeps ticking), shown as stacked pills. Longer subtasks auto-extend the parent so they finish together |
 | **Rename task** | session active | Rename the current focus via a small prompt (updates the pill and the task's `focus`) |
 | **Abort task** | session active | Rate it, mark interrupted (records elapsed time); pop to the parent if it's a subtask, else advance |
 | **Stop working** | session active | Suspend the task (re-queued to the front, resumable) and go idle — or, for a subtask, drop to the still-ticking parent. No rating |
 | **Switch focus now** | session active | Suspend the current task and start a new focus (or pick one from the queue). Inside a subtask, a checkbox switches *just this subtask* (keeping the parent running) vs the whole task |
 | **Set focus** | idle | Start an ad-hoc focus (same item as Switch focus now, relabeled) |
+| *— subtasks (of the current task) —* | | |
+| **Add subtask** | session active | Start a **new** concurrent subtask under the current task; both count down (parent keeps ticking), shown as stacked pills. Longer subtasks auto-extend the parent so they finish together |
+| **Switch to subtask…** | set-aside subtask exists | Resume an **existing** set-aside subtask of the current task (pick it from the queue) under the still-ticking current task |
 | *— the queue —* | | |
 | **Add to queue** | always | Append a focus to the end of the queue |
 | **Add to front** | always | Add a new focus to the **front** of the queue (jumps ahead of whatever's queued next) without disturbing the running session; also logs a pre-empt |

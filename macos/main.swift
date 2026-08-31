@@ -790,7 +790,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     private static let showingBlockedActions: Set<Selector> = [
         #selector(addNextFocus), #selector(completeTask), #selector(abortTask),
         #selector(addTimeToCurrent), #selector(changeFocus), #selector(addSubtask),
-        #selector(stopWorking), #selector(renameTask), #selector(togglePause), #selector(preemptNextFocus),
+        #selector(stopWorking), #selector(switchToSubtask), #selector(renameTask), #selector(togglePause), #selector(preemptNextFocus),
         #selector(clearQueue), #selector(rateUnrated), #selector(showSettings),
         #selector(deleteHistoryItems), #selector(abandonHistoryTask),
     ]
@@ -801,6 +801,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         // (See history / See queue / Show current task / Quit still work.)
         if showing, let action = menuItem.action, Self.showingBlockedActions.contains(action) {
             return false
+        }
+        // "Switch to subtask" needs a running task AND at least one set-aside subtask
+        // of it waiting in the queue.
+        if menuItem.action == #selector(switchToSubtask) {
+            guard let leaf = taskId else { return false }
+            return db.queueItems().contains { $0.taskId.flatMap { db.task(id: $0)?.parentTaskId } == leaf }
         }
         // Complete / Abort / Stop / Rename / Add time / Add subtask act on a running session.
         if menuItem.action == #selector(completeTask) || menuItem.action == #selector(abortTask)
@@ -1157,6 +1163,20 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         _ = parent
         startSubtaskUnderLeaf(reason: "subtask", seconds: seconds, focus: focus,
                               resumeId: nil, openStart: openStart)
+    }
+
+    // Resume an existing set-aside subtask of the current task: pick one from the
+    // queue (filtered to children of the current leaf) and run it under the current
+    // task, which keeps ticking. The counterpart of Add subtask — existing vs new.
+    @objc func switchToSubtask() {
+        guard !showing, let leaf = taskId else { return }
+        showing = true
+        defer { showing = false }
+        guard let item = pickFromQueue(filter: { $0.taskId.flatMap { self.db.task(id: $0)?.parentTaskId } == leaf }) else { return }
+        db.removeFromQueue(id: item.id)
+        resumeStackIfPaused()
+        startSubtaskUnderLeaf(reason: "subtask", seconds: item.seconds, focus: item.focus,
+                              resumeId: item.taskId, openStart: nil)
     }
 
     // ---- history ----
@@ -2117,11 +2137,14 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         menu.addItem(withTitle: "Complete task", action: #selector(completeTask), keyEquivalent: "")
         menu.addItem(withTitle: "Pause", action: #selector(togglePause), keyEquivalent: "")
         menu.addItem(withTitle: "Add time", action: #selector(addTimeToCurrent), keyEquivalent: "")
-        menu.addItem(withTitle: "Add subtask", action: #selector(addSubtask), keyEquivalent: "")
         menu.addItem(withTitle: "Rename task", action: #selector(renameTask), keyEquivalent: "")
         menu.addItem(withTitle: "Abort task", action: #selector(abortTask), keyEquivalent: "")
         menu.addItem(withTitle: "Stop working", action: #selector(stopWorking), keyEquivalent: "")
         menu.addItem(withTitle: "Switch focus now", action: #selector(changeFocus), keyEquivalent: "")
+        menu.addItem(.separator())
+        // Subtasks (of the current task).
+        menu.addItem(withTitle: "Add subtask", action: #selector(addSubtask), keyEquivalent: "")
+        menu.addItem(withTitle: "Switch to subtask…", action: #selector(switchToSubtask), keyEquivalent: "")
         menu.addItem(.separator())
         // The queue.
         menu.addItem(withTitle: "Add to queue", action: #selector(addNextFocus), keyEquivalent: "")
