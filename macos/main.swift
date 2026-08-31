@@ -337,6 +337,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     private var historyNodes: [HistoryNode] = []          // root nodes shown in the outline
     private enum HistoryMode { case tasks, intervals }
     private var historyMode: HistoryMode = .tasks
+    private var showIntervalsInTree = false               // Tasks mode: nest each task's intervals as children
     private var queueWindow: NSWindow?
     private var queueTable: NSTableView?
     private var queueRows: [QueueItem] = []
@@ -1256,6 +1257,13 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             toggle.frame = NSRect(x: 12, y: container.bounds.height - 32, width: 220, height: 24)
             toggle.autoresizingMask = [.minYMargin, .maxXMargin]   // pin to top-left
 
+            // Tasks mode only: nest each task's intervals as children of the task.
+            let ivCheck = NSButton(checkboxWithTitle: "Show intervals", target: self,
+                                   action: #selector(historyIntervalsToggled(_:)))
+            ivCheck.state = showIntervalsInTree ? .on : .off
+            ivCheck.frame = NSRect(x: 244, y: container.bounds.height - 30, width: 140, height: 20)
+            ivCheck.autoresizingMask = [.minYMargin, .maxXMargin]
+
             let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: container.bounds.width,
                                                     height: container.bounds.height - 40))
             scroll.autoresizingMask = [.width, .height]
@@ -1286,6 +1294,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             scroll.documentView = outline
             container.addSubview(scroll)
             container.addSubview(toggle)
+            container.addSubview(ivCheck)
             window.contentView = container
 
             historyWindow = window
@@ -1299,6 +1308,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
 
     @objc private func historyModeChanged(_ sender: NSSegmentedControl) {
         historyMode = sender.selectedSegment == 1 ? .intervals : .tasks
+        reloadHistory()
+    }
+
+    @objc private func historyIntervalsToggled(_ sender: NSButton) {
+        showIntervalsInTree = sender.state == .on
         reloadHistory()
     }
 
@@ -1332,6 +1346,15 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         case .tasks:
             var byId: [Int64: HistoryNode] = [:]
             for r in historyRows { byId[r.id] = HistoryNode(task: r) }
+            // Optionally attach each task's own intervals as child rows.
+            if showIntervalsInTree {
+                var ivsByTask: [Int64: [IntervalHistoryRow]] = [:]
+                for iv in db.intervalHistory() { ivsByTask[iv.taskId, default: []].append(iv) }
+                for (tid, node) in byId {
+                    for iv in ivsByTask[tid] ?? [] { node.children.append(HistoryNode(interval: iv)) }
+                }
+            }
+            // Nest subtasks under their parent (alongside any interval children).
             var roots: [HistoryNode] = []
             for r in historyRows {
                 let node = byId[r.id]!
@@ -1348,20 +1371,28 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
                               : ["when", "dur", "rating", "reason", "task"]
     }
 
-    // Sort every level of the node tree by the outline's current sort descriptor.
+    // Sort the tree: top-level tasks by the clicked column; a task's children
+    // (subtasks + any intervals) chronologically by start, so each task reads like a
+    // timeline. Without intervals shown, children are subtasks and follow the column.
     private func applyHistorySort() {
         guard let d = historyOutline?.sortDescriptors.first, let key = d.key else { return }
-        sortHistoryNodes(&historyNodes, key: key, ascending: d.ascending)
+        sortHistoryNodes(&historyNodes, key: key, ascending: d.ascending, top: true)
     }
 
-    private func sortHistoryNodes(_ nodes: inout [HistoryNode], key: String, ascending: Bool) {
-        nodes.sort { a, b in
-            if let ta = a.task, let tb = b.task { return taskLess(ta, tb, key: key, ascending: ascending) }
-            if let ia = a.interval, let ib = b.interval { return intervalLess(ia, ib, key: key, ascending: ascending) }
-            return false
+    private func sortHistoryNodes(_ nodes: inout [HistoryNode], key: String, ascending: Bool, top: Bool) {
+        if !top && showIntervalsInTree {
+            nodes.sort { nodeStart($0) < nodeStart($1) }   // interleave subtasks + intervals, oldest first
+        } else {
+            nodes.sort { a, b in
+                if let ta = a.task, let tb = b.task { return taskLess(ta, tb, key: key, ascending: ascending) }
+                if let ia = a.interval, let ib = b.interval { return intervalLess(ia, ib, key: key, ascending: ascending) }
+                return false
+            }
         }
-        for n in nodes { sortHistoryNodes(&n.children, key: key, ascending: ascending) }
+        for node in nodes { sortHistoryNodes(&node.children, key: key, ascending: ascending, top: false) }
     }
+
+    private func nodeStart(_ n: HistoryNode) -> String { n.task?.startedAt ?? n.interval?.startedAt ?? "" }
 
     func outlineView(_ outlineView: NSOutlineView, sortDescriptorsDidChange oldDescriptors: [NSSortDescriptor]) {
         applyHistorySort()
@@ -1498,28 +1529,32 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         let nodes = historyTargetNodes()
         guard !nodes.isEmpty else { return }
         let n = nodes.count
-        let noun = historyMode == .intervals ? "interval" : "task"
+        // In Tasks mode the selection can now include interval child rows.
+        let allTasks = nodes.allSatisfy { $0.task != nil }
+        let allIntervals = nodes.allSatisfy { $0.interval != nil }
+        let noun = allIntervals ? "interval" : (allTasks ? "task" : "item")
 
         showing = true
         defer { showing = false }
         let alert = makeAlert()
         alert.messageText = "Delete \(n) \(noun)\(n == 1 ? "" : "s")?"
-        alert.informativeText = historyMode == .intervals
+        alert.informativeText = allIntervals
             ? "This permanently removes \(n == 1 ? "this interval" : "these intervals") — the parent task's totals shrink. This can't be undone."
-            : "This permanently removes \(n == 1 ? "this task" : "these tasks") — and any subtasks and intervals — from history. This can't be undone."
+            : "This permanently removes the selected \(noun)\(n == 1 ? "" : "s") — tasks take their subtasks and intervals with them. This can't be undone."
         alert.addButton(withTitle: "Delete")   // .alertFirstButtonReturn
         alert.addButton(withTitle: "Cancel")
         alert.window.level = .floating
         alert.window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         guard alert.runModal() == .alertFirstButtonReturn else { return }
 
-        if historyMode == .intervals {
-            db.deleteIntervals(ids: nodes.compactMap { $0.interval?.id })
-        } else {
-            var ids: Set<Int64> = []
-            for node in nodes { collectSubtreeTaskIds(node, into: &ids) }   // task + its whole subtree
-            db.deleteTasks(ids: Array(ids))
+        var taskIds: Set<Int64> = []
+        var ivIds: [Int64] = []
+        for node in nodes {
+            if node.task != nil { collectSubtreeTaskIds(node, into: &taskIds) }
+            else if let iv = node.interval { ivIds.append(iv.id) }
         }
+        if !ivIds.isEmpty { db.deleteIntervals(ids: ivIds) }
+        if !taskIds.isEmpty { db.deleteTasks(ids: Array(taskIds)) }
         reloadHistory()
     }
 
@@ -1718,11 +1753,33 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     }
     func outlineView(_ outlineView: NSOutlineView, viewFor tableColumn: NSTableColumn?, item: Any) -> NSView? {
         guard let node = item as? HistoryNode, let id = tableColumn?.identifier.rawValue else { return nil }
-        let cell: (text: String, align: NSTextAlignment)
-        if let t = node.task { cell = taskCellText(t, id) }
-        else if let iv = node.interval { cell = intervalCellText(iv, id) }
-        else { return nil }
-        return historyCell(outlineView, id: id, text: cell.text, align: cell.align)
+        if let t = node.task {
+            let c = taskCellText(t, id)
+            return historyCell(outlineView, id: id, text: c.0, align: c.1)
+        }
+        if let iv = node.interval {
+            // In Tasks mode an interval is a dim child row rendered in the task columns.
+            if historyMode == .tasks {
+                let c = intervalInTaskColumns(iv, id)
+                return historyCell(outlineView, id: id, text: c.0, align: c.1, color: .secondaryLabelColor)
+            }
+            let c = intervalCellText(iv, id)
+            return historyCell(outlineView, id: id, text: c.0, align: c.1)
+        }
+        return nil
+    }
+
+    // An interval rendered under its task (Tasks mode): reason label + start/end/
+    // duration/rating; the task-only columns are blank.
+    private func intervalInTaskColumns(_ r: IntervalHistoryRow, _ id: String) -> (String, NSTextAlignment) {
+        switch id {
+        case "focus":  return ("· \(r.reason ?? "interval")", .left)
+        case "when":   return (whenLabel(r.startedAt), .left)
+        case "ended":  return (r.endedAt.map(whenLabel) ?? "—", .left)
+        case "min":    return (mmss(r.seconds), .right)
+        case "rating": return (r.rating.map { "\($0)/10" } ?? "—", .right)
+        default:       return ("", .left)
+        }
     }
 
     private func taskCellText(_ r: TaskHistoryRow, _ id: String) -> (String, NSTextAlignment) {
@@ -1814,7 +1871,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     }
 
     private func historyCell(_ table: NSTableView, id: String, text: String,
-                             align: NSTextAlignment) -> NSTableCellView {
+                             align: NSTextAlignment, color: NSColor = .labelColor) -> NSTableCellView {
         let identifier = NSUserInterfaceItemIdentifier(id)
         let cell: NSTableCellView
         if let reused = table.makeView(withIdentifier: identifier, owner: self) as? NSTableCellView {
@@ -1836,6 +1893,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         }
         cell.textField?.stringValue = text
         cell.textField?.alignment = align
+        cell.textField?.textColor = color   // reset every time — cells are reused across dim/normal rows
         return cell
     }
 
