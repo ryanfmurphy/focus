@@ -242,7 +242,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         guard let tid = taskId, let iid = intervalId, let focus = currentFocus else { return }
         let remaining = max(1, remainingSeconds())
         let elapsed = elapsedFocusSeconds()
-        finalizePause()
+        resumeStackIfPaused()
         db.endInterval(id: iid, elapsedSeconds: elapsed)
         let now = Date()
         for f in ancestors {
@@ -262,7 +262,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         guard !ancestors.isEmpty, let tid = taskId, let iid = intervalId, let focus = currentFocus else { return false }
         let remaining = max(1, remainingSeconds())
         let elapsed = elapsedFocusSeconds()
-        finalizePause()
+        resumeStackIfPaused()
         db.endInterval(id: iid, elapsedSeconds: elapsed)
         db.enqueueTask(focus: focus, estimateSeconds: remaining, taskId: tid, front: true)
         popAncestorToLeaf()          // parent becomes the leaf and keeps ticking
@@ -656,17 +656,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     // ---- pause / resume ----
     @objc func togglePause() {
         guard !showing, let id = intervalId else { return }
-        if let p = pausedAt {
-            // Resume: shift every level's deadline forward by the pause (remaining is
-            // preserved) and close each level's pause record. The whole stack resumes.
-            let paused = max(0, Int(Date().timeIntervalSince(p).rounded()))
-            deadline = deadline?.addingTimeInterval(Double(paused))
-            db.endPause(sessionId: id, seconds: paused)
-            for i in ancestors.indices {
-                ancestors[i].deadline = ancestors[i].deadline.addingTimeInterval(Double(paused))
-                db.endPause(sessionId: ancestors[i].intervalId, seconds: paused)
-            }
-            pausedAt = nil
+        if pausedAt != nil {
+            resumeStackIfPaused()   // shift every level's deadline, close each pause row
         } else {
             // Pause: freeze the whole stack. tick() stops all countdowns while paused.
             pausedAt = Date()
@@ -691,10 +682,21 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         return Int(dl.timeIntervalSince(pausedAt ?? Date()).rounded())
     }
 
-    /// Close any open pause when a session ends, so the record isn't left dangling.
-    private func finalizePause() {
-        guard let id = intervalId, let p = pausedAt else { return }
-        db.endPause(sessionId: id, seconds: max(0, Int(Date().timeIntervalSince(p).rounded())))
+    /// If the stack is paused, resume the WHOLE stack: shift every level's deadline
+    /// forward by the pause and close every level's pause row. Called before any action
+    /// taken mid-pause (end paths, suspend, add subtask) so nothing is left dangling and
+    /// no level's time is mis-counted. No-op when running.
+    private func resumeStackIfPaused() {
+        guard let p = pausedAt else { return }
+        let paused = max(0, Int(Date().timeIntervalSince(p).rounded()))
+        if let id = intervalId {
+            deadline = deadline?.addingTimeInterval(Double(paused))
+            db.endPause(sessionId: id, seconds: paused)
+        }
+        for i in ancestors.indices {
+            ancestors[i].deadline = ancestors[i].deadline.addingTimeInterval(Double(paused))
+            db.endPause(sessionId: ancestors[i].intervalId, seconds: paused)
+        }
         pausedAt = nil
     }
 
@@ -732,7 +734,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         guard !showing, let tid = taskId, let iid = intervalId, let focus = currentFocus else { return }
         showing = true
         let elapsed = elapsedFocusSeconds()   // excludes pause time
-        finalizePause()
+        resumeStackIfPaused()
         // Return to the parent now (it keeps ticking, shown behind the rating); if
         // there's no parent, clear the leaf so the pill hides during the prompt.
         let hadParent = popAncestorToLeaf()
@@ -1149,6 +1151,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             title: "Add subtask",
             info: "Runs under the current task. If it's longer than the parent's remaining time, the parent is auto-extended so they finish together.",
             confirm: "Start", cancellable: true) else { return }
+        resumeStackIfPaused()   // if paused, cleanly resume the stack before pushing
         // Push the parent and start the fresh subtask under it (auto-extends ancestors
         // to cover it, so they finish together).
         _ = parent
@@ -1440,7 +1443,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     private func abandon(taskId tid: Int64) {
         if taskId == tid {
             // It's the currently-running task — stop it too (close interval, clear pill).
-            finalizePause()
+            resumeStackIfPaused()
             if let iid = intervalId { db.endInterval(id: iid, elapsedSeconds: elapsedFocusSeconds()) }
             clearSessionState()
             hudWindow.orderOut(nil)
@@ -1887,7 +1890,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         if autoProceedEnabled {
             let tid = taskId, iid = intervalId
             let elapsed = elapsedFocusSeconds()
-            finalizePause()
+            resumeStackIfPaused()
             let hadParent = popAncestorToLeaf()
             if !hadParent { clearSessionState() }
             if let iid = iid { db.endInterval(id: iid, elapsedSeconds: elapsed) }
@@ -1908,7 +1911,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         case .rate(let rating, let note, let openSeconds, let applyTime):
             let tid = taskId, iid = intervalId
             let elapsed = elapsedFocusSeconds()
-            finalizePause()
+            resumeStackIfPaused()
             let hadParent = popAncestorToLeaf()
             if !hadParent { clearSessionState() }
             if let iid = iid {
@@ -1995,7 +1998,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     private func rateAndComplete() -> Bool {
         guard let tid = taskId, let iid = intervalId, let focus = currentFocus else { return false }
         let elapsed = elapsedFocusSeconds()   // excludes pause time
-        finalizePause()
+        resumeStackIfPaused()
         let hadParent = popAncestorToLeaf()
         if !hadParent { clearSessionState() }
         hudWindow.orderOut(nil)
