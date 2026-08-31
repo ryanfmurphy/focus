@@ -217,6 +217,24 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         return true
     }
 
+    /// Keep every ancestor's remaining ≥ the leaf's, extending (working estimate only)
+    /// any that fall short — so no ancestor overtimes while a descendant still runs.
+    /// Called after the leaf's countdown grows (new subtask, or Add time). Cascades up
+    /// the whole chain, so deeper nesting stays consistent too.
+    private func extendAncestorsToCoverLeaf() {
+        let leafRemaining = remainingSeconds()          // frozen if paused
+        guard leafRemaining > 0 else { return }
+        let ref = pausedAt ?? Date()
+        for i in ancestors.indices {
+            let anRemaining = Int(ancestors[i].deadline.timeIntervalSince(ref).rounded())
+            if anRemaining < leafRemaining {
+                let extra = leafRemaining - anRemaining
+                db.addTimeToTask(id: ancestors[i].taskId, seconds: extra)   // working estimate only
+                ancestors[i].deadline = ancestors[i].deadline.addingTimeInterval(Double(extra))
+            }
+        }
+    }
+
     /// Wall-time of an interval row from its start to now — for closing orphan/
     /// abandoned intervals during restart.
     private func intervalElapsed(_ iv: Interval) -> Int {
@@ -538,7 +556,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         guard !showing, taskId != nil else { return }
         showing = true
         defer { showing = false }
-        if let extra = askMinutes() { extendSession(by: extra) }
+        if let extra = askMinutes() { extendSession(by: extra); extendAncestorsToCoverLeaf() }
     }
 
     // Rename the running task's focus (a small prompt pre-filled with the current name).
@@ -1002,15 +1020,13 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             title: "Add subtask",
             info: "Runs under the current task. If it's longer than the parent's remaining time, the parent is auto-extended so they finish together.",
             confirm: "Start", cancellable: true) else { return }
-        // Auto-extend the parent so a longer subtask doesn't push it into overtime —
-        // they end together. Grows the parent's WORKING estimate only (original is
-        // preserved for calibration).
-        let parentRemaining = max(0, remainingSeconds())
-        if seconds > parentRemaining { extendSession(by: seconds - parentRemaining) }
-        guard let frame = leafFrame() else { return }   // capture the (extended) parent
+        guard let frame = leafFrame() else { return }
         ancestors.append(frame)
         beginSession(reason: "subtask", seconds: seconds, focus: focus,
                      parentTaskId: parent, openSecondsStart: openStart)
+        // Auto-extend ancestors so a longer subtask doesn't push them into overtime —
+        // they finish together. Grows working estimates only (originals preserved).
+        extendAncestorsToCoverLeaf()
     }
 
     // ---- history ----
@@ -1759,6 +1775,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             // Keep the SAME session going. The popup-open time was already accounted
             // (to duration or end, per the checkbox) inside promptTimeUp — just extend.
             extendSession(by: added)
+            extendAncestorsToCoverLeaf()   // keep ancestors covering the extended leaf
             showing = false
 
         case .rate(let rating, let note, let openSeconds, let applyTime):
