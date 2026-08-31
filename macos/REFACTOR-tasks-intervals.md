@@ -93,11 +93,12 @@ clocks**: starting a subtask does NOT pause the parent — both count down at on
   intervals not in the chain are swept as orphans.
 - **Finish / Abandon a subtask** → pop to the parent (which keeps ticking), not the
   idle "what's next?" prompt.
-- **Pre-empt** — "Switch focus now" suspends the **entire stack**, re-queues the
-  **root** to the front, and starts a fresh focus (or one picked from the queue).
-  Resuming that root rebuilds its stack via the `parent_task_id` walk. *(Defer was
-  removed — there's no leaf-only set-aside; to drop a subtask you Complete/Abandon
-  it, or Switch the whole task.)*
+- **Pre-empt** — "Switch focus now" suspends the **entire stack** (closes every
+  level's interval), re-queues the **leaf** to the front, and starts a fresh focus
+  (or one picked from the queue). Re-queuing the *leaf* (not the root) is what lets
+  resume rebuild the whole stack via the `parent_task_id` walk (which goes *up*).
+  *(Defer was removed — there's no leaf-only set-aside; to drop a subtask you
+  Complete/Abandon it, or Switch the whole task.)*
 - **Queue**: subtasks are started ad-hoc and are not queued individually. Rating
   lives on the child task.
 
@@ -114,7 +115,12 @@ clocks**: starting a subtask does NOT pause the parent — both count down at on
   (single task keeps the Resume prompt; a subtask stack auto-adopts). Switch-during-
   subtask is disabled (S3). *Known edges: add-subtask-while-paused; abort-while-
   paused-with-stack.*
-- [ ] **S3 — whole-stack pre-empt (re-queue root) + resume/restart rebuild the stack via the walk.**
+- [x] **S3 — whole-stack pre-empt + stack-rebuilding resume** (needs live testing).
+  "Switch focus now" is re-enabled inside a subtask: it closes every level's
+  interval, re-queues the leaf, and starts the new focus. `beginSession(resumeTaskId:)`
+  now rebuilds the ancestor stack (reopens each ancestor as a running frame via the
+  `parent_task_id` walk), so resuming a suspended stack from the queue restores the
+  whole thing ticking. Restart already rebuilt from open intervals (S2).
 - [ ] **S4 — History**: show subtasks nested/attributed under the parent (total
   incl. subtasks = the parent's own actual).
 

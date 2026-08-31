@@ -515,12 +515,20 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         var preemptedInterval: Int64? = nil
         if preempting, let tid = taskId, let iid = intervalId, let curFocus = currentFocus {
             preemptedInterval = iid
-            let remaining = max(1, remainingSeconds())        // frozen if paused
+            let remaining = max(1, remainingSeconds())        // leaf remaining, frozen if paused
             let elapsed = elapsedFocusSeconds()               // excludes pause time
             finalizePause()
-            db.endInterval(id: iid, elapsedSeconds: elapsed)  // close the current chunk
-            // Re-queue the SAME task (still in-progress) to the FRONT with its
-            // remaining time — resuming it later just adds another interval.
+            db.endInterval(id: iid, elapsedSeconds: elapsed)  // close the leaf chunk
+            // Suspend the WHOLE stack: close every ancestor's interval too (each records
+            // its own elapsed), then re-queue the LEAF to the front. Resuming it rebuilds
+            // the whole stack via the parent_task_id walk.
+            let now = Date()
+            for f in ancestors {
+                db.closeOpenPause(sessionId: f.intervalId)   // tidy any open pause on this level
+                let anElapsed = max(0, Int(now.timeIntervalSince(f.intervalStart).rounded()) - db.totalPausedSeconds(sessionId: f.intervalId))
+                db.endInterval(id: f.intervalId, elapsedSeconds: anElapsed)
+            }
+            ancestors.removeAll()
             db.enqueueTask(focus: curFocus, estimateSeconds: remaining, taskId: tid, front: true)
         }
         beginSession(reason: preempting ? "preempt" : "manual", seconds: newSeconds, focus: newFocus,
@@ -715,8 +723,6 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         }
         if menuItem.action == #selector(changeFocus) {
             menuItem.title = currentFocus != nil ? "Switch focus now" : "Set focus"
-            // Whole-stack switch while inside a subtask is S3 — disable it for now.
-            if currentFocus != nil && !ancestors.isEmpty { return false }
         }
         if menuItem.action == #selector(showHistory) {
             menuItem.title = "See history (\(db.taskCount()))"
@@ -990,6 +996,18 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         intervalStart = Date()
         pausedAt = nil
         if let tid = resumeTaskId, let t = db.task(id: tid) {
+            // Whole-stack resume: rebuild the ancestor stack (root-first), reopening
+            // each ancestor as a running frame with a fresh interval. Empty for a
+            // top-level task, so a plain resume is unchanged.
+            ancestors = db.ancestorTasks(of: tid).reversed().map { a in
+                let spent = db.spentSeconds(taskId: a.id)
+                let rem = max(1, (a.estimateSeconds ?? 0) - spent)
+                let start = Date()
+                let iid = db.startInterval(taskId: a.id, reason: reason) ?? 0
+                return Frame(taskId: a.id, intervalId: iid, intervalStart: start,
+                             estimateSeconds: a.estimateSeconds ?? 0, spentBefore: spent,
+                             deadline: start.addingTimeInterval(Double(rem)), focus: a.focus)
+            }
             taskId = tid
             estimateSeconds = t.estimateSeconds ?? seconds
             spentBefore = db.spentSeconds(taskId: tid)
