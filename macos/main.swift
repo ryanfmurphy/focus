@@ -572,10 +572,14 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         case .entered(let f, let s, let o):
             newFocus = f; newSeconds = s; newOpenStart = o          // fresh task
         case .queuePick:
-            // In subtask mode the picker only offers set-aside subtasks of this parent.
+            // Subtask mode → only set-aside subtasks of this parent. Separate/top-level
+            // mode → only top-level items (fresh queue entries, or tasks with no parent).
             let picked = subtaskMode
                 ? pickFromQueue(filter: { $0.taskId.flatMap { self.db.task(id: $0)?.parentTaskId } == parentId })
-                : pickFromQueue()
+                : pickFromQueue(filter: { item in
+                    guard let tid = item.taskId else { return true }   // fresh "Add to queue" = top-level
+                    return self.db.task(id: tid)?.parentTaskId == nil
+                  })
             guard let item = picked else { return }
             db.removeFromQueue(id: item.id)
             newFocus = item.focus; newSeconds = item.seconds; resumeId = item.taskId
