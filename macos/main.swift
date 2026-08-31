@@ -543,9 +543,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         let nested = preempting && !ancestors.isEmpty
         let parentId = ancestors.last?.taskId          // the immediate parent (for subtask mode)
         let title = preempting ? "Switch to a new focus" : "Set focus"
+        let hasQueue = db.queueCount() > 0
         let info = preempting
             ? "This runs now; the current focus goes to the front of the queue. Or pick one from the queue."
-            : "What's your one focus right now, and for how long?"
+            : (hasQueue ? "What's your one focus right now, and for how long? Or pick one from the queue."
+                        : "What's your one focus right now, and for how long?")
 
         // When nested, offer to switch just this subtask (keeping the parent running)
         // vs. the whole task. Default: just this subtask.
@@ -565,7 +567,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         var subtaskMode = false
         prompt: while true {
             let entry = askFocusAndMinutes(title: title, info: info, confirm: "Start",
-                                           cancellable: preempting, queuePick: preempting, extraTop: subtaskBox)
+                                           cancellable: preempting, queuePick: true, extraTop: subtaskBox)
             subtaskMode = nested && (subtaskBox?.state == .on)   // read AFTER the modal
             switch entry {
             case .cancelled:
