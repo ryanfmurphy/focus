@@ -559,30 +559,47 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
 
         // Pre-empt is voluntary → cancellable (cancel leaves the current session
         // untouched) and can pull from the queue. Idle "Set focus" stays mandatory.
-        let newFocus: String
-        let newSeconds: Int
+        var newFocus = "", newSeconds = 0
         var newOpenStart: Int? = nil
         var resumeId: Int64? = nil
-        let entry = askFocusAndMinutes(title: title, info: info, confirm: "Start",
-                                       cancellable: preempting, queuePick: preempting, extraTop: subtaskBox)
-        let subtaskMode = nested && (subtaskBox?.state == .on)   // read AFTER the modal
-        switch entry {
-        case .cancelled:
-            return
-        case .entered(let f, let s, let o):
-            newFocus = f; newSeconds = s; newOpenStart = o          // fresh task
-        case .queuePick:
-            // Subtask mode → only set-aside subtasks of this parent. Separate/top-level
-            // mode → only top-level items (fresh queue entries, or tasks with no parent).
-            let picked = subtaskMode
-                ? pickFromQueue(filter: { $0.taskId.flatMap { self.db.task(id: $0)?.parentTaskId } == parentId })
-                : pickFromQueue(filter: { item in
-                    guard let tid = item.taskId else { return true }   // fresh "Add to queue" = top-level
-                    return self.db.task(id: tid)?.parentTaskId == nil
-                  })
-            guard let item = picked else { return }
-            db.removeFromQueue(id: item.id)
-            newFocus = item.focus; newSeconds = item.seconds; resumeId = item.taskId
+        var subtaskMode = false
+        prompt: while true {
+            let entry = askFocusAndMinutes(title: title, info: info, confirm: "Start",
+                                           cancellable: preempting, queuePick: preempting, extraTop: subtaskBox)
+            subtaskMode = nested && (subtaskBox?.state == .on)   // read AFTER the modal
+            switch entry {
+            case .cancelled:
+                return
+            case .entered(let f, let s, let o):
+                newFocus = f; newSeconds = s; newOpenStart = o          // fresh task
+                break prompt
+            case .queuePick:
+                // Subtask mode → only set-aside subtasks of this parent. Separate/top-
+                // level mode → only top-level items (fresh entries, or tasks with no parent).
+                let filter: (QueueItem) -> Bool
+                if subtaskMode {
+                    filter = { item in item.taskId.flatMap { tid in self.db.task(id: tid)?.parentTaskId } == parentId }
+                } else {
+                    filter = { item in item.taskId.flatMap { tid in self.db.task(id: tid)?.parentTaskId } == nil }
+                }
+                if !db.queueItems().contains(where: filter) {
+                    // Nothing to pick — tell the user and return to the Switch dialog.
+                    let alert = makeAlert()
+                    alert.messageText = subtaskMode ? "No set-aside subtasks" : "Nothing in the queue"
+                    alert.informativeText = subtaskMode
+                        ? "This task has no set-aside subtasks waiting in the queue."
+                        : "There are no other tasks in the queue to switch to."
+                    alert.addButton(withTitle: "OK")
+                    alert.window.level = .floating
+                    alert.window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+                    _ = runFloatingAlert(alert)
+                    continue prompt
+                }
+                guard let item = pickFromQueue(filter: filter) else { continue prompt }   // cancelled → back
+                db.removeFromQueue(id: item.id)
+                newFocus = item.focus; newSeconds = item.seconds; resumeId = item.taskId
+                break prompt
+            }
         }
 
         let preemptedInterval = intervalId
