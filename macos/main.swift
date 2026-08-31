@@ -995,13 +995,19 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     // Start a subtask under the current task: push the current leaf onto the ancestor
     // stack (it keeps ticking), then run a fresh child task now.
     @objc func addSubtask() {
-        guard !showing, let parent = taskId, let frame = leafFrame() else { return }
+        guard !showing, let parent = taskId else { return }
         showing = true
         defer { showing = false }
         guard case let .entered(focus, seconds, openStart) = askFocusAndMinutes(
             title: "Add subtask",
-            info: "Runs under the current task — the parent keeps ticking toward its own estimate.",
+            info: "Runs under the current task. If it's longer than the parent's remaining time, the parent is auto-extended so they finish together.",
             confirm: "Start", cancellable: true) else { return }
+        // Auto-extend the parent so a longer subtask doesn't push it into overtime —
+        // they end together. Grows the parent's WORKING estimate only (original is
+        // preserved for calibration).
+        let parentRemaining = max(0, remainingSeconds())
+        if seconds > parentRemaining { extendSession(by: seconds - parentRemaining) }
+        guard let frame = leafFrame() else { return }   // capture the (extended) parent
         ancestors.append(frame)
         beginSession(reason: "subtask", seconds: seconds, focus: focus,
                      parentTaskId: parent, openSecondsStart: openStart)
@@ -1129,7 +1135,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             }
             return dir(a.endedAt ?? "\u{FFFF}", b.endedAt ?? "\u{FFFF}", ascending)
         case "min":     return dir(a.actualSeconds, b.actualSeconds, ascending)
-        case "origmin": return dir(a.estimateSeconds ?? -1, b.estimateSeconds ?? -1, ascending)
+        case "origmin": return dir(a.originalEstimateSeconds ?? -1, b.originalEstimateSeconds ?? -1, ascending)
         case "ivs":     return dir(a.intervalCount, b.intervalCount, ascending)
         case "rating":  return dir(a.rating ?? -1, b.rating ?? -1, ascending)
         case "status":  return dir(a.status ?? "", b.status ?? "", ascending)
@@ -1164,7 +1170,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             add("when", "Started", width: 140, min: 120)
             add("ended", "Ended", width: 140, min: 120)
             add("min", "Actual", width: 70, min: 56, align: .right)
-            add("origmin", "Estimate", width: 70, min: 56, align: .right)
+            add("origmin", "Est (orig)", width: 78, min: 60, align: .right)
             add("ivs", "Intervals", width: 70, min: 56, align: .right)
             add("rating", "Rating", width: 60, min: 50, align: .right)
             add("status", "Status", width: 95, min: 70)
@@ -1200,14 +1206,14 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             NSPasteboard.general.setString(lines.joined(separator: "\n"), forType: .string)
             return
         }
-        var lines = ["Started\tEnded\tActual (s)\tEstimate (s)\tIntervals\tRating\tStatus\tFocus\tNote"]
+        var lines = ["Started\tEnded\tActual (s)\tOrig est (s)\tIntervals\tRating\tStatus\tFocus\tNote"]
         for i in indexes where i < historyRows.count {
             let r = historyRows[i]
             let fields = [
                 r.startedAt.map(whenLabel) ?? "",
                 r.endedAt.map(whenLabel) ?? "",
                 "\(r.actualSeconds)",
-                r.estimateSeconds.map { "\($0)" } ?? "",
+                r.originalEstimateSeconds.map { "\($0)" } ?? "",
                 "\(r.intervalCount)",
                 r.rating.map { "\($0)" } ?? "",
                 r.status ?? (r.endedAt == nil ? "active" : ""),
@@ -1531,7 +1537,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         case "when":      text = r.startedAt.map(whenLabel) ?? "—"
         case "ended":     text = r.endedAt.map(whenLabel) ?? "—"
         case "min":       text = mmss(r.actualSeconds); align = .right
-        case "origmin":   text = r.estimateSeconds.map { mmss($0) } ?? "—"; align = .right
+        case "origmin":   text = r.originalEstimateSeconds.map { mmss($0) } ?? "—"; align = .right
         case "ivs":       text = "\(r.intervalCount)"; align = .right
         case "rating":    text = r.rating.map { "\($0)/10" } ?? "—"; align = .right
         case "status":    text = r.status ?? (r.endedAt == nil ? "active" : "—")

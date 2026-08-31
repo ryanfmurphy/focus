@@ -219,7 +219,8 @@ final class DB {
             parent_task_id INTEGER,               -- for future subtasks (NULL for now)
             created_at     TEXT,
             focus          TEXT,
-            estimate_seconds INTEGER,             -- original planned duration
+            estimate_seconds INTEGER,             -- WORKING estimate (grown by Add time / auto-extend); drives the countdown
+            original_estimate_seconds INTEGER,    -- first guess, stamped at creation, never changed — for calibration
             status         TEXT,                  -- completed/interrupted/deferred (NULL while active)
             rating         INTEGER,               -- 1..10 (one per task)
             note           TEXT
@@ -245,10 +246,17 @@ final class DB {
         // A queued item may reference an existing task to RESUME (deferred/pre-empted)
         // — task_id set — or be a fresh focus that mints a task when started (NULL).
         exec("ALTER TABLE queue ADD COLUMN task_id INTEGER;")
+        // A frozen copy of the first estimate, so History can compare original vs
+        // actual even as Add time / auto-extend grow the working estimate.
+        exec("ALTER TABLE tasks ADD COLUMN original_estimate_seconds INTEGER;")
 
         // Populate tasks/intervals from legacy `sessions` (once, guarded, INSERT-only —
         // the sessions table is left intact as an in-DB fallback).
         migrateSessionsToTasks()
+        // Backfill the original estimate for any task that predates the column
+        // (migrated tasks and any created before this change): its current estimate
+        // hasn't drifted yet, so it IS the original.
+        exec("UPDATE tasks SET original_estimate_seconds = estimate_seconds WHERE original_estimate_seconds IS NULL;")
     }
 
     private func exec(_ sql: String) { sqlite3_exec(db, sql, nil, nil, nil) }
@@ -474,8 +482,9 @@ final class DB {
         guard hasSessionsTable(), intervalCount() == 0 else { return }
         exec("BEGIN;")
         exec("""
-        INSERT INTO tasks (id, parent_task_id, created_at, focus, estimate_seconds, status, rating, note)
+        INSERT INTO tasks (id, parent_task_id, created_at, focus, estimate_seconds, original_estimate_seconds, status, rating, note)
         SELECT grp.root_id, NULL, first.started_at, first.focus,
+               COALESCE(first.original_seconds, first.seconds),
                COALESCE(first.original_seconds, first.seconds),
                last.status, last.rating, last.note
         FROM (SELECT COALESCE(original_session_id, id) AS root_id,
@@ -551,11 +560,12 @@ final class DB {
     func startTask(reason: String, estimateSeconds: Int, focus: String,
                    parentTaskId: Int64? = nil) -> (taskId: Int64, intervalId: Int64)? {
         var t: OpaquePointer?
-        guard sqlite3_prepare_v2(db, "INSERT INTO tasks (parent_task_id, created_at, focus, estimate_seconds) VALUES (?,?,?,?);", -1, &t, nil) == SQLITE_OK else { return nil }
+        guard sqlite3_prepare_v2(db, "INSERT INTO tasks (parent_task_id, created_at, focus, estimate_seconds, original_estimate_seconds) VALUES (?,?,?,?,?);", -1, &t, nil) == SQLITE_OK else { return nil }
         if let p = parentTaskId { sqlite3_bind_int64(t, 1, p) } else { sqlite3_bind_null(t, 1) }
         sqlite3_bind_text(t, 2, isoNow(), -1, SQLITE_TRANSIENT)
         sqlite3_bind_text(t, 3, focus, -1, SQLITE_TRANSIENT)
         sqlite3_bind_int(t, 4, Int32(estimateSeconds))
+        sqlite3_bind_int(t, 5, Int32(estimateSeconds))   // original == working at creation
         let done = sqlite3_step(t) == SQLITE_DONE
         sqlite3_finalize(t)
         guard done else { return nil }
@@ -853,7 +863,7 @@ final class DB {
         // has ended=NULL → shows "—". `lastActivity` (the most recent interval
         // moment, open interval included) is a hidden value for recency sorting.
         let sql = """
-        SELECT t.id, t.focus, t.estimate_seconds, t.status, t.rating, t.note,
+        SELECT t.id, t.focus, t.estimate_seconds, t.original_estimate_seconds, t.status, t.rating, t.note,
                COALESCE(SUM(iv.seconds), 0), COUNT(iv.id),
                MIN(iv.started_at),
                CASE WHEN t.status IN ('completed','interrupted','abandoned') THEN MAX(iv.ended_at) END,
@@ -873,14 +883,15 @@ final class DB {
                 id: sqlite3_column_int64(s, 0),
                 focus: text(1) ?? "",
                 estimateSeconds: intOrNil(2),
-                status: text(3),
-                rating: intOrNil(4),
-                note: text(5),
-                actualSeconds: Int(sqlite3_column_int(s, 6)),
-                intervalCount: Int(sqlite3_column_int(s, 7)),
-                startedAt: text(8),
-                endedAt: text(9),
-                lastActivity: text(10)))
+                originalEstimateSeconds: intOrNil(3),
+                status: text(4),
+                rating: intOrNil(5),
+                note: text(6),
+                actualSeconds: Int(sqlite3_column_int(s, 7)),
+                intervalCount: Int(sqlite3_column_int(s, 8)),
+                startedAt: text(9),
+                endedAt: text(10),
+                lastActivity: text(11)))
         }
         return rows
     }
@@ -937,7 +948,8 @@ struct IntervalHistoryRow {
 struct TaskHistoryRow {
     let id: Int64
     let focus: String
-    let estimateSeconds: Int?
+    let estimateSeconds: Int?          // working estimate (grown by add-time / auto-extend)
+    let originalEstimateSeconds: Int?  // first guess (frozen) — the calibration baseline
     let status: String?
     let rating: Int?
     let note: String?

@@ -359,6 +359,27 @@ section("subtasks: ancestorTasks walks parent_task_id; childTasks lists children
     eq(db.childTasks(of: c).count, 0, "leaf has no children")
 }
 
+section("Original estimate is stamped at creation and never drifts (add-time grows only the working estimate)") {
+    let db = freshDB()
+    let (tid, _) = db.startTask(reason: "launch", estimateSeconds: 1500, focus: "Calibrate me")!
+    func hist() -> TaskHistoryRow { db.taskHistory().first { $0.id == tid }! }
+    eq(hist().estimateSeconds ?? -1, 1500, "working estimate = 1500 at start")
+    eq(hist().originalEstimateSeconds ?? -1, 1500, "original stamped = 1500 at start")
+    db.addTimeToTask(id: tid, seconds: 600)
+    eq(hist().estimateSeconds ?? -1, 2100, "add-time grows the working estimate")
+    eq(hist().originalEstimateSeconds ?? -1, 1500, "…but the original is frozen (calibration baseline)")
+}
+
+section("Migration backfills the original estimate from the old original_seconds") {
+    let db = freshDB()
+    let s = db.insertLegacySession(seconds: 900, focus: "Legacy", originalSeconds: 1500, status: "completed", rating: 8)
+    db.migrateSessionsToTasks()
+    let row = db.taskHistory().first { $0.id == s }
+    eq(row?.estimateSeconds ?? -1, 1500, "working estimate from old original_seconds")
+    eq(row?.originalEstimateSeconds ?? -1, 1500, "original estimate backfilled to match")
+    eq(row?.actualSeconds ?? -1, 900, "actual is the elapsed")
+}
+
 // MARK: - Migration: sessions -> tasks + intervals
 
 section("migrateSessionsToTasks merges a continued chain into one task") {
