@@ -867,7 +867,8 @@ final class DB {
                COALESCE(SUM(iv.seconds), 0), COUNT(iv.id),
                MIN(iv.started_at),
                CASE WHEN t.status IN ('completed','interrupted','abandoned') THEN MAX(iv.ended_at) END,
-               MAX(COALESCE(iv.ended_at, iv.started_at))
+               MAX(COALESCE(iv.ended_at, iv.started_at)),
+               t.parent_task_id
         FROM tasks t LEFT JOIN intervals iv ON iv.task_id = t.id
         GROUP BY t.id ORDER BY t.id DESC LIMIT ?;
         """
@@ -876,6 +877,7 @@ final class DB {
         defer { sqlite3_finalize(s) }
         sqlite3_bind_int(s, 1, Int32(limit))
         func intOrNil(_ c: Int32) -> Int? { sqlite3_column_type(s, c) == SQLITE_NULL ? nil : Int(sqlite3_column_int(s, c)) }
+        func int64OrNil(_ c: Int32) -> Int64? { sqlite3_column_type(s, c) == SQLITE_NULL ? nil : sqlite3_column_int64(s, c) }
         func text(_ c: Int32) -> String? { sqlite3_column_text(s, c).map { String(cString: $0) } }
         var rows: [TaskHistoryRow] = []
         while sqlite3_step(s) == SQLITE_ROW {
@@ -891,7 +893,8 @@ final class DB {
                 intervalCount: Int(sqlite3_column_int(s, 8)),
                 startedAt: text(9),
                 endedAt: text(10),
-                lastActivity: text(11)))
+                lastActivity: text(11),
+                parentTaskId: int64OrNil(12)))
         }
         return rows
     }
@@ -958,4 +961,5 @@ struct TaskHistoryRow {
     let startedAt: String?    // first interval start
     let endedAt: String?      // FINISH time (nil unless completed/interrupted)
     let lastActivity: String? // most recent interval moment (open included) — recency sort
+    let parentTaskId: Int64?  // nil = top-level; else the parent task (for the History tree)
 }

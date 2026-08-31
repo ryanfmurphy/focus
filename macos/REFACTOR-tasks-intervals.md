@@ -129,8 +129,13 @@ clocks**: starting a subtask does NOT pause the parent — both count down at on
   now rebuilds the ancestor stack (reopens each ancestor as a running frame via the
   `parent_task_id` walk), so resuming a suspended stack from the queue restores the
   whole thing ticking. Restart already rebuilt from open intervals (S2).
-- [ ] **S4 — History**: show subtasks nested/attributed under the parent (total
-  incl. subtasks = the parent's own actual).
+- [x] **S4 — History**: the Tasks view is now an `NSOutlineView` — top-level tasks
+  with subtasks nested underneath (Focus is the outline column, so subtasks indent
+  and get a ▸). Degrades to a flat list for tasks with no subtasks. Sort works per
+  level; copy indents subtasks; delete removes a task's whole subtree; give-up/
+  abandon operate on the selected task nodes. Intervals mode is the same outline
+  rendered flat. Parent Actual = total incl. subtasks (children are a breakdown,
+  not additive). — `taskHistory` now returns `parent_task_id`.
 
 ## Safety
 
