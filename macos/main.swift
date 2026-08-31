@@ -125,6 +125,7 @@ final class QueuePickSource: NSObject, NSTableViewDataSource, NSTableViewDelegat
         t.usesAlternatingRowBackgroundColors = true
         t.rowHeight = 22
         t.style = .inset
+        t.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle   // Focus grows with the window
         t.headerView = NSTableHeaderView()
         func col(_ id: String, _ title: String, _ w: CGFloat, _ a: NSTextAlignment = .left) {
             let c = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(id))
@@ -624,7 +625,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
                     _ = runFloatingAlert(alert)
                     continue prompt
                 }
-                guard let item = pickFromQueue(filter: filter) else { continue prompt }   // cancelled → back
+                // In subtask mode every candidate is a sibling of the same parent, so
+                // skip the redundant "Parent ›" prefix (same as Switch to subtask).
+                guard let item = pickFromQueue(filter: filter, showParentChain: !subtaskMode) else { continue prompt }
                 db.removeFromQueue(id: item.id)
                 newFocus = item.focus; newSeconds = item.seconds; resumeId = item.taskId
                 break prompt
@@ -1069,25 +1072,49 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         var chosen: QueueItem?
         let source = QueuePickSource(rows: rows) { item in
             chosen = item
-            NSApp.stopModal()   // ends the alert's runModal below
+            NSApp.stopModal()
         }
         let table = source.makeTable()
-        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 540, height: 240))
+
+        // A resizable modal window (NSAlert can't resize). Row click or Cancel/Esc ends it.
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 620, height: 380),
+                              styleMask: [.titled, .resizable], backing: .buffered, defer: false)
+        window.title = "Pick another queued focus"
+        window.level = .floating
+        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        let content = window.contentView!
+
+        let info = NSTextField(wrappingLabelWithString: "Click a queued focus to start it now (it's removed from the queue; the others stay).")
+        info.frame = NSRect(x: 16, y: content.bounds.height - 44, width: content.bounds.width - 32, height: 34)
+        info.autoresizingMask = [.width, .minYMargin]
+
+        let cancel = NSButton(title: "Cancel", target: self, action: #selector(cancelPickModal))
+        cancel.bezelStyle = .rounded
+        cancel.keyEquivalent = "\u{1b}"   // Esc
+        cancel.frame = NSRect(x: content.bounds.width - 96, y: 12, width: 80, height: 28)
+        cancel.autoresizingMask = [.minXMargin, .maxYMargin]
+
+        let scroll = NSScrollView(frame: NSRect(x: 16, y: 52, width: content.bounds.width - 32,
+                                                height: content.bounds.height - 52 - 52))
         scroll.documentView = table
         scroll.hasVerticalScroller = true
+        scroll.hasHorizontalScroller = true
         scroll.borderType = .bezelBorder
-        table.frame = scroll.bounds
+        scroll.autoresizingMask = [.width, .height]
 
-        let alert = makeAlert()
-        alert.messageText = "Pick another queued focus"
-        alert.informativeText = "Click a queued focus to start it now (it's removed from the queue; the others stay)."
-        alert.addButton(withTitle: "Cancel")
-        alert.accessoryView = scroll
-        alert.window.level = .floating
-        alert.window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        alert.runModal()   // a row click calls NSApp.stopModal(); Cancel ends it too
+        content.addSubview(info)
+        content.addSubview(scroll)
+        content.addSubview(cancel)
+
+        NSApp.activate(ignoringOtherApps: true)
+        window.center()
+        window.makeKeyAndOrderFront(nil)
+        NSApp.runModal(for: window)   // row click / Cancel / Esc → stopModal
+        window.orderOut(nil)
         return chosen
     }
+
+    @objc private func cancelPickModal() { NSApp.stopModal() }
 
     private enum FocusEntry {
         case entered(focus: String, seconds: Int, openSeconds: Int)
