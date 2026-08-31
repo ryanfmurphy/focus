@@ -113,7 +113,7 @@ final class QueueTableView: NSTableView {
 // A read-only "See Queue"-style table used to pick a queued focus to pre-empt
 // with. Single-clicking a row fires `onPick` with that item. Self-contained data
 // source/delegate so it doesn't collide with AppController's own two tables.
-struct QueuePickRow { let item: QueueItem; let num: Int; let duration: String; let start: String; let finish: String }
+struct QueuePickRow { let item: QueueItem; let num: Int; let duration: String; let start: String; let finish: String; let focusDisplay: String }
 
 final class QueuePickSource: NSObject, NSTableViewDataSource, NSTableViewDelegate {
     private let rows: [QueuePickRow]
@@ -160,7 +160,7 @@ final class QueuePickSource: NSObject, NSTableViewDataSource, NSTableViewDelegat
         case "dur":    text = r.duration; align = .right
         case "start":  text = r.start; align = .right
         case "finish": text = r.finish; align = .right
-        default:       text = r.item.focus
+        default:       text = r.focusDisplay
         }
         let cell = NSTableCellView()
         let tf = NSTextField(labelWithString: text)
@@ -953,7 +953,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         let confirmOpenedAt = Date()   // how long this confirm stays up → the queued session's open_seconds_start
         let alert = makeAlert()
         alert.messageText = "Next focus"
-        alert.informativeText = "\(item.focus)\n\n\(mmss(item.seconds))"
+        alert.informativeText = "\(queueDisplayName(item))\n\n\(mmss(item.seconds))"
         alert.addButton(withTitle: "Start")             // .alertFirstButtonReturn
         alert.addButton(withTitle: "Start a different focus") // index 1
         // Always shown, but disabled when there's no other queued item to pick.
@@ -1033,6 +1033,15 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
                      resumeTaskId: item.taskId, openSecondsStart: queuedOpenStart)
     }
 
+    /// Display name for a queued item: for a set-aside subtask, prefix its ancestor
+    /// chain — "Root › … › Parent › this". Fresh or top-level items show just the focus.
+    private func queueDisplayName(_ item: QueueItem) -> String {
+        guard let tid = item.taskId else { return item.focus }
+        let ancestors = db.ancestorTasks(of: tid)   // [parent, …, root]
+        guard !ancestors.isEmpty else { return item.focus }
+        return (ancestors.reversed().map { $0.focus } + [item.focus]).joined(separator: " › ")
+    }
+
     /// Show a "See Queue"-style picker (in a floating modal) of all queued focuses,
     /// with the same Est. start/finish schedule. Returns the one the user clicks,
     /// or nil if they cancel.
@@ -1052,7 +1061,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             rows.append(QueuePickRow(item: item, num: rows.count + 1,
                                      duration: mmss(item.seconds),
                                      start: localClockFormatter.string(from: start),
-                                     finish: localClockFormatter.string(from: finish)))
+                                     finish: localClockFormatter.string(from: finish),
+                                     focusDisplay: queueDisplayName(item)))
         }
 
         var chosen: QueueItem?
@@ -1777,7 +1787,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             let q = queueRows[i]
             let fields = [
                 "\(q.seconds)",
-                q.focus,
+                queueDisplayName(q),
             ].map(tsvClean)
             lines.append(fields.joined(separator: "\t"))
         }
@@ -1797,7 +1807,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         case "min":    text = mmss(q.seconds); align = .right
         case "start":  text = est.map { localClockFormatter.string(from: $0.start) } ?? ""; align = .right
         case "finish": text = est.map { localClockFormatter.string(from: $0.finish) } ?? ""; align = .right
-        default:       text = q.focus
+        default:       text = queueDisplayName(q)
         }
         return historyCell(tableView, id: id, text: text, align: align)
     }
