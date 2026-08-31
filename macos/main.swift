@@ -600,13 +600,15 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
                 newFocus = f; newSeconds = s; newOpenStart = o          // fresh task
                 break prompt
             case .queuePick:
-                // Subtask mode → only set-aside subtasks of this parent. Separate/top-
-                // level mode → only top-level items (fresh entries, or tasks with no parent).
+                // Subtask mode → only set-aside subtasks of this parent. Whole-stack
+                // switch / Set focus → ALL queued items: main tasks AND set-aside
+                // subtasks (resuming a subtask rebuilds its tree, and its parent may
+                // not itself be queued, so filtering to top-level would strand it).
                 let filter: (QueueItem) -> Bool
                 if subtaskMode {
                     filter = { item in item.taskId.flatMap { tid in self.db.task(id: tid)?.parentTaskId } == parentId }
                 } else {
-                    filter = { item in item.taskId.flatMap { tid in self.db.task(id: tid)?.parentTaskId } == nil }
+                    filter = { _ in true }
                 }
                 if !db.queueItems().contains(where: filter) {
                     // Nothing to pick — tell the user and return to the Switch dialog.
