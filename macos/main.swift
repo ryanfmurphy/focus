@@ -1431,9 +1431,15 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         if historyMode == .intervals {
             var lines = ["Started\tEnded\tDuration (s)\tRating\tReason\tTask"]
             for r in nodes.compactMap({ $0.interval }) {
-                lines.append([whenLabel(r.startedAt), r.endedAt.map(whenLabel) ?? "", "\(r.seconds)",
-                              r.rating.map { "\($0)" } ?? "", r.reason ?? "", r.taskFocus]
-                             .map(tsvClean).joined(separator: "\t"))
+                let fields: [String] = [
+                    whenLabel(r.startedAt),
+                    r.endedAt.map(whenLabel) ?? "",
+                    "\(r.seconds)",
+                    r.rating.map { "\($0)" } ?? "",
+                    r.reason ?? "",
+                    r.taskFocus,
+                ]
+                lines.append(fields.map(tsvClean).joined(separator: "\t"))
             }
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(lines.joined(separator: "\n"), forType: .string)
@@ -1443,10 +1449,18 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         for node in nodes {
             guard let r = node.task else { continue }
             let indent = String(repeating: "  ", count: outline.level(forItem: node))   // subtask depth
-            lines.append([r.startedAt.map(whenLabel) ?? "", r.endedAt.map(whenLabel) ?? "", "\(r.actualSeconds)",
-                          r.originalEstimateSeconds.map { "\($0)" } ?? "", "\(r.intervalCount)",
-                          r.rating.map { "\($0)" } ?? "", r.status ?? (r.endedAt == nil ? "active" : ""),
-                          indent + r.focus, r.note ?? ""].map(tsvClean).joined(separator: "\t"))
+            let fields: [String] = [
+                r.startedAt.map(whenLabel) ?? "",
+                r.endedAt.map(whenLabel) ?? "",
+                "\(r.actualSeconds)",
+                r.originalEstimateSeconds.map { "\($0)" } ?? "",
+                "\(r.intervalCount)",
+                r.rating.map { "\($0)" } ?? "",
+                r.status ?? (r.endedAt == nil ? "active" : ""),
+                indent + r.focus,
+                r.note ?? "",
+            ]
+            lines.append(fields.map(tsvClean).joined(separator: "\t"))
         }
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(lines.joined(separator: "\n"), forType: .string)
