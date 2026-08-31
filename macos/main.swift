@@ -1635,7 +1635,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
 
         if queueWindow == nil {
             let window = NSWindow(
-                contentRect: NSRect(x: 0, y: 0, width: 640, height: 360),
+                contentRect: NSRect(x: 0, y: 0, width: 900, height: 400),
                 styleMask: [.titled, .closable, .resizable, .miniaturizable],
                 backing: .buffered, defer: false)
             window.title = "Focus queue"
@@ -1645,6 +1645,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             let scroll = NSScrollView(frame: window.contentView!.bounds)
             scroll.autoresizingMask = [.width, .height]
             scroll.hasVerticalScroller = true
+            scroll.hasHorizontalScroller = true   // long "Parent › Subtask" chains can scroll
             scroll.borderType = .noBorder
 
             let table = QueueTableView()
@@ -1682,7 +1683,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             addColumn("min", "Duration", width: 70, min: 56, align: .right)
             addColumn("start", "Est. start", width: 90, min: 70, align: .right)
             addColumn("finish", "Est. finish", width: 90, min: 70, align: .right)
-            addColumn("focus", "Focus (next up first)", width: 300, min: 150)
+            addColumn("focus", "Focus (next up first)", width: 540, min: 260)
 
             scroll.documentView = table
             window.contentView = scroll
