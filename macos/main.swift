@@ -1436,8 +1436,13 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
 
     private func configureHistoryColumns() {
         guard let outline = historyOutline else { return }
-        outline.outlineTableColumn = nil   // else the current outline column survives removeTableColumn
-        for col in outline.tableColumns { outline.removeTableColumn(col) }
+        // NSOutlineView refuses to removeTableColumn its current outlineTableColumn (and
+        // setting it to nil just snaps back to a real column). So park the outline role
+        // on a throwaway placeholder, clear the real columns, rebuild, then drop it.
+        let placeholder = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("__ph__"))
+        outline.addTableColumn(placeholder)
+        outline.outlineTableColumn = placeholder
+        for col in outline.tableColumns where col !== placeholder { outline.removeTableColumn(col) }
         var first: NSTableColumn?
         func add(_ id: String, _ title: String, width: CGFloat, min: CGFloat, align: NSTextAlignment = .left) {
             let col = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(id))
@@ -1466,6 +1471,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             add("task", "Task", width: 460, min: 150)
         }
         outline.outlineTableColumn = first   // disclosure triangles + indentation live here
+        outline.removeTableColumn(placeholder)   // now safe — no longer the outline column
     }
 
     // Copy the selected history rows to the clipboard as TSV (with a header).
