@@ -115,10 +115,12 @@ based on state):
 | *— the running task (greyed out when idle) —* | | |
 | **Complete task** | session active | Mark completed, rate 1–10, record the elapsed time as its duration (Original Duration is kept), advance to the next focus |
 | **Pause** / **Resume** | session active | Freeze the countdown (pill shows ⏸ … paused) and resume it later; the deadline shifts forward so no time is lost, and paused time is excluded from a session's recorded duration |
-| **Add time** | session active | Add N minutes to the running session (same as "Add time" at time's up) |
-| **Rename task** | session active | Rename the current focus via a small prompt (updates the pill and the session's `focus`) |
-| **Abort task** | session active | Rate it, mark interrupted (records elapsed time), advance |
-| **Switch focus now** | session active | Re-queue the current task (its remaining time) to the front and start a new focus now — or pick an existing one from the queue |
+| **Add time** | session active | Add N minutes to the running task (the parent, and any ancestors, auto-extend to keep covering it) |
+| **Add subtask** | session active | Start a concurrent subtask under the current task; both count down (parent keeps ticking), shown as stacked pills. Longer subtasks auto-extend the parent so they finish together |
+| **Rename task** | session active | Rename the current focus via a small prompt (updates the pill and the task's `focus`) |
+| **Abort task** | session active | Rate it, mark interrupted (records elapsed time); pop to the parent if it's a subtask, else advance |
+| **Stop working** | session active | Suspend the task (re-queued to the front, resumable) and go idle — or, for a subtask, drop to the still-ticking parent. No rating |
+| **Switch focus now** | session active | Suspend the current task and start a new focus (or pick one from the queue). Inside a subtask, a checkbox switches *just this subtask* (keeping the parent running) vs the whole task |
 | **Set focus** | idle | Start an ad-hoc focus (same item as Switch focus now, relabeled) |
 | *— the queue —* | | |
 | **Add to queue** | always | Append a focus to the end of the queue |

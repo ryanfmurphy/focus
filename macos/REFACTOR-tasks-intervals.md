@@ -93,12 +93,20 @@ clocks**: starting a subtask does NOT pause the parent — both count down at on
   intervals not in the chain are swept as orphans.
 - **Finish / Abandon a subtask** → pop to the parent (which keeps ticking), not the
   idle "what's next?" prompt.
-- **Pre-empt** — "Switch focus now" suspends the **entire stack** (closes every
-  level's interval), re-queues the **leaf** to the front, and starts a fresh focus
-  (or one picked from the queue). Re-queuing the *leaf* (not the root) is what lets
-  resume rebuild the whole stack via the `parent_task_id` walk (which goes *up*).
-  *(Defer was removed — there's no leaf-only set-aside; to drop a subtask you
-  Complete/Abandon it, or Switch the whole task.)*
+- **Leaving the current leaf** — a small family sharing one primitive ("suspend the
+  leaf/stack, re-queuing with parent links so it's resumable"):
+  - **Switch focus now** — suspend + start a replacement. When nested, a checkbox
+    picks *just this subtask* (drop to the still-ticking parent, new focus is a
+    **sibling** under it; queue-pick filtered to that parent's set-aside subtasks) vs
+    *the whole task* (suspend the entire stack, new focus is top-level). Top-level =
+    no checkbox.
+  - **Stop working** — the *no-replacement* sibling of Switch: suspend and go idle,
+    or (subtask scope) drop to the parent. No rating.
+  - Suspending re-queues the **leaf** (not the root); resume rebuilds the stack via
+    the `parent_task_id` walk (which goes *up*). Resuming a set-aside subtask while
+    its parent is already live **attaches** under it (`rebuildAncestors: false`)
+    rather than duplicating the parent.
+  - **Complete / Abort** still finish the leaf and pop to the parent.
 - **Queue**: subtasks are started ad-hoc and are not queued individually. Rating
   lives on the child task.
 

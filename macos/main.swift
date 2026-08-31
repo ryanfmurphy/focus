@@ -235,6 +235,57 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         }
     }
 
+    /// Suspend the whole active stack: close every level's interval and re-queue the
+    /// LEAF (carrying its parent link) to the front, then clear all state. Resuming
+    /// the queued leaf rebuilds the stack via the parent_task_id walk.
+    private func suspendStack() {
+        guard let tid = taskId, let iid = intervalId, let focus = currentFocus else { return }
+        let remaining = max(1, remainingSeconds())
+        let elapsed = elapsedFocusSeconds()
+        finalizePause()
+        db.endInterval(id: iid, elapsedSeconds: elapsed)
+        let now = Date()
+        for f in ancestors {
+            db.closeOpenPause(sessionId: f.intervalId)
+            let anElapsed = max(0, Int(now.timeIntervalSince(f.intervalStart).rounded()) - db.totalPausedSeconds(sessionId: f.intervalId))
+            db.endInterval(id: f.intervalId, elapsedSeconds: anElapsed)
+        }
+        db.enqueueTask(focus: focus, estimateSeconds: remaining, taskId: tid, front: true)
+        clearSessionState()
+    }
+
+    /// Suspend just the current subtask (leaf): close its interval, re-queue it
+    /// (carrying its parent link), then pop to the parent, which keeps ticking.
+    /// Returns false if there's no parent (top-level) — caller uses suspendStack then.
+    @discardableResult
+    private func suspendLeaf() -> Bool {
+        guard !ancestors.isEmpty, let tid = taskId, let iid = intervalId, let focus = currentFocus else { return false }
+        let remaining = max(1, remainingSeconds())
+        let elapsed = elapsedFocusSeconds()
+        finalizePause()
+        db.endInterval(id: iid, elapsedSeconds: elapsed)
+        db.enqueueTask(focus: focus, estimateSeconds: remaining, taskId: tid, front: true)
+        popAncestorToLeaf()          // parent becomes the leaf and keeps ticking
+        return true
+    }
+
+    /// Push the current leaf as an ancestor and start `focus` as a subtask under it —
+    /// fresh (resumeId nil) or resuming a set-aside subtask (resumeId set; attach under
+    /// the already-live parent instead of rebuilding it).
+    private func startSubtaskUnderLeaf(reason: String, seconds: Int, focus: String,
+                                       resumeId: Int64?, openStart: Int?) {
+        guard let parentId = taskId, let frame = leafFrame() else { return }
+        ancestors.append(frame)
+        if let rid = resumeId {
+            beginSession(reason: reason, seconds: seconds, focus: focus,
+                         resumeTaskId: rid, rebuildAncestors: false, openSecondsStart: openStart)
+        } else {
+            beginSession(reason: reason, seconds: seconds, focus: focus,
+                         parentTaskId: parentId, openSecondsStart: openStart)
+        }
+        extendAncestorsToCoverLeaf()   // keep the parent covering the new subtask
+    }
+
     /// Wall-time of an interval row from its start to now — for closing orphan/
     /// abandoned intervals during restart.
     private func intervalElapsed(_ iv: Interval) -> Int {
@@ -489,10 +540,22 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         NSApp.activate(ignoringOtherApps: true)
 
         let preempting = taskId != nil
+        let nested = preempting && !ancestors.isEmpty
+        let parentId = ancestors.last?.taskId          // the immediate parent (for subtask mode)
         let title = preempting ? "Switch to a new focus" : "Set focus"
         let info = preempting
             ? "This runs now; the current focus goes to the front of the queue. Or pick one from the queue."
             : "What's your one focus right now, and for how long?"
+
+        // When nested, offer to switch just this subtask (keeping the parent running)
+        // vs. the whole task. Default: just this subtask.
+        var subtaskBox: NSButton? = nil
+        if nested {
+            let cb = NSButton(checkboxWithTitle: "Switch just this subtask (keep the parent running)", target: nil, action: nil)
+            cb.state = .on
+            cb.frame = NSRect(x: 0, y: 0, width: 320, height: 20)
+            subtaskBox = cb
+        }
 
         // Pre-empt is voluntary → cancellable (cancel leaves the current session
         // untouched) and can pull from the queue. Idle "Set focus" stays mandatory.
@@ -500,39 +563,36 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         let newSeconds: Int
         var newOpenStart: Int? = nil
         var resumeId: Int64? = nil
-        switch askFocusAndMinutes(title: title, info: info, confirm: "Start",
-                                  cancellable: preempting, queuePick: preempting) {
+        let entry = askFocusAndMinutes(title: title, info: info, confirm: "Start",
+                                       cancellable: preempting, queuePick: preempting, extraTop: subtaskBox)
+        let subtaskMode = nested && (subtaskBox?.state == .on)   // read AFTER the modal
+        switch entry {
         case .cancelled:
             return
         case .entered(let f, let s, let o):
-            newFocus = f; newSeconds = s; newOpenStart = o          // fresh ad-hoc task
+            newFocus = f; newSeconds = s; newOpenStart = o          // fresh task
         case .queuePick:
-            guard let item = pickFromQueue() else { return }
+            // In subtask mode the picker only offers set-aside subtasks of this parent.
+            let picked = subtaskMode
+                ? pickFromQueue(filter: { $0.taskId.flatMap { self.db.task(id: $0)?.parentTaskId } == parentId })
+                : pickFromQueue()
+            guard let item = picked else { return }
             db.removeFromQueue(id: item.id)
-            newFocus = item.focus; newSeconds = item.seconds; resumeId = item.taskId   // resume that task
+            newFocus = item.focus; newSeconds = item.seconds; resumeId = item.taskId
         }
 
-        var preemptedInterval: Int64? = nil
-        if preempting, let tid = taskId, let iid = intervalId, let curFocus = currentFocus {
-            preemptedInterval = iid
-            let remaining = max(1, remainingSeconds())        // leaf remaining, frozen if paused
-            let elapsed = elapsedFocusSeconds()               // excludes pause time
-            finalizePause()
-            db.endInterval(id: iid, elapsedSeconds: elapsed)  // close the leaf chunk
-            // Suspend the WHOLE stack: close every ancestor's interval too (each records
-            // its own elapsed), then re-queue the LEAF to the front. Resuming it rebuilds
-            // the whole stack via the parent_task_id walk.
-            let now = Date()
-            for f in ancestors {
-                db.closeOpenPause(sessionId: f.intervalId)   // tidy any open pause on this level
-                let anElapsed = max(0, Int(now.timeIntervalSince(f.intervalStart).rounded()) - db.totalPausedSeconds(sessionId: f.intervalId))
-                db.endInterval(id: f.intervalId, elapsedSeconds: anElapsed)
-            }
-            ancestors.removeAll()
-            db.enqueueTask(focus: curFocus, estimateSeconds: remaining, taskId: tid, front: true)
+        let preemptedInterval = intervalId
+        if subtaskMode {
+            // Suspend just this subtask (drops to the still-ticking parent), then run
+            // the new sibling subtask under that parent.
+            suspendLeaf()
+            startSubtaskUnderLeaf(reason: "preempt", seconds: newSeconds, focus: newFocus,
+                                  resumeId: resumeId, openStart: newOpenStart)
+        } else {
+            if preempting { suspendStack() }   // suspend the whole stack
+            beginSession(reason: preempting ? "preempt" : "manual", seconds: newSeconds, focus: newFocus,
+                         resumeTaskId: resumeId, openSecondsStart: newOpenStart)
         }
-        beginSession(reason: preempting ? "preempt" : "manual", seconds: newSeconds, focus: newFocus,
-                     resumeTaskId: resumeId, openSecondsStart: newOpenStart)
         if preempting { db.recordPreempt(preemptedSessionId: preemptedInterval, newSessionId: intervalId) }
     }
 
@@ -682,12 +742,49 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         if hadParent { tick() } else { promptForFocus(reason: "after-session") }
     }
 
+    // Stop working on the current task without finishing it: suspend it (re-queued to
+    // the front so it's resumable) and go idle — or, for a subtask, drop to the
+    // still-ticking parent. No rating (it isn't done), unlike Abort.
+    @objc func stopWorking() {
+        guard !showing, taskId != nil else { return }
+        showing = true
+        defer { showing = false }
+        let (proceed, subtaskOnly) = promptStopScope()
+        guard proceed else { return }
+        if subtaskOnly { suspendLeaf() } else { suspendStack() }
+        tick()   // subtask → shows the parent; whole task → hides the pill (idle)
+    }
+
+    /// Confirm "Stop working?" — when nested, a checkbox picks "just this subtask"
+    /// (drop to the parent) vs the whole task (go idle). Returns (proceed, subtaskOnly).
+    private func promptStopScope() -> (proceed: Bool, subtaskOnly: Bool) {
+        let nested = !ancestors.isEmpty
+        let alert = makeAlert()
+        alert.messageText = "Stop working?"
+        alert.informativeText = nested
+            ? "It goes to the front of the queue so you can resume it later."
+            : "\(currentFocus ?? "This task") goes to the front of the queue so you can resume it later."
+        var box: NSButton? = nil
+        if nested {
+            let cb = NSButton(checkboxWithTitle: "Just this subtask (keep the parent running)", target: nil, action: nil)
+            cb.state = .on
+            cb.sizeToFit()
+            alert.accessoryView = cb
+            box = cb
+        }
+        alert.addButton(withTitle: "Stop")     // index 0
+        alert.addButton(withTitle: "Cancel")   // index 1
+        alert.window.level = .floating
+        alert.window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        return (runFloatingAlert(alert) == 0, box?.state == .on)
+    }
+
     // Menu actions that are guarded by `showing` (they open their own prompt), so
     // they do nothing while another prompt is already up — disabled in that case.
     private static let showingBlockedActions: Set<Selector> = [
         #selector(addNextFocus), #selector(completeTask), #selector(abortTask),
         #selector(addTimeToCurrent), #selector(changeFocus), #selector(addSubtask),
-        #selector(renameTask), #selector(togglePause), #selector(preemptNextFocus),
+        #selector(stopWorking), #selector(renameTask), #selector(togglePause), #selector(preemptNextFocus),
         #selector(clearQueue), #selector(rateUnrated), #selector(showSettings),
         #selector(deleteHistoryItems), #selector(abandonHistoryTask),
     ]
@@ -699,10 +796,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         if showing, let action = menuItem.action, Self.showingBlockedActions.contains(action) {
             return false
         }
-        // Complete / Abort / Rename / Add time / Add subtask act on a running session.
+        // Complete / Abort / Stop / Rename / Add time / Add subtask act on a running session.
         if menuItem.action == #selector(completeTask) || menuItem.action == #selector(abortTask)
             || menuItem.action == #selector(addTimeToCurrent) || menuItem.action == #selector(addSubtask)
-            || menuItem.action == #selector(renameTask) {
+            || menuItem.action == #selector(stopWorking) || menuItem.action == #selector(renameTask) {
             return currentFocus != nil
         }
         if menuItem.action == #selector(togglePause) {
@@ -882,8 +979,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     /// Show a "See Queue"-style picker (in a floating modal) of all queued focuses,
     /// with the same Est. start/finish schedule. Returns the one the user clicks,
     /// or nil if they cancel.
-    private func pickFromQueue() -> QueueItem? {
-        let items = db.queueItems()
+    private func pickFromQueue(filter: ((QueueItem) -> Bool)? = nil) -> QueueItem? {
+        let items = filter.map { f in db.queueItems().filter(f) } ?? db.queueItems()
         guard !items.isEmpty else { return nil }
 
         // Same estimate chain as the queue window: from the current deadline if a
@@ -935,7 +1032,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     /// duration is in seconds. Loops until valid. With `queuePick` (and a non-empty
     /// queue) it also offers a "Pick from queue…" button → `.queuePick`.
     private func askFocusAndMinutes(title: String, info: String, confirm: String,
-                                    cancellable: Bool, queuePick: Bool = false) -> FocusEntry {
+                                    cancellable: Bool, queuePick: Bool = false,
+                                    extraTop: NSView? = nil) -> FocusEntry {
         NSApp.activate(ignoringOtherApps: true)
 
         let focusField = NSTextField(frame: NSRect(x: 0, y: 34, width: 320, height: 24))
@@ -956,6 +1054,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         accessory.addSubview(minutesLabel)
         accessory.addSubview(minutesField)
         accessory.addSubview(elapsed)
+        if let extra = extraTop {   // e.g. the Switch "just this subtask" checkbox — sits on top
+            extra.setFrameOrigin(NSPoint(x: 0, y: 90))
+            accessory.setFrameSize(NSSize(width: 320, height: 90 + extra.frame.height))
+            accessory.addSubview(extra)
+        }
 
         let (elapsedTimer, openSeconds, _) = startElapsedTimer(elapsed)
         defer { elapsedTimer.invalidate() }
@@ -991,22 +1094,26 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     // — the caller pushes it first). Otherwise a fresh top-level task, which clears
     // any leftover ancestor stack.
     private func beginSession(reason: String, seconds: Int, focus: String, resumeTaskId: Int64? = nil,
-                              parentTaskId: Int64? = nil, openSecondsStart: Int? = nil) {
+                              parentTaskId: Int64? = nil, rebuildAncestors: Bool = true,
+                              openSecondsStart: Int? = nil) {
         currentFocus = focus
         intervalStart = Date()
         pausedAt = nil
         if let tid = resumeTaskId, let t = db.task(id: tid) {
             // Whole-stack resume: rebuild the ancestor stack (root-first), reopening
             // each ancestor as a running frame with a fresh interval. Empty for a
-            // top-level task, so a plain resume is unchanged.
-            ancestors = db.ancestorTasks(of: tid).reversed().map { a in
-                let spent = db.spentSeconds(taskId: a.id)
-                let rem = max(1, (a.estimateSeconds ?? 0) - spent)
-                let start = Date()
-                let iid = db.startInterval(taskId: a.id, reason: reason) ?? 0
-                return Frame(taskId: a.id, intervalId: iid, intervalStart: start,
-                             estimateSeconds: a.estimateSeconds ?? 0, spentBefore: spent,
-                             deadline: start.addingTimeInterval(Double(rem)), focus: a.focus)
+            // top-level task, so a plain resume is unchanged. Skipped (rebuildAncestors
+            // = false) when attaching under an already-live parent (subtask switch).
+            if rebuildAncestors {
+                ancestors = db.ancestorTasks(of: tid).reversed().map { a in
+                    let spent = db.spentSeconds(taskId: a.id)
+                    let rem = max(1, (a.estimateSeconds ?? 0) - spent)
+                    let start = Date()
+                    let iid = db.startInterval(taskId: a.id, reason: reason) ?? 0
+                    return Frame(taskId: a.id, intervalId: iid, intervalStart: start,
+                                 estimateSeconds: a.estimateSeconds ?? 0, spentBefore: spent,
+                                 deadline: start.addingTimeInterval(Double(rem)), focus: a.focus)
+                }
             }
             taskId = tid
             estimateSeconds = t.estimateSeconds ?? seconds
@@ -1038,13 +1145,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             title: "Add subtask",
             info: "Runs under the current task. If it's longer than the parent's remaining time, the parent is auto-extended so they finish together.",
             confirm: "Start", cancellable: true) else { return }
-        guard let frame = leafFrame() else { return }
-        ancestors.append(frame)
-        beginSession(reason: "subtask", seconds: seconds, focus: focus,
-                     parentTaskId: parent, openSecondsStart: openStart)
-        // Auto-extend ancestors so a longer subtask doesn't push them into overtime —
-        // they finish together. Grows working estimates only (originals preserved).
-        extendAncestorsToCoverLeaf()
+        // Push the parent and start the fresh subtask under it (auto-extends ancestors
+        // to cover it, so they finish together).
+        _ = parent
+        startSubtaskUnderLeaf(reason: "subtask", seconds: seconds, focus: focus,
+                              resumeId: nil, openStart: openStart)
     }
 
     // ---- history ----
@@ -2008,6 +2113,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         menu.addItem(withTitle: "Add subtask", action: #selector(addSubtask), keyEquivalent: "")
         menu.addItem(withTitle: "Rename task", action: #selector(renameTask), keyEquivalent: "")
         menu.addItem(withTitle: "Abort task", action: #selector(abortTask), keyEquivalent: "")
+        menu.addItem(withTitle: "Stop working", action: #selector(stopWorking), keyEquivalent: "")
         menu.addItem(withTitle: "Switch focus now", action: #selector(changeFocus), keyEquivalent: "")
         menu.addItem(.separator())
         // The queue.
