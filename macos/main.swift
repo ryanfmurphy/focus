@@ -77,8 +77,9 @@ final class CopyableOutlineView: NSOutlineView {
     }
 }
 
-// A node in the History tree: a task (with subtask children) or, in Intervals mode,
-// a flat interval. A reference type so NSOutlineView can track identity/expansion.
+// A node in the History tree: a task (with subtask children), or an interval shown as
+// a dim child row when "Show intervals" is on. A reference type so NSOutlineView can
+// track identity/expansion.
 final class HistoryNode {
     let task: TaskHistoryRow?
     let interval: IntervalHistoryRow?
@@ -334,11 +335,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     private var historyWindow: NSWindow?
     private var historyOutline: NSOutlineView?
     private var historyRows: [TaskHistoryRow] = []       // all tasks (flat), for building the tree
-    private var intervalRows: [IntervalHistoryRow] = []
     private var historyNodes: [HistoryNode] = []          // root nodes shown in the outline
-    private enum HistoryMode { case tasks, intervals }
-    private var historyMode: HistoryMode = .tasks
-    private var showIntervalsInTree = false               // Tasks mode: nest each task's intervals as children
+    private var showIntervalsInTree = false               // nest each task's intervals as dim child rows
     private var queueWindow: NSWindow?
     private var queueTable: NSTableView?
     private var queueRows: [QueueItem] = []
@@ -886,8 +884,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             return !historyTargetNodes().isEmpty
         }
         if menuItem.action == #selector(abandonHistoryTask) {
-            // Only meaningful in Tasks mode, on an in-progress (unfinished) task.
-            guard historyMode == .tasks else { return false }
+            // Only meaningful on an in-progress (unfinished) task.
             return historyTargetNodes().contains { $0.task.map { $0.endedAt == nil } ?? false }
         }
         if menuItem.action == #selector(toggleShowPill) {
@@ -1298,20 +1295,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             let container = NSView(frame: window.contentView!.bounds)
             container.autoresizingMask = [.width, .height]
 
-            // Tasks ⇄ Intervals toggle across the top.
-            let toggle = NSSegmentedControl(labels: ["Tasks", "Intervals"],
-                                            trackingMode: .selectOne,
-                                            target: self, action: #selector(historyModeChanged(_:)))
-            toggle.selectedSegment = (historyMode == .intervals ? 1 : 0)
-            toggle.frame = NSRect(x: 12, y: container.bounds.height - 32, width: 220, height: 24)
-            toggle.autoresizingMask = [.minYMargin, .maxXMargin]   // pin to top-left
-
-            // Tasks mode only: nest each task's intervals as children of the task.
+            // Nest each task's intervals as dim child rows of the task.
             let ivCheck = NSButton(checkboxWithTitle: "Show intervals", target: self,
                                    action: #selector(historyIntervalsToggled(_:)))
             ivCheck.state = showIntervalsInTree ? .on : .off
-            ivCheck.frame = NSRect(x: 244, y: container.bounds.height - 30, width: 140, height: 20)
-            ivCheck.autoresizingMask = [.minYMargin, .maxXMargin]
+            ivCheck.frame = NSRect(x: 12, y: container.bounds.height - 30, width: 140, height: 20)
+            ivCheck.autoresizingMask = [.minYMargin, .maxXMargin]   // pin to top-left
 
             let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: container.bounds.width,
                                                     height: container.bounds.height - 40))
@@ -1342,7 +1331,6 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
 
             scroll.documentView = outline
             container.addSubview(scroll)
-            container.addSubview(toggle)
             container.addSubview(ivCheck)
             window.contentView = container
 
@@ -1355,69 +1343,52 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         historyWindow?.makeKeyAndOrderFront(nil)
     }
 
-    @objc private func historyModeChanged(_ sender: NSSegmentedControl) {
-        historyMode = sender.selectedSegment == 1 ? .intervals : .tasks
-        reloadHistory()
-    }
-
     @objc private func historyIntervalsToggled(_ sender: NSButton) {
         showIntervalsInTree = sender.state == .on
         reloadHistory()
     }
 
-    /// Load the active mode's rows, build the node tree, install columns, sort, refresh.
+    /// Load the task rows, build the node tree, install columns, sort, refresh.
     private func reloadHistory() {
-        switch historyMode {
-        case .tasks:     historyRows = db.taskHistory()
-        case .intervals: intervalRows = db.intervalHistory()
-        }
+        historyRows = db.taskHistory()
         configureHistoryColumns()
-        // Keep the current sort if it still applies to this mode; else fall back to
-        // the mode's default — tasks: Ended desc (most-recently-worked, in-progress
-        // on top); intervals: Started desc (newest interval first).
+        // Default sort: Ended desc (most-recently-worked, with in-progress on top).
         let current = historyOutline?.sortDescriptors.first?.key
         if current == nil || !historyColumnKeys().contains(current!) {
-            let key = historyMode == .tasks ? "ended" : "when"
-            historyOutline?.sortDescriptors = [NSSortDescriptor(key: key, ascending: false)]
+            historyOutline?.sortDescriptors = [NSSortDescriptor(key: "ended", ascending: false)]
         }
         rebuildHistoryNodes()
         applyHistorySort()
         historyOutline?.reloadData()
-        if historyMode == .tasks { historyOutline?.expandItem(nil, expandChildren: true) }   // reveal subtasks
+        historyOutline?.expandItem(nil, expandChildren: true)   // reveal subtasks
     }
 
-    // Build the outline's root nodes: a task tree (subtasks nested under their parent)
-    // for Tasks mode, or a flat list of intervals for Intervals mode.
+    // Build the outline's root nodes: a task tree (subtasks nested under their parent),
+    // optionally with each task's own intervals attached as dim child rows.
     private func rebuildHistoryNodes() {
-        switch historyMode {
-        case .intervals:
-            historyNodes = intervalRows.map { HistoryNode(interval: $0) }
-        case .tasks:
-            var byId: [Int64: HistoryNode] = [:]
-            for r in historyRows { byId[r.id] = HistoryNode(task: r) }
-            // Optionally attach each task's own intervals as child rows.
-            if showIntervalsInTree {
-                var ivsByTask: [Int64: [IntervalHistoryRow]] = [:]
-                for iv in db.intervalHistory() { ivsByTask[iv.taskId, default: []].append(iv) }
-                for (tid, node) in byId {
-                    for iv in ivsByTask[tid] ?? [] { node.children.append(HistoryNode(interval: iv)) }
-                }
+        var byId: [Int64: HistoryNode] = [:]
+        for r in historyRows { byId[r.id] = HistoryNode(task: r) }
+        // Optionally attach each task's own intervals as child rows.
+        if showIntervalsInTree {
+            var ivsByTask: [Int64: [IntervalHistoryRow]] = [:]
+            for iv in db.intervalHistory() { ivsByTask[iv.taskId, default: []].append(iv) }
+            for (tid, node) in byId {
+                for iv in ivsByTask[tid] ?? [] { node.children.append(HistoryNode(interval: iv)) }
             }
-            // Nest subtasks under their parent (alongside any interval children).
-            var roots: [HistoryNode] = []
-            for r in historyRows {
-                let node = byId[r.id]!
-                if let pid = r.parentTaskId, let parent = byId[pid] { parent.children.append(node) }
-                else { roots.append(node) }   // top-level, or orphan whose parent isn't loaded
-            }
-            historyNodes = roots
         }
+        // Nest subtasks under their parent (alongside any interval children).
+        var roots: [HistoryNode] = []
+        for r in historyRows {
+            let node = byId[r.id]!
+            if let pid = r.parentTaskId, let parent = byId[pid] { parent.children.append(node) }
+            else { roots.append(node) }   // top-level, or orphan whose parent isn't loaded
+        }
+        historyNodes = roots
     }
 
-    // Sort keys valid for the active mode's columns.
+    // Sort keys valid for the task columns.
     private func historyColumnKeys() -> Set<String> {
-        historyMode == .tasks ? ["when", "ended", "min", "origmin", "ivs", "rating", "status", "focus", "note"]
-                              : ["when", "dur", "rating", "reason", "task"]
+        ["when", "ended", "min", "origmin", "ivs", "rating", "status", "focus", "note"]
     }
 
     // Sort the tree: top-level tasks by the clicked column; a task's children
@@ -1434,7 +1405,6 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         } else {
             nodes.sort { a, b in
                 if let ta = a.task, let tb = b.task { return taskLess(ta, tb, key: key, ascending: ascending) }
-                if let ia = a.interval, let ib = b.interval { return intervalLess(ia, ib, key: key, ascending: ascending) }
                 return false
             }
         }
@@ -1472,17 +1442,6 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         }
     }
 
-    private func intervalLess(_ a: IntervalHistoryRow, _ b: IntervalHistoryRow, key: String, ascending: Bool) -> Bool {
-        switch key {
-        case "when":   return dir(a.startedAt, b.startedAt, ascending)
-        case "dur":    return dir(a.seconds, b.seconds, ascending)
-        case "rating": return dir(a.rating ?? -1, b.rating ?? -1, ascending)
-        case "reason": return dir(a.reason ?? "", b.reason ?? "", ascending)
-        case "task":   return dir(a.taskFocus.lowercased(), b.taskFocus.lowercased(), ascending)
-        default:       return dir(a.id, b.id, ascending)
-        }
-    }
-
     private func configureHistoryColumns() {
         guard let outline = historyOutline else { return }
         // NSOutlineView refuses to removeTableColumn its current outlineTableColumn (and
@@ -1500,25 +1459,16 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             outline.addTableColumn(col)
             if first == nil { first = col }
         }
-        switch historyMode {
-        case .tasks:
-            // Focus is the outline column, so subtasks indent under their parent here.
-            add("focus", "Focus", width: 340, min: 180)
-            add("when", "Started", width: 140, min: 120)
-            add("ended", "Ended", width: 140, min: 120)
-            add("min", "Actual", width: 70, min: 56, align: .right)
-            add("origmin", "Est (orig)", width: 78, min: 60, align: .right)
-            add("ivs", "Intervals", width: 70, min: 56, align: .right)
-            add("rating", "Rating", width: 60, min: 50, align: .right)
-            add("status", "Status", width: 95, min: 70)
-            add("note", "Note", width: 320, min: 100)
-        case .intervals:
-            add("when", "Started", width: 140, min: 120)
-            add("dur", "Duration", width: 70, min: 56, align: .right)
-            add("rating", "Rating", width: 60, min: 50, align: .right)
-            add("reason", "Reason", width: 100, min: 70)
-            add("task", "Task", width: 460, min: 150)
-        }
+        // Focus is the outline column, so subtasks indent under their parent here.
+        add("focus", "Focus", width: 340, min: 180)
+        add("when", "Started", width: 140, min: 120)
+        add("ended", "Ended", width: 140, min: 120)
+        add("min", "Actual", width: 70, min: 56, align: .right)
+        add("origmin", "Est (orig)", width: 78, min: 60, align: .right)
+        add("ivs", "Intervals", width: 70, min: 56, align: .right)
+        add("rating", "Rating", width: 60, min: 50, align: .right)
+        add("status", "Status", width: 95, min: 70)
+        add("note", "Note", width: 320, min: 100)
         outline.outlineTableColumn = first   // disclosure triangles + indentation live here
         outline.removeTableColumn(placeholder)   // now safe — no longer the outline column
     }
@@ -1527,23 +1477,6 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     private func copyHistoryRows(_ indexes: IndexSet) {
         guard let outline = historyOutline, !indexes.isEmpty else { return }
         let nodes = indexes.compactMap { outline.item(atRow: $0) as? HistoryNode }
-        if historyMode == .intervals {
-            var lines = ["Started\tEnded\tDuration (s)\tRating\tReason\tTask"]
-            for r in nodes.compactMap({ $0.interval }) {
-                let fields: [String] = [
-                    whenLabel(r.startedAt),
-                    r.endedAt.map(whenLabel) ?? "",
-                    "\(r.seconds)",
-                    r.rating.map { "\($0)" } ?? "",
-                    r.reason ?? "",
-                    r.taskFocus,
-                ]
-                lines.append(fields.map(tsvClean).joined(separator: "\t"))
-            }
-            NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(lines.joined(separator: "\n"), forType: .string)
-            return
-        }
         var lines = ["Started\tEnded\tActual (s)\tOrig est (s)\tIntervals\tRating\tStatus\tFocus\tNote"]
         for node in nodes {
             guard let r = node.task else { continue }
@@ -1623,7 +1556,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     // abandoned (a terminal status — kept in history with time worked so far, no
     // rating) and drop them from the queue, so they stop floating at the top.
     @objc func abandonHistoryTask() {
-        guard !showing, historyMode == .tasks else { return }
+        guard !showing else { return }
         let ids = historyTargetNodes().compactMap { $0.task }.filter { $0.endedAt == nil }.map { $0.id }   // in-progress only
         guard !ids.isEmpty else { return }
 
@@ -1797,7 +1730,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         tableView === queueTable ? queueRows.count : 0
     }
 
-    // ---- History outline data source (tree of tasks, or a flat list of intervals) ----
+    // ---- History outline data source (tree of tasks, optional interval child rows) ----
     func outlineView(_ outlineView: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {
         (item as? HistoryNode)?.children.count ?? historyNodes.count
     }
@@ -1814,13 +1747,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             return historyCell(outlineView, id: id, text: c.0, align: c.1)
         }
         if let iv = node.interval {
-            // In Tasks mode an interval is a dim child row rendered in the task columns.
-            if historyMode == .tasks {
-                let c = intervalInTaskColumns(iv, id)
-                return historyCell(outlineView, id: id, text: c.0, align: c.1, color: .secondaryLabelColor)
-            }
-            let c = intervalCellText(iv, id)
-            return historyCell(outlineView, id: id, text: c.0, align: c.1)
+            // An interval is a dim child row rendered in the task columns.
+            let c = intervalInTaskColumns(iv, id)
+            return historyCell(outlineView, id: id, text: c.0, align: c.1, color: .secondaryLabelColor)
         }
         return nil
     }
@@ -1851,16 +1780,6 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         default:        return (r.focus, .left)
         }
     }
-    private func intervalCellText(_ r: IntervalHistoryRow, _ id: String) -> (String, NSTextAlignment) {
-        switch id {
-        case "when":   return (whenLabel(r.startedAt), .left)
-        case "dur":    return (mmss(r.seconds), .right)
-        case "rating": return (r.rating.map { "\($0)/10" } ?? "—", .right)
-        case "reason": return (r.reason ?? "—", .left)
-        default:       return (r.taskFocus, .left)
-        }
-    }
-
     // ---- queue reordering (right-click menu on the queue table) ----
     @objc func moveQueueItemUp()      { moveClickedQueueRow { $0 - 1 } }
     @objc func moveQueueItemDown()    { moveClickedQueueRow { $0 + 1 } }

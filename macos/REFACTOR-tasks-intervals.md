@@ -67,9 +67,10 @@ Subtasks feature builds on.
     small `insertLegacySession` fixture writer for the migration tests. FocusCore
     dropped ~300 lines; redundant old behavioral tests removed. 139 assertions pass.
 - [~] **2 — display.** History rollup columns (Actual/Estimate/Intervals) done in
-  1c. Added a **Tasks ⇄ Intervals** toggle to See History: Intervals shows the
-  global chronological interval timeline (Started/Duration/Rating/Reason/Task),
-  with interval-level copy + delete. Queue-remaining display still TODO.
+  1c. See History is a task tree with a **Show intervals** checkbox that nests each
+  task's intervals as dim child rows. (An earlier standalone **Tasks ⇄ Intervals**
+  toggle / flat interval view was removed — the checkbox covers the need.)
+  Queue-remaining display still TODO.
 - [~] **3 (separate) — subtasks** via `parent_task_id` — design locked (below).
 
 ## Subtasks — locked design
