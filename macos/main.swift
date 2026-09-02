@@ -635,7 +635,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         if nested { radio(.justSubtask, "Switch just this subtask (keep the parent running)") }
         if preempting { radio(.newTopLevel, "Switch to a new top-level task") }
         if preempting && db.queueItems().contains(where: isTopLevelQueueItem) {
-            radio(.underQueued, "Make it a subtask under another queued task")
+            radio(.underQueued, "Switch to a new subtask of another top-level task")
         }
         modeButtons.first?.button.state = .on
         func currentMode() -> SwitchMode { modeButtons.first(where: { $0.button.state == .on })?.mode ?? .newTopLevel }
