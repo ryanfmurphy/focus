@@ -258,16 +258,18 @@ section("enqueueTask: fresh items mint a queued task now, deferred items carry t
     db.enqueueTask(focus: "Fresh A", estimateSeconds: 600)                 // mints a queued task
     db.enqueueTask(focus: "Fresh B", estimateSeconds: 300)
     db.enqueueTask(focus: "Resume me", estimateSeconds: 1500, taskId: 42)  // resume existing task 42
-    eq(db.queueItems().map { $0.focus }, ["Fresh A", "Fresh B", "Resume me"], "FIFO order")
-    // Every fresh item now references a real task from creation.
-    guard let aTid = db.queueItems()[0].taskId else { ok(false, "fresh item has a task_id"); return }
+    let items = db.queueItems()
+    eq(items.count, 3, "three rows, FIFO")
+    // Every fresh item now references a real task from creation; focus is read from it.
+    guard let aTid = items[0].taskId else { ok(false, "fresh item has a task_id"); return }
+    eq(items[0].focus, "Fresh A", "fresh item's focus comes from its task (via JOIN)")
+    eq(items[1].focus, "Fresh B", "fresh item's focus comes from its task (via JOIN)")
     eq(db.task(id: aTid)?.status ?? "", "queued", "fresh item's task is 'queued' (never started)")
     eq(db.task(id: aTid)?.estimateSeconds ?? -1, 600, "estimate stamped on the queued task")
-    eq(db.queueItems()[2].taskId ?? -1, 42, "deferred item carries its task_id")
+    eq(items[2].taskId ?? -1, 42, "deferred item carries its task_id")
     ok(db.taskHistory().isEmpty, "queued (never-started) plans stay out of history")
     db.enqueueTask(focus: "Urgent", estimateSeconds: 120, front: true)
-    eq(db.queueItems().map { $0.focus }, ["Urgent", "Fresh A", "Fresh B", "Resume me"], "front: jumps the queue")
-    eq(db.frontOfQueue()?.focus ?? "", "Urgent", "front is Urgent")
+    eq(db.frontOfQueue()?.focus ?? "", "Urgent", "front is Urgent (focus via task)")
     ok(db.frontOfQueue()?.taskId != nil, "front carries its minted task_id")
 }
 

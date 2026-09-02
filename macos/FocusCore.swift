@@ -142,8 +142,7 @@ final class DB {
         CREATE TABLE IF NOT EXISTS queue (
             id         INTEGER PRIMARY KEY AUTOINCREMENT,
             created_at TEXT NOT NULL,
-            seconds    INTEGER,
-            focus      TEXT,
+            seconds    INTEGER,           -- remaining-time snapshot for display (focus lives on the task)
             original_session_id INTEGER, -- carries the chain root onto the resumed session
             position   INTEGER           -- explicit sort order (lower = nearer the front)
         );
@@ -259,15 +258,28 @@ final class DB {
         // hasn't drifted yet, so it IS the original.
         exec("UPDATE tasks SET original_estimate_seconds = estimate_seconds WHERE original_estimate_seconds IS NULL;")
         // Every queue row now references a task from creation. Give any pre-existing
-        // task-less row (a fresh plan typed before this change) a `queued` task.
+        // task-less row (a fresh plan typed before this change) a `queued` task, THEN
+        // drop the now-redundant queue.focus (focus is read from the task via JOIN).
         backfillQueuedTasks()
+        exec("ALTER TABLE queue DROP COLUMN focus;")   // no-op (error-ignored) once already dropped
     }
 
     /// One-time (idempotent): mint a `queued` task for every queue row still missing a
     /// task_id, and point the row at it — so the "every queue item is a task" invariant
-    /// holds for DBs created before task-at-enqueue.
+    /// holds for DBs created before task-at-enqueue. Reads the legacy `queue.focus`
+    /// directly (it's dropped right after this), and no-ops on new DBs (no such column /
+    /// no task-less rows).
     private func backfillQueuedTasks() {
-        for r in queueItems() where r.taskId == nil {
+        var rows: [(id: Int64, seconds: Int, focus: String)] = []
+        var q: OpaquePointer?
+        // Fails to prepare on a new DB (focus already gone) → nothing to backfill.
+        guard sqlite3_prepare_v2(db, "SELECT id, seconds, focus FROM queue WHERE task_id IS NULL;", -1, &q, nil) == SQLITE_OK else { return }
+        while sqlite3_step(q) == SQLITE_ROW {
+            let focus = sqlite3_column_text(q, 2).map { String(cString: $0) } ?? ""
+            rows.append((sqlite3_column_int64(q, 0), Int(sqlite3_column_int(q, 1)), focus))
+        }
+        sqlite3_finalize(q)
+        for r in rows {
             var t: OpaquePointer?
             guard sqlite3_prepare_v2(db, "INSERT INTO tasks (created_at, focus, estimate_seconds, original_estimate_seconds, status) VALUES (?,?,?,?, 'queued');", -1, &t, nil) == SQLITE_OK else { continue }
             sqlite3_bind_text(t, 1, isoNow(), -1, SQLITE_TRANSIENT)
@@ -391,7 +403,7 @@ final class DB {
 
     /// All queued focuses, front (next up) first.
     func queueItems() -> [QueueItem] {
-        let sql = "SELECT id, seconds, focus, original_session_id, task_id FROM queue ORDER BY position ASC, id ASC;"
+        let sql = "SELECT q.id, q.seconds, t.focus, q.original_session_id, q.task_id FROM queue q LEFT JOIN tasks t ON t.id = q.task_id ORDER BY q.position ASC, q.id ASC;"
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
         defer { sqlite3_finalize(stmt) }
@@ -429,7 +441,7 @@ final class DB {
 
     /// The next queued focus (front of the FIFO), or nil if the queue is empty.
     func frontOfQueue() -> QueueItem? {
-        let sql = "SELECT id, seconds, focus, original_session_id, task_id FROM queue ORDER BY position ASC, id ASC LIMIT 1;"
+        let sql = "SELECT q.id, q.seconds, t.focus, q.original_session_id, q.task_id FROM queue q LEFT JOIN tasks t ON t.id = q.task_id ORDER BY q.position ASC, q.id ASC LIMIT 1;"
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return nil }
         defer { sqlite3_finalize(stmt) }
@@ -907,14 +919,13 @@ final class DB {
         }
         let pos = front ? "(SELECT COALESCE(MIN(position), 0) - 1 FROM queue)"
                         : "(SELECT COALESCE(MAX(position), 0) + 1 FROM queue)"
-        let sql = "INSERT INTO queue (created_at, seconds, focus, task_id, position) VALUES (?,?,?,?, \(pos));"
+        let sql = "INSERT INTO queue (created_at, seconds, task_id, position) VALUES (?,?,?, \(pos));"
         var s: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &s, nil) == SQLITE_OK else { return nil }
         defer { sqlite3_finalize(s) }
         sqlite3_bind_text(s, 1, isoNow(), -1, SQLITE_TRANSIENT)
         sqlite3_bind_int(s, 2, Int32(estimateSeconds))
-        sqlite3_bind_text(s, 3, focus, -1, SQLITE_TRANSIENT)
-        sqlite3_bind_int64(s, 4, tid)
+        sqlite3_bind_int64(s, 3, tid)
         sqlite3_step(s)
         return tid
     }

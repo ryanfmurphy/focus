@@ -22,7 +22,11 @@ Subtasks feature builds on.
   clears the status → active; "Remove from queue" abandons a never-started plan
   (kept in History as a 0-time abandoned record — durable identity), while
   "Delete permanently" removes the task + history. `taskHistory` hides `queued`.
-  This removed the old nil-`taskId` "mints when started" hybrid.
+  This removed the old nil-`taskId` "mints when started" hybrid. Follow-up: since the
+  task now owns the focus, the redundant `queue.focus` column was dropped (backfill
+  runs first to copy it onto minted tasks, then `ALTER TABLE queue DROP COLUMN focus`);
+  `queueItems`/`frontOfQueue` read focus via a `JOIN tasks`. `queue.seconds` is kept as
+  an intentional remaining-time display snapshot; `original_session_id` stays (migration).
 - **Refactor first, subtasks later.**
 - **Ids preserved** across migration (`task.id` = chain-root session id,
   `interval.id` = old session id) so the aux tables keep referencing by the same
