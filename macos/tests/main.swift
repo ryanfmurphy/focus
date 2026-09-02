@@ -253,18 +253,40 @@ section("Apply-time credits an interval; rename edits the task") {
     eq(db.task(id: tid)?.focus ?? "", "New name", "rename updates the task focus")
 }
 
-section("enqueueTask: fresh items mint a task later, deferred items carry task_id") {
+section("enqueueTask: fresh items mint a queued task now, deferred items carry task_id") {
     let db = freshDB()
-    db.enqueueTask(focus: "Fresh A", estimateSeconds: 600)                 // no task yet
+    db.enqueueTask(focus: "Fresh A", estimateSeconds: 600)                 // mints a queued task
     db.enqueueTask(focus: "Fresh B", estimateSeconds: 300)
     db.enqueueTask(focus: "Resume me", estimateSeconds: 1500, taskId: 42)  // resume existing task 42
     eq(db.queueItems().map { $0.focus }, ["Fresh A", "Fresh B", "Resume me"], "FIFO order")
-    ok(db.queueItems()[0].taskId == nil, "fresh item has no task_id")
+    // Every fresh item now references a real task from creation.
+    guard let aTid = db.queueItems()[0].taskId else { ok(false, "fresh item has a task_id"); return }
+    eq(db.task(id: aTid)?.status ?? "", "queued", "fresh item's task is 'queued' (never started)")
+    eq(db.task(id: aTid)?.estimateSeconds ?? -1, 600, "estimate stamped on the queued task")
     eq(db.queueItems()[2].taskId ?? -1, 42, "deferred item carries its task_id")
+    ok(db.taskHistory().isEmpty, "queued (never-started) plans stay out of history")
     db.enqueueTask(focus: "Urgent", estimateSeconds: 120, front: true)
     eq(db.queueItems().map { $0.focus }, ["Urgent", "Fresh A", "Fresh B", "Resume me"], "front: jumps the queue")
     eq(db.frontOfQueue()?.focus ?? "", "Urgent", "front is Urgent")
-    ok(db.frontOfQueue()?.taskId == nil, "front carries its (nil) task_id")
+    ok(db.frontOfQueue()?.taskId != nil, "front carries its minted task_id")
+}
+
+section("Queued task: starting it clears 'queued' and it enters history; remove abandons") {
+    let db = freshDB()
+    let tid = db.enqueueTask(focus: "Plan it", estimateSeconds: 600)!
+    eq(db.task(id: tid)?.status ?? "", "queued", "starts life queued")
+    // Start it: first interval clears the queued status.
+    let iid = db.startInterval(taskId: tid, reason: "queue")!
+    ok(db.task(id: tid)?.status == nil, "starting clears 'queued' → active")
+    eq(db.taskHistory().count, 1, "now visible in history")
+    db.endInterval(id: iid, elapsedSeconds: 120)
+
+    // A second, never-started plan that we clear → abandoned, still in history.
+    let tid2 = db.enqueueTask(focus: "Bail on it", estimateSeconds: 300)!
+    db.clearQueue()
+    eq(db.task(id: tid2)?.status ?? "", "abandoned", "clearQueue abandons never-started plans")
+    eq(db.queueItems().count, 0, "queue emptied")
+    ok(db.taskHistory().contains { $0.id == tid2 }, "abandoned plan shows in history")
 }
 
 section("taskHistory rolls up one row per task with actual/interval-count/span") {

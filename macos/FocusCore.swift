@@ -243,8 +243,9 @@ final class DB {
         );
         """)
         exec("ALTER TABLE intervals ADD COLUMN rating INTEGER;")  // for any DB that made `intervals` before this column
-        // A queued item may reference an existing task to RESUME (deferred/pre-empted)
-        // — task_id set — or be a fresh focus that mints a task when started (NULL).
+        // Every queue row references a task: an existing one to RESUME (deferred/
+        // pre-empted) or, for a fresh plan, a `queued` task minted at enqueue time.
+        // (Column added nullable for old DBs; backfillQueuedTasks fills any gaps.)
         exec("ALTER TABLE queue ADD COLUMN task_id INTEGER;")
         // A frozen copy of the first estimate, so History can compare original vs
         // actual even as Add time / auto-extend grow the working estimate.
@@ -257,6 +258,31 @@ final class DB {
         // (migrated tasks and any created before this change): its current estimate
         // hasn't drifted yet, so it IS the original.
         exec("UPDATE tasks SET original_estimate_seconds = estimate_seconds WHERE original_estimate_seconds IS NULL;")
+        // Every queue row now references a task from creation. Give any pre-existing
+        // task-less row (a fresh plan typed before this change) a `queued` task.
+        backfillQueuedTasks()
+    }
+
+    /// One-time (idempotent): mint a `queued` task for every queue row still missing a
+    /// task_id, and point the row at it — so the "every queue item is a task" invariant
+    /// holds for DBs created before task-at-enqueue.
+    private func backfillQueuedTasks() {
+        for r in queueItems() where r.taskId == nil {
+            var t: OpaquePointer?
+            guard sqlite3_prepare_v2(db, "INSERT INTO tasks (created_at, focus, estimate_seconds, original_estimate_seconds, status) VALUES (?,?,?,?, 'queued');", -1, &t, nil) == SQLITE_OK else { continue }
+            sqlite3_bind_text(t, 1, isoNow(), -1, SQLITE_TRANSIENT)
+            sqlite3_bind_text(t, 2, r.focus, -1, SQLITE_TRANSIENT)
+            sqlite3_bind_int(t, 3, Int32(r.seconds))
+            sqlite3_bind_int(t, 4, Int32(r.seconds))
+            let done = sqlite3_step(t) == SQLITE_DONE
+            sqlite3_finalize(t)
+            guard done else { continue }
+            let tid = sqlite3_last_insert_rowid(db)
+            var u: OpaquePointer?
+            if sqlite3_prepare_v2(db, "UPDATE queue SET task_id=? WHERE id=?;", -1, &u, nil) == SQLITE_OK {
+                sqlite3_bind_int64(u, 1, tid); sqlite3_bind_int64(u, 2, r.id); sqlite3_step(u); sqlite3_finalize(u)
+            }
+        }
     }
 
     private func exec(_ sql: String) { sqlite3_exec(db, sql, nil, nil, nil) }
@@ -434,7 +460,12 @@ final class DB {
         sqlite3_step(stmt)
     }
 
-    func clearQueue() { sqlite3_exec(db, "DELETE FROM queue;", nil, nil, nil) }
+    func clearQueue() {
+        // Never-started plans are kept as abandoned records (durable identity); started
+        // set-aside tasks are just unqueued. Then drop every queue row.
+        exec("UPDATE tasks SET status='abandoned' WHERE status='queued' AND id IN (SELECT task_id FROM queue WHERE task_id IS NOT NULL);")
+        exec("DELETE FROM queue;")
+    }
 
     // MARK: - Tasks + intervals (new model)
 
@@ -597,7 +628,10 @@ final class DB {
         sqlite3_bind_text(s, 2, isoNow(), -1, SQLITE_TRANSIENT)
         sqlite3_bind_text(s, 3, reason, -1, SQLITE_TRANSIENT)
         guard sqlite3_step(s) == SQLITE_DONE else { return nil }
-        return sqlite3_last_insert_rowid(db)
+        let intervalId = sqlite3_last_insert_rowid(db)
+        // A `queued` (never-started) task becomes active the moment it gets an interval.
+        exec("UPDATE tasks SET status=NULL WHERE id=\(taskId) AND status='queued';")
+        return intervalId
     }
 
     /// Accumulate popup-open seconds on an interval (COALESCE from 0, like sessions).
@@ -849,20 +883,40 @@ final class DB {
         sqlite3_step(s)
     }
 
-    /// Enqueue a focus. `taskId` set = resume that existing task (deferred/pre-empted);
-    /// nil = a fresh focus that mints a task when started. `front` inserts at the head.
-    func enqueueTask(focus: String, estimateSeconds: Int, taskId: Int64? = nil, front: Bool = false) {
+    /// Enqueue a focus. `taskId` set = resume that existing task (deferred/pre-empted).
+    /// nil = a fresh plan: mint a `queued` task now (durable identity), so every queue
+    /// row references a real task from creation. Starting it clears the `queued` status;
+    /// removing it from the queue abandons it (kept in history). `front` inserts at head.
+    /// Returns the task id the row points at.
+    @discardableResult
+    func enqueueTask(focus: String, estimateSeconds: Int, taskId: Int64? = nil, front: Bool = false) -> Int64? {
+        let tid: Int64
+        if let t = taskId {
+            tid = t
+        } else {
+            var t: OpaquePointer?
+            guard sqlite3_prepare_v2(db, "INSERT INTO tasks (created_at, focus, estimate_seconds, original_estimate_seconds, status) VALUES (?,?,?,?, 'queued');", -1, &t, nil) == SQLITE_OK else { return nil }
+            sqlite3_bind_text(t, 1, isoNow(), -1, SQLITE_TRANSIENT)
+            sqlite3_bind_text(t, 2, focus, -1, SQLITE_TRANSIENT)
+            sqlite3_bind_int(t, 3, Int32(estimateSeconds))
+            sqlite3_bind_int(t, 4, Int32(estimateSeconds))   // original == working at creation
+            let done = sqlite3_step(t) == SQLITE_DONE
+            sqlite3_finalize(t)
+            guard done else { return nil }
+            tid = sqlite3_last_insert_rowid(db)
+        }
         let pos = front ? "(SELECT COALESCE(MIN(position), 0) - 1 FROM queue)"
                         : "(SELECT COALESCE(MAX(position), 0) + 1 FROM queue)"
         let sql = "INSERT INTO queue (created_at, seconds, focus, task_id, position) VALUES (?,?,?,?, \(pos));"
         var s: OpaquePointer?
-        guard sqlite3_prepare_v2(db, sql, -1, &s, nil) == SQLITE_OK else { return }
+        guard sqlite3_prepare_v2(db, sql, -1, &s, nil) == SQLITE_OK else { return nil }
         defer { sqlite3_finalize(s) }
         sqlite3_bind_text(s, 1, isoNow(), -1, SQLITE_TRANSIENT)
         sqlite3_bind_int(s, 2, Int32(estimateSeconds))
         sqlite3_bind_text(s, 3, focus, -1, SQLITE_TRANSIENT)
-        if let t = taskId { sqlite3_bind_int64(s, 4, t) } else { sqlite3_bind_null(s, 4) }
+        sqlite3_bind_int64(s, 4, tid)
         sqlite3_step(s)
+        return tid
     }
 
     /// History rolled up to one row per task, newest first: each task with its
@@ -882,6 +936,7 @@ final class DB {
                MAX(COALESCE(iv.ended_at, iv.started_at)),
                t.parent_task_id
         FROM tasks t LEFT JOIN intervals iv ON iv.task_id = t.id
+        WHERE COALESCE(t.status,'') <> 'queued'   -- never-started plans live in the queue, not history
         GROUP BY t.id ORDER BY t.id DESC LIMIT ?;
         """
         var s: OpaquePointer?

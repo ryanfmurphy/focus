@@ -855,6 +855,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         #selector(stopWorking), #selector(switchToSubtask), #selector(renameTask), #selector(togglePause), #selector(preemptNextFocus),
         #selector(clearQueue), #selector(rateUnrated), #selector(showSettings),
         #selector(deleteHistoryItems), #selector(abandonHistoryTask),
+        #selector(deleteQueuedTaskPermanently),
     ]
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
@@ -1648,7 +1649,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             rowMenu.addItem(withTitle: "Move to top", action: #selector(moveQueueItemToTop), keyEquivalent: "")
             rowMenu.addItem(withTitle: "Move to bottom", action: #selector(moveQueueItemToBottom), keyEquivalent: "")
             rowMenu.addItem(.separator())
-            rowMenu.addItem(withTitle: "Delete from queue", action: #selector(deleteClickedQueueItem), keyEquivalent: "")
+            rowMenu.addItem(withTitle: "Remove from queue", action: #selector(deleteClickedQueueItem), keyEquivalent: "")
+            rowMenu.addItem(withTitle: "Delete permanently", action: #selector(deleteQueuedTaskPermanently), keyEquivalent: "")
             for mi in rowMenu.items { mi.target = self }
             table.menu = rowMenu
 
@@ -1802,12 +1804,40 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         table.reloadData()
     }
 
-    // Delete the right-clicked queue row (menu), or the selected row (Delete key).
+    // Remove the right-clicked queue row (menu), or the selected row (Delete key).
     @objc func deleteClickedQueueItem() { deleteQueueRow(at: queueTable?.clickedRow ?? -1) }
 
+    // "Remove from queue": drop the queue row. A never-started plan (its task exists but
+    // has no intervals) is kept as an abandoned record rather than vanishing — durable
+    // identity for queue items. A started set-aside task just leaves the queue.
     private func deleteQueueRow(at row: Int) {
         guard row >= 0, row < queueRows.count else { return }
-        db.removeFromQueue(id: queueRows[row].id)
+        let item = queueRows[row]
+        db.removeFromQueue(id: item.id)
+        if let tid = item.taskId, db.task(id: tid)?.status == "queued" {
+            db.finishTask(id: tid, status: "abandoned")
+        }
+        reloadQueueData()
+        queueTable?.reloadData()
+    }
+
+    // "Delete permanently": remove the row AND delete the task + its history entirely.
+    @objc func deleteQueuedTaskPermanently() {
+        let row = queueTable?.clickedRow ?? -1
+        guard !showing, row >= 0, row < queueRows.count else { return }
+        showing = true
+        defer { showing = false }
+        let item = queueRows[row]
+        let alert = makeAlert()
+        alert.messageText = "Delete permanently?"
+        alert.informativeText = "\(queueDisplayName(item)) — removes it from the queue and deletes the task and its history. Can't be undone."
+        alert.addButton(withTitle: "Delete")   // 0
+        alert.addButton(withTitle: "Cancel")   // 1
+        alert.window.level = .floating
+        alert.window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        guard runFloatingAlert(alert) == 0 else { return }
+        db.removeFromQueue(id: item.id)
+        if let tid = item.taskId { db.deleteTasks(ids: [tid]) }
         reloadQueueData()
         queueTable?.reloadData()
     }

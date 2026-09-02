@@ -16,7 +16,13 @@ Subtasks feature builds on.
 
 - **Conservative core**, not full unification: `pauses` / `preempts` /
   `time_additions` keep their tables (pauses stay sub-interval spans, not folded
-  into gaps); the queue is not turned into a task-status. Smallest blast radius.
+  into gaps). Smallest blast radius.
+- **Task-at-enqueue** (added later): every queue row references a real task from
+  creation — a fresh plan mints a `queued`-status task (no interval). Starting it
+  clears the status → active; "Remove from queue" abandons a never-started plan
+  (kept in History as a 0-time abandoned record — durable identity), while
+  "Delete permanently" removes the task + history. `taskHistory` hides `queued`.
+  This removed the old nil-`taskId` "mints when started" hybrid.
 - **Refactor first, subtasks later.**
 - **Ids preserved** across migration (`task.id` = chain-root session id,
   `interval.id` = old session id) so the aux tables keep referencing by the same
