@@ -310,6 +310,32 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         extendAncestorsToCoverLeaf()   // keep the parent covering the new subtask
     }
 
+    /// A queue item that would be (or already is) a top-level task: fresh items (they
+    /// mint a top-level task when started) and existing tasks with no parent. Set-aside
+    /// subtasks are excluded — they can't serve as the parent for "make it a subtask
+    /// under another queued task".
+    private func isTopLevelQueueItem(_ item: QueueItem) -> Bool {
+        guard let tid = item.taskId else { return true }
+        return db.task(id: tid)?.parentTaskId == nil
+    }
+
+    /// Stack checkboxes into one accessory-top view (first box on top). A single box
+    /// passes through unchanged; an empty list returns nil.
+    private func stackChecks(_ boxes: [NSButton]) -> NSView? {
+        guard boxes.count > 1 else { return boxes.first }
+        let gap: CGFloat = 4
+        let width = boxes.map { $0.frame.width }.max() ?? 320
+        let height = boxes.reduce(0) { $0 + $1.frame.height } + gap * CGFloat(boxes.count - 1)
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: width, height: height))
+        var y: CGFloat = 0
+        for b in boxes.reversed() {   // last box at the bottom, first box on top
+            b.setFrameOrigin(NSPoint(x: 0, y: y))
+            container.addSubview(b)
+            y += b.frame.height + gap
+        }
+        return container
+    }
+
     /// Wall-time of an interval row from its start to now — for closing orphan/
     /// abandoned intervals during restart.
     private func intervalElapsed(_ iv: Interval) -> Int {
@@ -581,9 +607,21 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         if nested {
             let cb = NSButton(checkboxWithTitle: "Switch just this subtask (keep the parent running)", target: nil, action: nil)
             cb.state = .on
-            cb.frame = NSRect(x: 0, y: 0, width: 320, height: 20)
+            cb.frame = NSRect(x: 0, y: 0, width: 360, height: 20)
             subtaskBox = cb
         }
+
+        // Whole-task switch only: offer to attach the new (typed) focus as a subtask
+        // under another top-level task picked from the queue, instead of starting it
+        // top-level. Only shown when there's an eligible parent waiting.
+        var underTaskBox: NSButton? = nil
+        if preempting && db.queueItems().contains(where: isTopLevelQueueItem) {
+            let cb = NSButton(checkboxWithTitle: "Make it a subtask under another queued task", target: nil, action: nil)
+            cb.state = .off
+            cb.frame = NSRect(x: 0, y: 0, width: 360, height: 20)
+            underTaskBox = cb
+        }
+        let extraTop = stackChecks([subtaskBox, underTaskBox].compactMap { $0 })
 
         // Pre-empt is voluntary → cancellable (cancel leaves the current session
         // untouched) and can pull from the queue. Idle "Set focus" stays mandatory.
@@ -591,14 +629,22 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         var newOpenStart: Int? = nil
         var resumeId: Int64? = nil
         var subtaskMode = false
+        var underParent: QueueItem? = nil
         prompt: while true {
             let entry = askFocusAndMinutes(title: title, info: info, confirm: "Start",
-                                           cancellable: preempting, queuePick: true, extraTop: subtaskBox)
+                                           cancellable: preempting, queuePick: true, extraTop: extraTop)
             subtaskMode = nested && (subtaskBox?.state == .on)   // read AFTER the modal
             switch entry {
             case .cancelled:
                 return
             case .entered(let f, let s, let o):
+                if !subtaskMode, underTaskBox?.state == .on {
+                    // Attach the typed focus under another queued top-level task: pick
+                    // the parent now (it's activated when we start, below).
+                    guard let parent = pickFromQueue(filter: { self.isTopLevelQueueItem($0) },
+                                                     showParentChain: false) else { continue prompt }
+                    underParent = parent
+                }
                 newFocus = f; newSeconds = s; newOpenStart = o          // fresh task
                 break prompt
             case .queuePick:
@@ -635,7 +681,17 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         }
 
         let preemptedInterval = intervalId
-        if subtaskMode {
+        if let parent = underParent {
+            // Whole-task switch → make the new focus a subtask under a chosen queued
+            // task. Suspend the current stack, activate the parent (it starts ticking),
+            // then run the new focus as a subtask under it — both count down.
+            if preempting { suspendStack() }
+            db.removeFromQueue(id: parent.id)
+            beginSession(reason: preempting ? "preempt" : "manual", seconds: parent.seconds,
+                         focus: parent.focus, resumeTaskId: parent.taskId)
+            startSubtaskUnderLeaf(reason: "subtask", seconds: newSeconds, focus: newFocus,
+                                  resumeId: nil, openStart: newOpenStart)
+        } else if subtaskMode {
             // Suspend just this subtask (drops to the still-ticking parent), then run
             // the new sibling subtask under that parent.
             suspendLeaf()
