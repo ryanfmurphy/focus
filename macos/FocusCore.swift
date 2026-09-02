@@ -106,54 +106,24 @@ final class DB {
         if sqlite3_open(dbPath, &db) != SQLITE_OK {
             FileHandle.standardError.write("focus: cannot open db at \(dbPath)\n".data(using: .utf8)!)
         }
-        exec("""
-        CREATE TABLE IF NOT EXISTS sessions (
-            id         INTEGER PRIMARY KEY AUTOINCREMENT,
-            started_at TEXT NOT NULL,
-            ended_at   TEXT,
-            reason     TEXT,          -- what triggered the prompt: launch/wake/unlock/session/manual
-            seconds    INTEGER,       -- planned duration in seconds (input is minutes, stored ×60); bumped by "Add time"
-            original_seconds INTEGER, -- planned duration stamped at creation; never changes when time is added
-            focus      TEXT,
-            rating     INTEGER,       -- 1..10, only for completed sessions
-            status     TEXT,          -- completed / interrupted (NULL while active)
-            note       TEXT,          -- optional note written when rating
-            original_session_id INTEGER, -- root of a pre-empt→continued chain (NULL if this is the original)
-            open_seconds_start INTEGER, -- seconds the session-start popup stayed open
-            open_seconds_end   INTEGER  -- seconds the ending/rating popup stayed open
-        );
-        """)
-        // Migrations for older DBs (each errors harmlessly if already applied).
-        exec("ALTER TABLE sessions ADD COLUMN note TEXT;")
-        exec("ALTER TABLE sessions RENAME COLUMN outcome TO status;")
-        exec("ALTER TABLE sessions ADD COLUMN original_session_id INTEGER;")
-        exec("ALTER TABLE sessions ADD COLUMN open_seconds_start INTEGER;")
-        exec("ALTER TABLE sessions ADD COLUMN open_seconds_end INTEGER;")
-        // Popup-open durations were first stored as rounded minutes; convert any such
-        // columns to integer seconds (×60), then drop the old minute columns. Each
-        // statement no-ops harmlessly once the minute columns are gone.
-        exec("UPDATE sessions SET open_seconds_start = open_minutes_start * 60 WHERE open_seconds_start IS NULL AND open_minutes_start IS NOT NULL;")
-        exec("UPDATE sessions SET open_seconds_end = open_minutes_end * 60 WHERE open_seconds_end IS NULL AND open_minutes_end IS NOT NULL;")
-        exec("ALTER TABLE sessions DROP COLUMN open_minutes_start;")
-        exec("ALTER TABLE sessions DROP COLUMN open_minutes_end;")
-        // FIFO queue of upcoming sessions. Front = lowest id; "add to end" is a
-        // plain insert; "pop off" deletes the lowest id.
+        // Schema baseline v1. Tables are created at their final shape — the old
+        // incremental CREATE+ALTER chain and the one-time sessions→tasks migration were
+        // squashed here once the live DB reached this shape. To upgrade an older-format
+        // DB, check out the `pre-squash-migrations` git tag (its migration chain), open
+        // the DB once, then switch back. Future changes: bump `PRAGMA user_version` and
+        // guard a migration block on it. Legacy `sessions` is intentionally not
+        // recreated — any existing DB keeps its copy as a harmless leftover.
         exec("""
         CREATE TABLE IF NOT EXISTS queue (
             id         INTEGER PRIMARY KEY AUTOINCREMENT,
             created_at TEXT NOT NULL,
             seconds    INTEGER,           -- remaining-time snapshot for display (focus lives on the task)
-            original_session_id INTEGER, -- carries the chain root onto the resumed session
-            position   INTEGER           -- explicit sort order (lower = nearer the front)
+            original_session_id INTEGER, -- vestigial legacy chain-root carrier (unused; kept nullable)
+            position   INTEGER,          -- explicit sort order (lower = nearer the front)
+            task_id    INTEGER           -- the task this row plans/resumes (always set)
         );
         """)
-        exec("ALTER TABLE queue ADD COLUMN original_session_id INTEGER;")
-        // Explicit ordering column (was implicitly id ASC). Seed it from id so the
-        // current order is preserved, then order by it everywhere.
-        exec("ALTER TABLE queue ADD COLUMN position INTEGER;")
-        exec("UPDATE queue SET position = id WHERE position IS NULL;")
-        // One row per "Add time" event, so a session extended N times has N rows
-        // (sessions.seconds is also bumped to the running total).
+        // One row per "Add time" event; `session_id` is the interval id it extends.
         exec("""
         CREATE TABLE IF NOT EXISTS time_additions (
             id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -183,39 +153,14 @@ final class DB {
             seconds    INTEGER
         );
         """)
-        // Duration columns switched from minutes to integer seconds (×60), for
-        // consistency with the open_seconds_* columns. Add the new column, back-fill
-        // once from the old minute column, then drop it. Each statement no-ops
-        // harmlessly once the minute column is gone (errors are ignored by exec).
-        for table in ["sessions", "queue", "time_additions"] {
-            exec("ALTER TABLE \(table) ADD COLUMN seconds INTEGER;")
-            exec("UPDATE \(table) SET seconds = minutes * 60 WHERE seconds IS NULL AND minutes IS NOT NULL;")
-            exec("ALTER TABLE \(table) DROP COLUMN minutes;")
-        }
-        // Duration a session was created with, unaffected by "Add time". New rows
-        // stamp it directly. Back-fill only completed/active rows, where `seconds`
-        // still holds the planned total, as (current seconds − time added). For
-        // interrupted/deferred rows `seconds` was overwritten with elapsed time, so
-        // the original is unrecoverable — leave it NULL (shown as "—" in history).
-        exec("ALTER TABLE sessions ADD COLUMN original_seconds INTEGER;")
-        exec("""
-        UPDATE sessions SET original_seconds =
-            seconds - COALESCE((SELECT SUM(seconds) FROM time_additions WHERE session_id = sessions.id), 0)
-        WHERE original_seconds IS NULL AND (status IS NULL OR status = 'completed');
-        """)
-
-        // --- tasks + intervals (the new model) ---------------------------------
+        // --- tasks + intervals (the core model) --------------------------------
         // A `task` is the unit of identity/estimate/rating/hierarchy; an `interval`
-        // is one timed chunk of work on a task (today's `sessions` row). These are
-        // created here (empty on a fresh or not-yet-migrated DB); migrateSessions-
-        // ToTasks() populates them from legacy `sessions`. Ids are preserved across
-        // the migration (interval.id == old session.id, task.id == chain-root id),
-        // so the pauses/time_additions/preempts tables keep referring by the same
-        // ids without a repoint.
+        // is one timed chunk of work on a task. The aux tables (time_additions,
+        // preempts, pauses) key off interval ids.
         exec("""
         CREATE TABLE IF NOT EXISTS tasks (
-            id             INTEGER PRIMARY KEY,   -- migrated: = chain-root session id
-            parent_task_id INTEGER,               -- for future subtasks (NULL for now)
+            id             INTEGER PRIMARY KEY,
+            parent_task_id INTEGER,               -- subtask link (NULL = top-level)
             created_at     TEXT,
             focus          TEXT,
             estimate_seconds INTEGER,             -- WORKING estimate (grown by Add time / auto-extend); drives the countdown
@@ -227,7 +172,7 @@ final class DB {
         """)
         exec("""
         CREATE TABLE IF NOT EXISTS intervals (
-            id           INTEGER PRIMARY KEY,      -- migrated: = old session id
+            id           INTEGER PRIMARY KEY,
             task_id      INTEGER NOT NULL,
             started_at   TEXT,
             ended_at     TEXT,
@@ -235,66 +180,10 @@ final class DB {
             reason       TEXT,
             open_seconds_start INTEGER,
             open_seconds_end   INTEGER,
-            rating       INTEGER                   -- optional per-interval rating (unused
-                                                   -- in the UI for now; kept so the split
-                                                   -- migration is lossless and the option
-                                                   -- stays open — headline rating is on tasks)
+            rating       INTEGER                   -- optional per-interval rating (headline rating is on tasks)
         );
         """)
-        exec("ALTER TABLE intervals ADD COLUMN rating INTEGER;")  // for any DB that made `intervals` before this column
-        // Every queue row references a task: an existing one to RESUME (deferred/
-        // pre-empted) or, for a fresh plan, a `queued` task minted at enqueue time.
-        // (Column added nullable for old DBs; backfillQueuedTasks fills any gaps.)
-        exec("ALTER TABLE queue ADD COLUMN task_id INTEGER;")
-        // A frozen copy of the first estimate, so History can compare original vs
-        // actual even as Add time / auto-extend grow the working estimate.
-        exec("ALTER TABLE tasks ADD COLUMN original_estimate_seconds INTEGER;")
-
-        // Populate tasks/intervals from legacy `sessions` (once, guarded, INSERT-only —
-        // the sessions table is left intact as an in-DB fallback).
-        migrateSessionsToTasks()
-        // Backfill the original estimate for any task that predates the column
-        // (migrated tasks and any created before this change): its current estimate
-        // hasn't drifted yet, so it IS the original.
-        exec("UPDATE tasks SET original_estimate_seconds = estimate_seconds WHERE original_estimate_seconds IS NULL;")
-        // Every queue row now references a task from creation. Give any pre-existing
-        // task-less row (a fresh plan typed before this change) a `queued` task, THEN
-        // drop the now-redundant queue.focus (focus is read from the task via JOIN).
-        backfillQueuedTasks()
-        exec("ALTER TABLE queue DROP COLUMN focus;")   // no-op (error-ignored) once already dropped
-    }
-
-    /// One-time (idempotent): mint a `queued` task for every queue row still missing a
-    /// task_id, and point the row at it — so the "every queue item is a task" invariant
-    /// holds for DBs created before task-at-enqueue. Reads the legacy `queue.focus`
-    /// directly (it's dropped right after this), and no-ops on new DBs (no such column /
-    /// no task-less rows).
-    private func backfillQueuedTasks() {
-        var rows: [(id: Int64, seconds: Int, focus: String)] = []
-        var q: OpaquePointer?
-        // Fails to prepare on a new DB (focus already gone) → nothing to backfill.
-        guard sqlite3_prepare_v2(db, "SELECT id, seconds, focus FROM queue WHERE task_id IS NULL;", -1, &q, nil) == SQLITE_OK else { return }
-        while sqlite3_step(q) == SQLITE_ROW {
-            let focus = sqlite3_column_text(q, 2).map { String(cString: $0) } ?? ""
-            rows.append((sqlite3_column_int64(q, 0), Int(sqlite3_column_int(q, 1)), focus))
-        }
-        sqlite3_finalize(q)
-        for r in rows {
-            var t: OpaquePointer?
-            guard sqlite3_prepare_v2(db, "INSERT INTO tasks (created_at, focus, estimate_seconds, original_estimate_seconds, status) VALUES (?,?,?,?, 'queued');", -1, &t, nil) == SQLITE_OK else { continue }
-            sqlite3_bind_text(t, 1, isoNow(), -1, SQLITE_TRANSIENT)
-            sqlite3_bind_text(t, 2, r.focus, -1, SQLITE_TRANSIENT)
-            sqlite3_bind_int(t, 3, Int32(r.seconds))
-            sqlite3_bind_int(t, 4, Int32(r.seconds))
-            let done = sqlite3_step(t) == SQLITE_DONE
-            sqlite3_finalize(t)
-            guard done else { continue }
-            let tid = sqlite3_last_insert_rowid(db)
-            var u: OpaquePointer?
-            if sqlite3_prepare_v2(db, "UPDATE queue SET task_id=? WHERE id=?;", -1, &u, nil) == SQLITE_OK {
-                sqlite3_bind_int64(u, 1, tid); sqlite3_bind_int64(u, 2, r.id); sqlite3_step(u); sqlite3_finalize(u)
-            }
-        }
+        exec("PRAGMA user_version = 1;")   // schema baseline; future migrations guard on this
     }
 
     private func exec(_ sql: String) { sqlite3_exec(db, sql, nil, nil, nil) }
@@ -480,84 +369,6 @@ final class DB {
     }
 
     // MARK: - Tasks + intervals (new model)
-
-    /// Number of intervals — used to detect whether the split migration has run.
-    func intervalCount() -> Int {
-        var stmt: OpaquePointer?
-        guard sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM intervals;", -1, &stmt, nil) == SQLITE_OK else { return 0 }
-        defer { sqlite3_finalize(stmt) }
-        return sqlite3_step(stmt) == SQLITE_ROW ? Int(sqlite3_column_int(stmt, 0)) : 0
-    }
-
-    /// Insert a legacy `sessions` row directly. The app no longer writes `sessions`;
-    /// this exists only to build old-schema fixtures for the migration tests.
-    @discardableResult
-    func insertLegacySession(seconds: Int, focus: String, originalSeconds: Int? = nil,
-                             status: String? = nil, rating: Int? = nil, note: String? = nil,
-                             originalSessionId: Int64? = nil, openSecondsEnd: Int? = nil,
-                             reason: String = "launch") -> Int64 {
-        let sql = "INSERT INTO sessions (started_at, ended_at, reason, seconds, original_seconds, focus, status, rating, note, original_session_id, open_seconds_end) VALUES (?,?,?,?,?,?,?,?,?,?,?);"
-        var s: OpaquePointer?
-        guard sqlite3_prepare_v2(db, sql, -1, &s, nil) == SQLITE_OK else { return 0 }
-        defer { sqlite3_finalize(s) }
-        let now = isoNow()
-        sqlite3_bind_text(s, 1, now, -1, SQLITE_TRANSIENT)
-        if status != nil { sqlite3_bind_text(s, 2, now, -1, SQLITE_TRANSIENT) } else { sqlite3_bind_null(s, 2) }
-        sqlite3_bind_text(s, 3, reason, -1, SQLITE_TRANSIENT)
-        sqlite3_bind_int(s, 4, Int32(seconds))
-        if let o = originalSeconds { sqlite3_bind_int(s, 5, Int32(o)) } else { sqlite3_bind_null(s, 5) }
-        sqlite3_bind_text(s, 6, focus, -1, SQLITE_TRANSIENT)
-        if let st = status { sqlite3_bind_text(s, 7, st, -1, SQLITE_TRANSIENT) } else { sqlite3_bind_null(s, 7) }
-        if let r = rating { sqlite3_bind_int(s, 8, Int32(r)) } else { sqlite3_bind_null(s, 8) }
-        if let n = note { sqlite3_bind_text(s, 9, n, -1, SQLITE_TRANSIENT) } else { sqlite3_bind_null(s, 9) }
-        if let osid = originalSessionId { sqlite3_bind_int64(s, 10, osid) } else { sqlite3_bind_null(s, 10) }
-        if let oe = openSecondsEnd { sqlite3_bind_int(s, 11, Int32(oe)) } else { sqlite3_bind_null(s, 11) }
-        sqlite3_step(s)
-        return sqlite3_last_insert_rowid(db)
-    }
-
-    /// Whether a legacy `sessions` table exists (a pre-refactor DB).
-    private func hasSessionsTable() -> Bool {
-        var stmt: OpaquePointer?
-        guard sqlite3_prepare_v2(db, "SELECT 1 FROM sqlite_master WHERE type='table' AND name='sessions';", -1, &stmt, nil) == SQLITE_OK else { return false }
-        defer { sqlite3_finalize(stmt) }
-        return sqlite3_step(stmt) == SQLITE_ROW
-    }
-
-    /// One-time transform of legacy `sessions` rows into `tasks` + `intervals`.
-    /// - Each pre-empt→continued chain (grouped by COALESCE(original_session_id, id))
-    ///   becomes ONE task; every session in it becomes an interval of that task.
-    /// - task.focus/estimate come from the EARLIEST fragment (the clean original name
-    ///   and the duration it was created with); task.status/rating/note come from the
-    ///   LAST fragment — the intentional "collapse per-fragment ratings to one" step.
-    /// - Ids are preserved (task.id = chain-root id, interval.id = old session id),
-    ///   so pauses/time_additions/preempts keep referring by the same ids.
-    /// Idempotent: no-ops if intervals are already populated or there's no `sessions`.
-    func migrateSessionsToTasks() {
-        guard hasSessionsTable(), intervalCount() == 0 else { return }
-        exec("BEGIN;")
-        exec("""
-        INSERT INTO tasks (id, parent_task_id, created_at, focus, estimate_seconds, original_estimate_seconds, status, rating, note)
-        SELECT grp.root_id, NULL, first.started_at, first.focus,
-               COALESCE(first.original_seconds, first.seconds),
-               COALESCE(first.original_seconds, first.seconds),
-               last.status, last.rating, last.note
-        FROM (SELECT COALESCE(original_session_id, id) AS root_id,
-                     MIN(id) AS first_id, MAX(id) AS last_id
-              FROM sessions GROUP BY COALESCE(original_session_id, id)) grp
-        JOIN sessions first ON first.id = grp.first_id
-        JOIN sessions last  ON last.id  = grp.last_id;
-        """)
-        exec("""
-        INSERT INTO intervals (id, task_id, started_at, ended_at, seconds, reason, open_seconds_start, open_seconds_end, rating)
-        SELECT id, COALESCE(original_session_id, id), started_at, ended_at, seconds, reason, open_seconds_start, open_seconds_end, rating
-        FROM sessions;
-        """)
-        // Point any in-flight queued continuations at their migrated task (the chain
-        // root id == the new task id), so resuming them attaches to the same task.
-        exec("UPDATE queue SET task_id = original_session_id WHERE task_id IS NULL AND original_session_id IS NOT NULL;")
-        exec("COMMIT;")
-    }
 
     /// All tasks, newest first.
     func allTasks() -> [TaskRow] {

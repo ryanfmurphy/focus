@@ -153,9 +153,21 @@ clocks**: starting a subtask does NOT pause the parent — both count down at on
 ## Safety
 
 - Live DB backed up: `~/focus/focus.db.bak-2026-08-29`.
-- Migration is idempotent (`intervalCount()==0` guard) and wrapped in a
+- Migration was idempotent (`intervalCount()==0` guard) and wrapped in a
   transaction.
 - Every stage lands on a branch with `./run-tests.sh` green before merge.
+
+## Squashed to a baseline (later)
+
+Once the live DB reached the final shape, the whole incremental CREATE+ALTER chain
+**and** the one-time `sessions`→`tasks` migration were squashed into clean `CREATE
+TABLE`s that produce the current schema directly, stamped `PRAGMA user_version = 1`.
+Removed: the `sessions` table (existing DBs keep their leftover copy),
+`migrateSessionsToTasks`/`insertLegacySession`/`hasSessionsTable`/`intervalCount`/
+`backfillQueuedTasks`, and every intermediate ALTER/UPDATE/DROP. Verified a fresh
+build's column set is identical to the live DB across all six tables. To upgrade an
+older-format DB, check out the **`pre-squash-migrations`** git tag, open it once, then
+switch back. Future schema changes: bump `user_version` and guard a migration on it.
 
 ## Known migration edges (acceptable)
 

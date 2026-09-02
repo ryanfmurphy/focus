@@ -409,68 +409,6 @@ section("Original estimate is stamped at creation and never drifts (add-time gro
     eq(hist().originalEstimateSeconds ?? -1, 1500, "…but the original is frozen (calibration baseline)")
 }
 
-section("Migration backfills the original estimate from the old original_seconds") {
-    let db = freshDB()
-    let s = db.insertLegacySession(seconds: 900, focus: "Legacy", originalSeconds: 1500, status: "completed", rating: 8)
-    db.migrateSessionsToTasks()
-    let row = db.taskHistory().first { $0.id == s }
-    eq(row?.estimateSeconds ?? -1, 1500, "working estimate from old original_seconds")
-    eq(row?.originalEstimateSeconds ?? -1, 1500, "original estimate backfilled to match")
-    eq(row?.actualSeconds ?? -1, 900, "actual is the elapsed")
-}
-
-// MARK: - Migration: sessions -> tasks + intervals
-
-section("migrateSessionsToTasks merges a continued chain into one task") {
-    let db = freshDB()
-    // Seed a legacy shape via the current API: a two-fragment chain + a standalone.
-    let f1 = db.insertLegacySession(seconds: 600, focus: "Deep work", originalSeconds: 1500,
-                                    status: "interrupted", rating: 4, note: "got interrupted")
-    let f2 = db.insertLegacySession(seconds: 800, focus: "Deep work (continued)", originalSeconds: 1500,
-                                    status: "completed", rating: 9, note: "done",
-                                    originalSessionId: f1, openSecondsEnd: 5)
-    _ = f2
-    let s1 = db.insertLegacySession(seconds: 1100, focus: "Quick email", originalSeconds: 1200,
-                                    status: "completed", rating: 7)
-
-    db.migrateSessionsToTasks()
-
-    eq(db.allTasks().count, 2, "two tasks (chain collapsed to one) + standalone")
-    eq(db.intervalCount(), 3, "three intervals total")
-
-    let tasks = db.allTasks()
-    guard let chain = tasks.first(where: { $0.id == f1 }) else { ok(false, "chain task exists"); return }
-    eq(chain.focus, "Deep work", "task focus = clean original name (no '(continued)')")
-    eq(chain.estimateSeconds ?? -1, 1500, "estimate = original, not the add-time-bumped total")
-    eq(chain.status ?? "", "completed", "status from the LAST fragment")
-    eq(chain.rating ?? -1, 9, "rating collapsed to the last fragment's (9, not 4)")
-    eq(chain.note ?? "", "done", "note from the last fragment")
-
-    let iv = db.intervals(forTask: f1)
-    eq(iv.map { $0.seconds }, [600, 800], "two intervals, actual elapsed each, earliest first")
-    eq(iv.first?.reason ?? "", "launch", "interval keeps its reason")
-    eq(iv.last?.openSecondsEnd ?? -1, 5, "interval keeps its popup-open seconds")
-    // Per-fragment ratings are preserved losslessly on the intervals, even though the
-    // task's headline rating is the last fragment's.
-    eq(iv.first?.rating ?? -1, 4, "first interval keeps its own rating (4)")
-    eq(iv.last?.rating ?? -1, 9, "last interval keeps its own rating (9)")
-
-    guard let solo = tasks.first(where: { $0.id == s1 }) else { ok(false, "standalone task exists"); return }
-    eq(solo.focus, "Quick email", "standalone focus")
-    eq(solo.estimateSeconds ?? -1, 1200, "standalone estimate")
-    eq(solo.rating ?? -1, 7, "standalone rating")
-    eq(db.intervals(forTask: s1).map { $0.seconds }, [1100], "standalone has one interval")
-}
-
-section("migrateSessionsToTasks is idempotent") {
-    let db = freshDB()
-    db.insertLegacySession(seconds: 1500, focus: "A", originalSeconds: 1500, status: "completed", rating: 5)
-    db.migrateSessionsToTasks()
-    db.migrateSessionsToTasks()   // second call must not duplicate
-    eq(db.allTasks().count, 1, "still one task after re-running")
-    eq(db.intervalCount(), 1, "still one interval after re-running")
-}
-
 // MARK: - Summary
 
 print("")
