@@ -310,32 +310,6 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         extendAncestorsToCoverLeaf()   // keep the parent covering the new subtask
     }
 
-    /// A queue item that would be (or already is) a top-level task: fresh items (they
-    /// mint a top-level task when started) and existing tasks with no parent. Set-aside
-    /// subtasks are excluded — they can't serve as the parent for "make it a subtask
-    /// under another queued task".
-    private func isTopLevelQueueItem(_ item: QueueItem) -> Bool {
-        guard let tid = item.taskId else { return true }
-        return db.task(id: tid)?.parentTaskId == nil
-    }
-
-    /// Stack checkboxes into one accessory-top view (first box on top). A single box
-    /// passes through unchanged; an empty list returns nil.
-    private func stackChecks(_ boxes: [NSButton]) -> NSView? {
-        guard boxes.count > 1 else { return boxes.first }
-        let gap: CGFloat = 4
-        let width = boxes.map { $0.frame.width }.max() ?? 320
-        let height = boxes.reduce(0) { $0 + $1.frame.height } + gap * CGFloat(boxes.count - 1)
-        let container = NSView(frame: NSRect(x: 0, y: 0, width: width, height: height))
-        var y: CGFloat = 0
-        for b in boxes.reversed() {   // last box at the bottom, first box on top
-            b.setFrameOrigin(NSPoint(x: 0, y: y))
-            container.addSubview(b)
-            y += b.frame.height + gap
-        }
-        return container
-    }
-
     /// Wall-time of an interval row from its start to now — for closing orphan/
     /// abandoned intervals during restart.
     private func intervalElapsed(_ iv: Interval) -> Int {
@@ -598,10 +572,6 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     // the current focus (with its remaining time) to the FRONT and run a new one
     // now — the same idea as pre-empting a focus that's about to begin, but for
     // the one already running.
-    // No-op target so the Switch dialog's radio buttons auto-group (radios sharing a
-    // superview + action are mutually exclusive); selection is read from their state.
-    @objc private func radioNoop() {}
-
     @objc func changeFocus() {
         guard !showing else { return }
         showing = true
@@ -619,60 +589,38 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             : (hasQueue ? "What's your one focus right now, and for how long? Or pick one from the queue."
                         : "What's your one focus right now, and for how long?")
 
-        // Ways to leave the current focus, as a mutually-exclusive radio group. Which
-        // options apply depends on nesting and whether there's a queued top-level task
-        // to parent under. The default is the first that applies (just-subtask when
-        // nested, else a new top-level task). Idle "Set focus" shows none — there's
-        // nothing to switch away from.
-        enum SwitchMode { case justSubtask, newTopLevel, underQueued }
-        var modeButtons: [(mode: SwitchMode, button: NSButton)] = []
-        func radio(_ mode: SwitchMode, _ label: String) {
-            let b = NSButton(radioButtonWithTitle: label, target: self, action: #selector(radioNoop))
-            b.sizeToFit()   // width tracks the label so the accessory can grow to fit it
-            b.setFrameSize(NSSize(width: b.frame.width + 8, height: b.frame.height))
-            modeButtons.append((mode, b))
+        // When nested, offer to switch just this subtask (keeping the parent running)
+        // vs. the whole task. Default: just this subtask. (Top-level → no checkbox.)
+        var subtaskBox: NSButton? = nil
+        if nested {
+            let cb = NSButton(checkboxWithTitle: "Switch just this subtask (keep the parent running)", target: nil, action: nil)
+            cb.state = .on
+            cb.sizeToFit()   // width tracks the label so the accessory grows to fit it
+            subtaskBox = cb
         }
-        if nested { radio(.justSubtask, "Switch just this subtask (keep the parent running)") }
-        if preempting { radio(.newTopLevel, "Switch to a new top-level task") }
-        if preempting && db.queueItems().contains(where: isTopLevelQueueItem) {
-            radio(.underQueued, "Switch to a new subtask of another top-level task")
-        }
-        modeButtons.first?.button.state = .on
-        func currentMode() -> SwitchMode { modeButtons.first(where: { $0.button.state == .on })?.mode ?? .newTopLevel }
-        // Only worth showing when there's an actual choice (≥2 options).
-        let extraTop = modeButtons.count >= 2 ? stackChecks(modeButtons.map { $0.button }) : nil
 
         // Pre-empt is voluntary → cancellable (cancel leaves the current session
         // untouched) and can pull from the queue. Idle "Set focus" stays mandatory.
         var newFocus = "", newSeconds = 0
         var newOpenStart: Int? = nil
         var resumeId: Int64? = nil
-        var mode: SwitchMode = .newTopLevel
-        var underParent: QueueItem? = nil
+        var subtaskMode = false
         prompt: while true {
             let entry = askFocusAndMinutes(title: title, info: info, confirm: "Start",
-                                           cancellable: preempting, queuePick: true, extraTop: extraTop)
-            mode = currentMode()   // read AFTER the modal (the radio selection may have changed)
+                                           cancellable: preempting, queuePick: true, extraTop: subtaskBox)
+            subtaskMode = nested && (subtaskBox?.state == .on)   // read AFTER the modal
             switch entry {
             case .cancelled:
                 return
             case .entered(let f, let s, let o):
-                if mode == .underQueued {
-                    // Attach the typed focus under another queued top-level task: pick
-                    // the parent now (it's activated when we start, below).
-                    guard let parent = pickFromQueue(filter: { self.isTopLevelQueueItem($0) },
-                                                     showParentChain: false) else { continue prompt }
-                    underParent = parent
-                }
                 newFocus = f; newSeconds = s; newOpenStart = o          // fresh task
                 break prompt
             case .queuePick:
-                // Just-subtask → only set-aside subtasks of this parent. Any other mode
-                // (new top-level, or under-queued when they pick from the queue instead
-                // of typing) → ALL queued items: main tasks AND set-aside subtasks
-                // (resuming a subtask rebuilds its tree, and its parent may not itself be
-                // queued, so filtering to top-level would strand it).
-                let justSubtask = (mode == .justSubtask)
+                // Subtask mode → only set-aside subtasks of this parent. Whole-stack
+                // switch / Set focus → ALL queued items: main tasks AND set-aside
+                // subtasks (resuming a subtask rebuilds its tree, and its parent may
+                // not itself be queued, so filtering to top-level would strand it).
+                let justSubtask = subtaskMode
                 let filter: (QueueItem) -> Bool
                 if justSubtask {
                     filter = { item in item.taskId.flatMap { tid in self.db.task(id: tid)?.parentTaskId } == parentId }
@@ -702,17 +650,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         }
 
         let preemptedInterval = intervalId
-        if let parent = underParent {
-            // Whole-task switch → make the new focus a subtask under a chosen queued
-            // task. Suspend the current stack, activate the parent (it starts ticking),
-            // then run the new focus as a subtask under it — both count down.
-            if preempting { suspendStack() }
-            db.removeFromQueue(id: parent.id)
-            beginSession(reason: preempting ? "preempt" : "manual", seconds: parent.seconds,
-                         focus: parent.focus, resumeTaskId: parent.taskId)
-            startSubtaskUnderLeaf(reason: "subtask", seconds: newSeconds, focus: newFocus,
-                                  resumeId: nil, openStart: newOpenStart)
-        } else if mode == .justSubtask {
+        if subtaskMode {
             // Suspend just this subtask (drops to the still-ticking parent), then run
             // the new sibling subtask under that parent.
             suspendLeaf()
