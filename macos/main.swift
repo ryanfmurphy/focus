@@ -628,7 +628,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         var modeButtons: [(mode: SwitchMode, button: NSButton)] = []
         func radio(_ mode: SwitchMode, _ label: String) {
             let b = NSButton(radioButtonWithTitle: label, target: self, action: #selector(radioNoop))
-            b.frame = NSRect(x: 0, y: 0, width: 360, height: 20)
+            b.sizeToFit()   // width tracks the label so the accessory can grow to fit it
+            b.setFrameSize(NSSize(width: b.frame.width + 8, height: b.frame.height))
             modeButtons.append((mode, b))
         }
         if nested { radio(.justSubtask, "Switch just this subtask (keep the parent running)") }
@@ -1225,9 +1226,14 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         accessory.addSubview(minutesLabel)
         accessory.addSubview(minutesField)
         accessory.addSubview(elapsed)
-        if let extra = extraTop {   // e.g. the Switch "just this subtask" checkbox — sits on top
+        if let extra = extraTop {   // e.g. the Switch-mode radio group — sits on top
+            // Grow the accessory (and stretch the fields) to fit the widest extra
+            // content — otherwise wide radio/checkbox labels clip at the panel edge.
+            let w = max(accessory.frame.width, extra.frame.width)
+            focusField.setFrameSize(NSSize(width: w, height: focusField.frame.height))
+            elapsed.setFrameSize(NSSize(width: w, height: elapsed.frame.height))
             extra.setFrameOrigin(NSPoint(x: 0, y: 90))
-            accessory.setFrameSize(NSSize(width: 320, height: 90 + extra.frame.height))
+            accessory.setFrameSize(NSSize(width: w, height: 90 + extra.frame.height))
             accessory.addSubview(extra)
         }
 
