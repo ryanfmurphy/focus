@@ -312,6 +312,18 @@ final class DB {
         sqlite3_step(stmt)
     }
 
+    /// The start time of a session's currently-open pause (process quit mid-pause), or
+    /// nil if it isn't paused. Lets restart preserve the paused state instead of
+    /// auto-resuming (folding the downtime into pause via closeOpenPause).
+    func openPauseStart(sessionId: Int64) -> Date? {
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "SELECT started_at FROM pauses WHERE session_id=? AND ended_at IS NULL ORDER BY id DESC LIMIT 1;", -1, &stmt, nil) == SQLITE_OK else { return nil }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_int64(stmt, 1, sessionId)
+        guard sqlite3_step(stmt) == SQLITE_ROW, let c = sqlite3_column_text(stmt, 0) else { return nil }
+        return isoParser.date(from: String(cString: c))
+    }
+
     /// Total seconds a session has spent paused (closed pauses only).
     func totalPausedSeconds(sessionId: Int64) -> Int {
         var stmt: OpaquePointer?

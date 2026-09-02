@@ -112,6 +112,21 @@ section("closeOpenPause reconstructs a mid-pause crash from timestamps") {
     near(db.totalPausedSeconds(sessionId: id), 200, 2, "second close is a no-op")
 }
 
+section("openPauseStart: the open pause's start, nil when running (restart keeps paused)") {
+    let db = freshDB()
+    let (_, id) = db.startTask(reason: "launch", estimateSeconds: 1500, focus: "A")!
+    ok(db.openPauseStart(sessionId: id) == nil, "not paused → nil")
+    let at = Date().addingTimeInterval(-200)   // paused 200s ago, then process "died"
+    db.startPause(sessionId: id, at: at)
+    if let started = db.openPauseStart(sessionId: id) {
+        near(Int(started.timeIntervalSince(at).rounded()), 0, 2, "returns the open pause's started_at")
+    } else {
+        ok(false, "open pause should have a start")
+    }
+    db.endPause(sessionId: id, seconds: 200)
+    ok(db.openPauseStart(sessionId: id) == nil, "closed pause → nil (would auto-resume)")
+}
+
 // MARK: - Queue ordering
 
 section("Queue: enqueueTask / front / reorder / remove / clear") {

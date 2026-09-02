@@ -490,11 +490,18 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             db.endInterval(id: iv.id, elapsedSeconds: intervalElapsed(iv))
         }
 
-        // Reconstruct a running frame for a task: close any open pause (downtime counts
-        // as pause) and rebuild the deadline from estimate − prior-spent (+ paused).
+        // Was the stack paused when the process died? (Pause opens a pause row on every
+        // level at once, so the leaf's open pause implies the whole stack's.) If so we
+        // preserve it below instead of folding the downtime into pause and resuming.
+        let pausedStart = db.openPauseStart(sessionId: leafIv.id)
+
+        // Reconstruct a frame for a task. When resuming (not paused), close any open
+        // pause so the downtime counts as pause; when paused-at-quit, leave the pause
+        // open so it keeps freezing. Either way the deadline is estimate − prior-spent
+        // (+ closed pauses) — for the paused case that's the frozen-at-pause deadline.
         func frame(for task: TaskRow) -> Frame? {
             guard let iv = openByTask[task.id], let start = isoParser.date(from: iv.startedAt) else { return nil }
-            db.closeOpenPause(sessionId: iv.id)
+            if pausedStart == nil { db.closeOpenPause(sessionId: iv.id) }
             let paused = db.totalPausedSeconds(sessionId: iv.id)
             let spent = db.spentSeconds(taskId: task.id)
             let dl = start.addingTimeInterval(Double((task.estimateSeconds ?? 0) - spent + paused))
@@ -507,7 +514,14 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         // ancestors want root … parent (chain is leaf-first, so drop leaf and reverse).
         ancestors = chain.dropFirst().reversed().compactMap { frame(for: $0) }
 
-        if ancestors.isEmpty {
+        if let pStart = pausedStart {
+            // Was paused at quit — restore the frozen paused state for the whole stack
+            // (no resume prompt). It stays paused until the user hits Resume, at which
+            // point the entire downtime is folded into the pause (deadline shifts by it).
+            setLeaf(leaf)
+            pausedAt = pStart
+            tick()
+        } else if ancestors.isEmpty {
             // Single task — keep the familiar Resume / Switch / Start-fresh prompt.
             // (Don't pre-set the leaf: adopt does that, and Start-fresh needs
             // currentFocus to stay nil so onReturn prompts.)

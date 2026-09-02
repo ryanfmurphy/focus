@@ -30,7 +30,9 @@ Subtasks feature builds on.
 - **Resume = continue from remaining** (`estimate − spent`), not a fresh full timer.
   Defer/pre-empt/queue all resume the same task's remaining; an over-spent task
   resumes at 0:00 (Add time / Complete). Timer and the queue's "remaining" agree.
-- **Quit-while-paused → relaunch auto-resumes** (unchanged from today).
+- **Quit-while-paused → relaunch stays paused** (restart detects the leaf's still-open
+  pause via `openPauseStart` and restores the frozen state; hitting Resume then folds
+  the whole downtime into the pause). Previously it auto-resumed.
 - **Estimate** for migrated tasks = the earliest fragment's `original_seconds`
   (the original plan; add-time is not folded in for legacy rows). New tasks bump
   `tasks.estimate_seconds` directly.
