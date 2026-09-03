@@ -1197,7 +1197,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         // different queued focus, and no closing. Otherwise offer the alternatives + Close.
         var differentIndex = -1, pickIndex = -1, closeIndex = -1
         if !strictModeEnabled {
-            alert.addButton(withTitle: "Start a different focus"); differentIndex = alert.buttons.count - 1
+            alert.addButton(withTitle: "Start a new focus"); differentIndex = alert.buttons.count - 1
             let pickButton = alert.addButton(withTitle: "Pick another queued focus…"); pickIndex = alert.buttons.count - 1
             pickButton.isEnabled = db.queueCount() > 1   // disabled when there's no other queued item
             alert.addButton(withTitle: "Close"); closeIndex = alert.buttons.count - 1
@@ -1247,7 +1247,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             // Start a different focus: leave the queued item where it is (still the front,
             // since we never removed it) and run an ad-hoc focus right now instead.
             if case let .entered(focus, seconds, openStart) = askFocusAndMinutes(
-                title: "Start a different focus",
+                title: "Start a new focus",
                 info: "This runs now; the queued focus stays next in line.",
                 confirm: "Start", cancellable: true) {
                 beginSession(reason: "preempt", seconds: seconds, focus: focus, openSecondsStart: openStart)
