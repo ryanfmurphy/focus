@@ -1008,7 +1008,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             menuItem.title = "See queue (\(db.queueCount()))"
         }
         if menuItem.action == #selector(clearQueue) {
-            return db.queueCount() > 0
+            // Strict mode: you can't wipe the plan you're required to follow.
+            return db.queueCount() > 0 && !strictModeEnabled
         }
         if menuItem.action == #selector(rateUnrated) {
             let n = db.unratedTaskCount()
@@ -1874,7 +1875,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     }
 
     @objc func clearQueue() {
-        guard !showing else { return }
+        guard !showing, !strictModeEnabled else { return }   // strict mode: can't wipe the plan
         guard db.queueCount() > 0 else { return }
         showing = true
         defer { showing = false }
