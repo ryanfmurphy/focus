@@ -181,6 +181,73 @@ final class QueuePickSource: NSObject, NSTableViewDataSource, NSTableViewDelegat
     }
 }
 
+/// A subtask you can switch to: a non-terminal child of the current task. `queueRowId`
+/// set = parked in the queue (shown normally); nil = it exists but isn't queued —
+/// e.g. removed from the queue — and is shown grayed.
+struct SubtaskChoice { let taskId: Int64; let focus: String; let remaining: Int; let queueRowId: Int64? }
+
+struct SubtaskPickRow { let choice: SubtaskChoice; let duration: String }
+
+final class SubtaskPickSource: NSObject, NSTableViewDataSource, NSTableViewDelegate {
+    private let rows: [SubtaskPickRow]
+    private let onPick: (SubtaskChoice) -> Void
+    init(rows: [SubtaskPickRow], onPick: @escaping (SubtaskChoice) -> Void) { self.rows = rows; self.onPick = onPick }
+
+    func makeTable() -> NSTableView {
+        let t = NSTableView()
+        t.usesAlternatingRowBackgroundColors = true
+        t.rowHeight = 22
+        t.style = .inset
+        t.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
+        t.headerView = NSTableHeaderView()
+        func col(_ id: String, _ title: String, _ w: CGFloat, _ a: NSTextAlignment = .left) {
+            let c = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(id))
+            c.title = title; c.width = w; c.headerCell.alignment = a
+            t.addTableColumn(c)
+        }
+        col("dur", "Remaining", 90, .right)
+        col("focus", "Subtask (queued first; grayed = not queued)", 340)
+        t.dataSource = self
+        t.delegate = self
+        t.target = self
+        t.action = #selector(clicked(_:))
+        return t
+    }
+
+    @objc private func clicked(_ sender: NSTableView) {
+        let r = sender.clickedRow
+        guard r >= 0, r < rows.count else { return }
+        onPick(rows[r].choice)
+    }
+
+    func numberOfRows(in tableView: NSTableView) -> Int { rows.count }
+
+    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        let r = rows[row]
+        let text: String
+        let align: NSTextAlignment
+        switch tableColumn?.identifier.rawValue {
+        case "dur": text = r.duration; align = .right
+        default:    text = r.choice.focus; align = .left
+        }
+        let cell = NSTableCellView()
+        let tf = NSTextField(labelWithString: text)
+        tf.translatesAutoresizingMaskIntoConstraints = false
+        tf.lineBreakMode = .byTruncatingTail
+        tf.alignment = align
+        tf.font = NSFont.systemFont(ofSize: 12)
+        tf.textColor = r.choice.queueRowId == nil ? .secondaryLabelColor : .labelColor   // grayed = not queued
+        cell.addSubview(tf)
+        cell.textField = tf
+        NSLayoutConstraint.activate([
+            tf.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 4),
+            tf.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -4),
+            tf.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+        ])
+        return cell
+    }
+}
+
 // MARK: - App
 
 final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSource,
@@ -641,6 +708,26 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
                 // In just-subtask mode every candidate is a sibling of the same parent,
                 // so skip the redundant "Parent ›" prefix (same as Switch to subtask).
                 guard let item = pickFromQueue(filter: filter, showParentChain: !justSubtask) else { continue prompt }
+                // If the picked item is a subtask, offer going straight to it (default —
+                // rebuilds its whole tree) or to its top-level root task instead. Only in
+                // whole-stack mode; subtask mode is explicitly "switch just this subtask".
+                // ancestorTasks is [parent, …, root], so .last is the root.
+                if !justSubtask, let root = item.taskId.flatMap({ self.db.ancestorTasks(of: $0).last }) {
+                    let choice = makeAlert()
+                    choice.messageText = "Go to the subtask or its parent?"
+                    choice.informativeText = "\(queueDisplayName(item))\n\nStart just this subtask, or focus its top-level task “\(root.focus)” instead (the subtask stays in the queue)."
+                    choice.addButton(withTitle: "Go to the subtask")        // 0
+                    choice.addButton(withTitle: "Focus the parent instead") // 1
+                    choice.window.level = .floating
+                    choice.window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+                    if runFloatingAlert(choice) == 1 {
+                        // Focus the root; leave the subtask queued (going to the parent
+                        // doesn't complete it). beginSession resumes root as a top-level leaf.
+                        newFocus = root.focus; newSeconds = item.seconds; resumeId = root.id
+                        break prompt
+                    }
+                    // else fall through: go to the subtask (current behavior).
+                }
                 db.removeFromQueue(id: item.id)
                 newFocus = item.focus; newSeconds = item.seconds; resumeId = item.taskId
                 break prompt
@@ -865,11 +952,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         if showing, let action = menuItem.action, Self.showingBlockedActions.contains(action) {
             return false
         }
-        // "Switch to subtask" needs a running task AND at least one set-aside subtask
-        // of it waiting in the queue.
+        // "Switch to subtask" needs a running task with at least one resumable (never-
+        // finished) subtask — whether it's parked in the queue or just exists unqueued.
         if menuItem.action == #selector(switchToSubtask) {
             guard let leaf = taskId else { return false }
-            return db.queueItems().contains { $0.taskId.flatMap { db.task(id: $0)?.parentTaskId } == leaf }
+            return !resumableSubtasks(of: leaf).isEmpty
         }
         // Complete / Abort / Stop / Rename / Add time / Add subtask act on a running session.
         if menuItem.action == #selector(completeTask) || menuItem.action == #selector(abortTask)
@@ -1087,17 +1174,24 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             chosen = item
             NSApp.stopModal()
         }
-        let table = source.makeTable()
+        runPickerWindow(title: "Pick another queued focus",
+                        info: "Click a queued focus to start it now (it's removed from the queue; the others stay).",
+                        table: source.makeTable())
+        return chosen
+    }
 
-        // A resizable modal window (NSAlert can't resize). Row click or Cancel/Esc ends it.
+    /// Show `table` in a resizable floating modal (NSAlert can't resize) with an info
+    /// line and a Cancel/Esc button. The table's row-click action should call
+    /// NSApp.stopModal(); this returns once the modal ends (pick, Cancel, or Esc).
+    private func runPickerWindow(title: String, info infoText: String, table: NSTableView) {
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 620, height: 380),
                               styleMask: [.titled, .resizable], backing: .buffered, defer: false)
-        window.title = "Pick another queued focus"
+        window.title = title
         window.level = .floating
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         let content = window.contentView!
 
-        let info = NSTextField(wrappingLabelWithString: "Click a queued focus to start it now (it's removed from the queue; the others stay).")
+        let info = NSTextField(wrappingLabelWithString: infoText)
         info.frame = NSRect(x: 16, y: content.bounds.height - 44, width: content.bounds.width - 32, height: 34)
         info.autoresizingMask = [.width, .minYMargin]
 
@@ -1124,7 +1218,6 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         window.makeKeyAndOrderFront(nil)
         NSApp.runModal(for: window)   // row click / Cancel / Esc → stopModal
         window.orderOut(nil)
-        return chosen
     }
 
     @objc private func cancelPickModal() { NSApp.stopModal() }
@@ -1273,13 +1366,45 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         guard !showing, let leaf = taskId else { return }
         showing = true
         defer { showing = false }
-        // All candidates are subtasks of THIS task, so skip the redundant parent prefix.
-        guard let item = pickFromQueue(filter: { $0.taskId.flatMap { self.db.task(id: $0)?.parentTaskId } == leaf },
-                                       showParentChain: false) else { return }
-        db.removeFromQueue(id: item.id)
+        let candidates = resumableSubtasks(of: leaf)
+        guard !candidates.isEmpty else { return }
+        let rows = candidates.map { SubtaskPickRow(choice: $0, duration: mmss($0.remaining)) }
+        var chosen: SubtaskChoice?
+        let source = SubtaskPickSource(rows: rows) { c in chosen = c; NSApp.stopModal() }
+        runPickerWindow(title: "Switch to subtask",
+                        info: "Pick a subtask to work on now — it runs under the current task. Grayed rows aren't in the queue.",
+                        table: source.makeTable())
+        guard let pick = chosen else { return }
+        if let rowId = pick.queueRowId { db.removeFromQueue(id: rowId) }   // no-op for non-queued ones
         resumeStackIfPaused()
-        startSubtaskUnderLeaf(reason: "subtask", seconds: item.seconds, focus: item.focus,
-                              resumeId: item.taskId, openStart: nil)
+        startSubtaskUnderLeaf(reason: "subtask", seconds: max(1, pick.remaining), focus: pick.focus,
+                              resumeId: pick.taskId, openStart: nil)
+    }
+
+    /// Non-terminal children of `leaf` (status nil = never finished) that you can switch
+    /// to: queued ones first (in queue order), then ones that exist but aren't queued
+    /// (e.g. removed from the queue), which the picker grays out.
+    private func resumableSubtasks(of leaf: Int64) -> [SubtaskChoice] {
+        var queueRowForTask: [Int64: Int64] = [:]
+        var orderForTask: [Int64: Int] = [:]
+        for (i, q) in db.queueItems().enumerated() {
+            if let t = q.taskId { queueRowForTask[t] = q.id; orderForTask[t] = i }
+        }
+        let choices = db.childTasks(of: leaf)
+            .filter { $0.status == nil }   // never finished (subtasks are never 'queued'-status)
+            .map { k in
+                SubtaskChoice(taskId: k.id, focus: k.focus,
+                              remaining: max(0, db.remainingSeconds(taskId: k.id)),
+                              queueRowId: queueRowForTask[k.id])
+            }
+        return choices.sorted { a, b in
+            switch (a.queueRowId, b.queueRowId) {
+            case (.some, .none): return true                    // queued before non-queued
+            case (.none, .some): return false
+            case (.some, .some): return (orderForTask[a.taskId] ?? 0) < (orderForTask[b.taskId] ?? 0)
+            case (.none, .none): return a.taskId > b.taskId     // non-queued: most recent first
+            }
+        }
     }
 
     // ---- history ----
