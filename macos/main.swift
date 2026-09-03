@@ -862,7 +862,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         showing = true
         let hadParent = rateAndComplete()   // rate + end as completed; pops to parent if a subtask
         showing = false
-        if hadParent { tick() } else { promptForFocus(reason: "after-session") }
+        if hadParent { tick() } else { advanceAfterSession() }
     }
 
     // Abort the current task: rate it, mark interrupted (recording elapsed),
@@ -882,7 +882,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         if applyTime { db.addToInterval(id: iid, seconds: openSeconds) }
         db.finishTask(id: tid, status: "interrupted", rating: rating, note: note)
         showing = false
-        if hadParent { tick() } else { promptForFocus(reason: "after-session") }
+        if hadParent { tick() } else { advanceAfterSession() }
     }
 
     // Stop working on the current task without finishing it: suspend it (re-queued to
@@ -1012,6 +1012,50 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             confirm: "Add to queue", cancellable: true) {
             db.enqueueTask(focus: focus, estimateSeconds: seconds)
         }
+    }
+
+    /// A top-level task just finished. Normally roll on to the next focus — but in
+    /// "One task only, then touch grass" mode, that finished task was the whole plan:
+    /// congratulate, then lock the screen instead of prompting for another.
+    private func advanceAfterSession() {
+        if oneTaskOnlyEnabled { touchGrassAndLock() }
+        else { promptForFocus(reason: "after-session") }
+    }
+
+    /// The "touch grass" send-off: a single-button modal, then lock the screen.
+    private func touchGrassAndLock() {
+        guard !showing else { return }
+        showing = true
+        defer { showing = false }
+        NSApp.activate(ignoringOtherApps: true)
+        hudWindow.orderOut(nil)   // hide the pill behind the send-off
+        let alert = makeAlert()
+        alert.messageText = "That was the one thing you were going to do!"
+        alert.informativeText = "See you later — have fun in the actual world. 🌱"
+        alert.addButton(withTitle: "OK")
+        alert.window.level = .floating
+        alert.window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        alert.runModal()
+        lockScreen()
+    }
+
+    /// Bring the Mac to its Lock Screen. Uses login.framework's
+    /// `SACLockScreenImmediate` (the same call the system's own Lock Screen uses);
+    /// if that can't be resolved, falls back to sleeping the display, which locks
+    /// when "require password after sleep" is set.
+    private func lockScreen() {
+        let path = "/System/Library/PrivateFrameworks/login.framework/Versions/Current/login"
+        if let handle = dlopen(path, RTLD_NOW), let sym = dlsym(handle, "SACLockScreenImmediate") {
+            typealias LockFn = @convention(c) () -> Int32
+            _ = unsafeBitCast(sym, to: LockFn.self)()
+            dlclose(handle)
+            return
+        }
+        // Fallback: sleep the display.
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/pmset")
+        p.arguments = ["displaysleepnow"]
+        try? p.run()
     }
 
     private func promptForFocus(reason: String) {
@@ -2087,10 +2131,14 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         get { UserDefaults.standard.object(forKey: "showTotalOnPill") as? Bool ?? true }  // default on
         set { UserDefaults.standard.set(newValue, forKey: "showTotalOnPill") }
     }
+    private var oneTaskOnlyEnabled: Bool {
+        get { UserDefaults.standard.bool(forKey: "oneTaskOnly") }                     // default off
+        set { UserDefaults.standard.set(newValue, forKey: "oneTaskOnly") }
+    }
 
     /// The global preference checkboxes, initialized from the stored values,
     /// for the Settings dialog.
-    private func preferenceCheckboxes() -> (sound: NSButton, pushover: NSButton, auto: NSButton, total: NSButton) {
+    private func preferenceCheckboxes() -> (sound: NSButton, pushover: NSButton, auto: NSButton, total: NSButton, oneTask: NSButton) {
         let sound = NSButton(checkboxWithTitle: "Play sound when time's up", target: nil, action: nil)
         sound.state = playSoundEnabled ? .on : .off
         let pushover = NSButton(checkboxWithTitle: "Send Pushover notification at start and end of sessions", target: nil, action: nil)
@@ -2099,14 +2147,17 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         auto.state = autoProceedEnabled ? .on : .off
         let total = NSButton(checkboxWithTitle: "Show total session time after remaining time", target: nil, action: nil)
         total.state = showTotalOnPillEnabled ? .on : .off
-        return (sound, pushover, auto, total)
+        let oneTask = NSButton(checkboxWithTitle: "One task only, then touch grass (finish, then lock the screen)", target: nil, action: nil)
+        oneTask.state = oneTaskOnlyEnabled ? .on : .off
+        return (sound, pushover, auto, total, oneTask)
     }
 
-    private func persistPreferences(_ sound: NSButton, _ pushover: NSButton, _ auto: NSButton, _ total: NSButton) {
+    private func persistPreferences(_ sound: NSButton, _ pushover: NSButton, _ auto: NSButton, _ total: NSButton, _ oneTask: NSButton) {
         playSoundEnabled = sound.state == .on
         pushoverEnabled = pushover.state == .on
         autoProceedEnabled = auto.state == .on
         showTotalOnPillEnabled = total.state == .on
+        oneTaskOnlyEnabled = oneTask.state == .on
     }
 
     // Standalone Settings dialog for the global preferences.
@@ -2116,16 +2167,18 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         defer { showing = false }
         NSApp.activate(ignoringOtherApps: true)
 
-        let (sound, pushover, auto, total) = preferenceCheckboxes()
-        total.frame = NSRect(x: 0, y: 78, width: 460, height: 20)
-        sound.frame = NSRect(x: 0, y: 52, width: 460, height: 20)
-        pushover.frame = NSRect(x: 0, y: 26, width: 460, height: 20)
-        auto.frame = NSRect(x: 0, y: 0, width: 460, height: 20)
-        let accessory = NSView(frame: NSRect(x: 0, y: 0, width: 460, height: 98))
+        let (sound, pushover, auto, total, oneTask) = preferenceCheckboxes()
+        total.frame = NSRect(x: 0, y: 104, width: 460, height: 20)
+        sound.frame = NSRect(x: 0, y: 78, width: 460, height: 20)
+        pushover.frame = NSRect(x: 0, y: 52, width: 460, height: 20)
+        auto.frame = NSRect(x: 0, y: 26, width: 460, height: 20)
+        oneTask.frame = NSRect(x: 0, y: 0, width: 460, height: 20)
+        let accessory = NSView(frame: NSRect(x: 0, y: 0, width: 460, height: 124))
         accessory.addSubview(total)
         accessory.addSubview(sound)
         accessory.addSubview(pushover)
         accessory.addSubview(auto)
+        accessory.addSubview(oneTask)
 
         let alert = makeAlert()
         alert.messageText = "Settings"
@@ -2136,7 +2189,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         alert.window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         alert.runModal()
 
-        persistPreferences(sound, pushover, auto, total)
+        persistPreferences(sound, pushover, auto, total, oneTask)
         tick()   // apply the pill's remaining/total toggle immediately
     }
 
@@ -2192,7 +2245,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             if let iid = iid { db.endInterval(id: iid, elapsedSeconds: elapsed) }
             if let tid = tid { db.finishTask(id: tid, status: "completed") }   // rating deferred to "Rate unrated"
             showing = false
-            if hadParent { tick() } else { promptForFocus(reason: "after-session") }
+            if hadParent { tick() } else { advanceAfterSession() }
             return
         }
 
@@ -2217,7 +2270,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             if let tid = tid { db.finishTask(id: tid, status: "completed", rating: rating, note: note) }
             // Back to the parent subtask (if any) or on to the next focus.
             showing = false
-            if hadParent { tick() } else { promptForFocus(reason: "after-session") }
+            if hadParent { tick() } else { advanceAfterSession() }
         }
     }
 
