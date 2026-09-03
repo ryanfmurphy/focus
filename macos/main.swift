@@ -1087,6 +1087,15 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         if menuItem.action == #selector(quitFocus) {
             return !strictModeEnabled
         }
+        // Settings can be temporarily locked → disabled, with the countdown in its title
+        // (the only place the remaining time is shown).
+        if menuItem.action == #selector(showSettings) {
+            if let remaining = settingsLockRemaining() {
+                menuItem.title = "Settings (locked for \(mmss(remaining)))"
+                return false
+            }
+            menuItem.title = "Settings"
+        }
         if menuItem.action == #selector(showHistory) {
             menuItem.title = "See history (\(db.taskCount()))"
         }
@@ -2347,6 +2356,21 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         set { UserDefaults.standard.set(newValue, forKey: "allowPause") }
     }
 
+    // Settings can be temporarily locked (a commitment device): Settings is disabled
+    // until this moment. Persisted (as a wall-clock instant) so it survives quit/relaunch
+    // — you can't quit-and-relaunch to get back in early.
+    private var settingsLockedUntil: Date? {
+        get { let t = UserDefaults.standard.double(forKey: "settingsLockedUntil"); return t > 0 ? Date(timeIntervalSinceReferenceDate: t) : nil }
+        set { UserDefaults.standard.set(newValue?.timeIntervalSinceReferenceDate ?? 0, forKey: "settingsLockedUntil") }
+    }
+    /// Seconds left on the settings lock, or nil if unlocked. Clears an expired lock.
+    private func settingsLockRemaining() -> Int? {
+        guard let until = settingsLockedUntil else { return nil }
+        let secs = Int(until.timeIntervalSinceNow.rounded())
+        if secs <= 0 { settingsLockedUntil = nil; return nil }
+        return secs
+    }
+
     /// The global preference checkboxes, initialized from the stored values,
     /// for the Settings dialog.
     private func preferenceCheckboxes() -> (sound: NSButton, pushover: NSButton, auto: NSButton, total: NSButton, oneTask: NSButton, strict: NSButton, allowPause: NSButton) {
@@ -2379,7 +2403,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
 
     // Standalone Settings dialog for the global preferences.
     @objc func showSettings() {
-        guard !showing else { return }
+        guard !showing, settingsLockRemaining() == nil else { return }   // locked → can't open
         showing = true
         defer { showing = false }
         NSApp.activate(ignoringOtherApps: true)
@@ -2404,14 +2428,55 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         let alert = makeAlert()
         alert.messageText = "Settings"
         alert.informativeText = "These apply to every session."
-        alert.addButton(withTitle: "Done")
+        alert.addButton(withTitle: "Done")             // .alertFirstButtonReturn
+        alert.addButton(withTitle: "Lock settings…")   // .alertSecondButtonReturn
         alert.accessoryView = accessory
         alert.window.level = .floating
         alert.window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        alert.runModal()
+        let clicked = alert.runModal()
 
+        // Persist whatever's set now — a lock keeps the settings you just chose.
         persistPreferences(sound, pushover, auto, total, oneTask, strict, allowPause)
+        if clicked == .alertSecondButtonReturn, let secs = askLockDuration() {
+            settingsLockedUntil = Date().addingTimeInterval(Double(secs))
+        }
         tick()   // apply the pill's remaining/total toggle immediately
+    }
+
+    /// Ask how long to lock Settings — minutes (e.g. "25") or M:SS (e.g. "2:30").
+    /// Loops until a valid duration or Cancel. Returns seconds, or nil if cancelled.
+    private func askLockDuration() -> Int? {
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 200, height: 24))
+        field.placeholderString = "e.g. 25 or 25:00"
+        while true {
+            let alert = makeAlert()
+            alert.messageText = "Lock settings"
+            alert.informativeText = "Settings stay locked and can't be opened until the timer's up.\nEnter minutes (e.g. 25) or M:SS (e.g. 2:30)."
+            alert.addButton(withTitle: "Lock")     // .alertFirstButtonReturn
+            alert.addButton(withTitle: "Cancel")   // .alertSecondButtonReturn
+            alert.accessoryView = field
+            alert.window.level = .floating
+            alert.window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+            alert.window.initialFirstResponder = field
+            if alert.runModal() == .alertSecondButtonReturn { return nil }
+            if let secs = parseDuration(field.stringValue) { return secs }
+        }
+    }
+
+    /// Parse "M:SS" (minutes:seconds) or a plain integer number of minutes into seconds.
+    /// Returns nil for anything empty, malformed, or non-positive.
+    private func parseDuration(_ s: String) -> Int? {
+        let t = s.trimmingCharacters(in: .whitespaces)
+        guard !t.isEmpty else { return nil }
+        if t.contains(":") {
+            let parts = t.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
+            guard parts.count == 2, let m = Int(parts[0]), let sec = Int(parts[1]),
+                  m >= 0, sec >= 0, sec < 60 else { return nil }
+            let total = m * 60 + sec
+            return total > 0 ? total : nil
+        }
+        guard let m = Int(t), m > 0 else { return nil }
+        return m * 60
     }
 
     /// Fire-and-forget Pushover message. Credentials come from ~/focus/pushover.json
