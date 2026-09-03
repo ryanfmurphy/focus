@@ -565,7 +565,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     /// one, or quit. Only used at startup — wake/unlock/after-session use promptForFocus
     /// (which still speaks in terms of the queue/next focus). Loops back to the chooser
     /// if the user cancels out of either sub-prompt.
-    private func promptStartup() {
+    private func promptStartup(startReason: String = "launch") {
         guard !showing else { return }
         showing = true
         defer { showing = false }
@@ -599,7 +599,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             if case let .entered(focus, seconds, openStart) = askFocusAndMinutes(
                 title: "Start a task", info: "What's your one focus right now, and for how long?",
                 confirm: "Start", cancellable: true) {
-                beginSession(reason: "launch", seconds: seconds, focus: focus, openSecondsStart: openStart)
+                beginSession(reason: startReason, seconds: seconds, focus: focus, openSecondsStart: openStart)
                 return
             }
             continue   // cancelled → back to the chooser
@@ -612,6 +612,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     // now — the same idea as pre-empting a focus that's about to begin, but for
     // the one already running.
     @objc func changeFocus() {
+        // Idle "Set focus" is the same as the startup chooser (start a task / pick from
+        // the queue / close) — promptStartup manages its own `showing`. The rest of this
+        // method is the active "Switch focus now" flow, so `preempting` is always true.
+        guard taskId != nil else { promptStartup(startReason: "manual"); return }
         guard !showing else { return }
         showing = true
         defer { showing = false }
