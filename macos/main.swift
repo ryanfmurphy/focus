@@ -279,6 +279,27 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     }
     private var ancestors: [Frame] = []
 
+    /// The task you committed to for this work session — the one pulled from the queue
+    /// (or started fresh). Strict mode locks you to it: you can drill into subtasks below
+    /// it, but can't Stop working / Switch away from the commitment itself, even when it's
+    /// a subtask (its parents were rebuilt as ticking context). Persisted so the lock
+    /// survives quit/relaunch (which restores the running stack). Set only on a *primary*
+    /// start, never on a subtask push.
+    private var committedTaskId: Int64? {
+        get { (UserDefaults.standard.object(forKey: "committedTaskId") as? Int).map(Int64.init) }
+        set {
+            if let v = newValue { UserDefaults.standard.set(Int(v), forKey: "committedTaskId") }
+            else { UserDefaults.standard.removeObject(forKey: "committedTaskId") }
+        }
+    }
+
+    /// In strict mode, whether the current leaf IS the committed task (so Stop/Switch are
+    /// locked out). False when idle, when strict is off, or when the leaf is a deeper
+    /// subtask created below the commitment.
+    private var lockedToCommitment: Bool {
+        strictModeEnabled && taskId != nil && taskId == committedTaskId
+    }
+
     /// Clear all live task/interval state, including the ancestor stack (back to idle).
     private func clearSessionState() {
         currentFocus = nil; deadline = nil; taskId = nil; intervalId = nil
@@ -349,20 +370,18 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         clearSessionState()
     }
 
-    /// Suspend just the current subtask (leaf): close its interval, then pop to the
-    /// parent, which keeps ticking. With `requeue`, re-queue it (carrying its parent
-    /// link) so it's resumable from the queue — `toFront` picks front (pre-empt) vs. end
-    /// (Stop working). With `requeue: false` it's simply left unfinished (still reachable
-    /// via "Switch to subtask", grayed) — used in strict mode, which keeps the queue frozen.
+    /// Suspend just the current subtask (leaf): close its interval, re-queue it (carrying
+    /// its parent link) so it's resumable from the queue, then pop to the parent, which
+    /// keeps ticking. `toFront` picks front (pre-empt) vs. end (Stop working).
     /// Returns false if there's no parent (top-level) — caller uses suspendStack then.
     @discardableResult
-    private func suspendLeaf(requeue: Bool = true, toFront: Bool = true) -> Bool {
+    private func suspendLeaf(toFront: Bool = true) -> Bool {
         guard !ancestors.isEmpty, let tid = taskId, let iid = intervalId, let focus = currentFocus else { return false }
         let remaining = max(1, remainingSeconds())
         let elapsed = elapsedFocusSeconds()
         resumeStackIfPaused()
         db.endInterval(id: iid, elapsedSeconds: elapsed)
-        if requeue { db.enqueueTask(focus: focus, estimateSeconds: remaining, taskId: tid, front: toFront) }
+        db.enqueueTask(focus: focus, estimateSeconds: remaining, taskId: tid, front: toFront)
         popAncestorToLeaf()          // parent becomes the leaf and keeps ticking
         return true
     }
@@ -931,21 +950,21 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     // the still-ticking parent. No rating (it isn't done), unlike Abort.
     @objc func stopWorking() {
         guard !showing, taskId != nil else { return }
-        // "Stop working" is allowed on a subtask (drop to the parent) but not on a
-        // top-level task when pausing is off (suspend + go idle is a pause) or in strict
-        // mode (no parking a top-level task). Force the subtask scope in those cases so
-        // the whole-stack option isn't reachable.
-        let nested = !ancestors.isEmpty
-        guard nested || (allowPauseEnabled && !strictModeEnabled) else { return }
+        // Strict mode → locked to the committed task; only a deeper subtask can be stopped.
+        // Otherwise → a subtask drops to the parent (always ok); a top-level stop needs
+        // pausing on. Force the subtask scope when the whole-stack option isn't reachable
+        // (pausing off, or strict — where the whole stack includes the commitment).
+        if strictModeEnabled {
+            guard !lockedToCommitment else { return }
+        } else {
+            guard !ancestors.isEmpty || allowPauseEnabled else { return }
+        }
         showing = true
         defer { showing = false }
         let (proceed, subtaskOnly) = promptStopScope(forceSubtaskOnly: !allowPauseEnabled || strictModeEnabled)
         guard proceed else { return }
-        // Stop working parks the task at the END of the queue (not the front). Strict
-        // mode keeps the queue frozen → stop the subtask without re-queuing it at all
-        // (it stays reachable via "Switch to subtask", grayed).
-        if subtaskOnly { suspendLeaf(requeue: !strictModeEnabled, toFront: false) }
-        else { suspendStack(toFront: false) }
+        // Stop working parks the task at the END of the queue (not the front).
+        if subtaskOnly { suspendLeaf(toFront: false) } else { suspendStack(toFront: false) }
         tick()   // subtask → shows the parent; whole task → hides the pill (idle)
     }
 
@@ -953,17 +972,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     /// (drop to the parent) vs the whole task (go idle). Returns (proceed, subtaskOnly).
     private func promptStopScope(forceSubtaskOnly: Bool = false) -> (proceed: Bool, subtaskOnly: Bool) {
         let nested = !ancestors.isEmpty
-        // Strict mode stops a subtask without re-queuing it (suspendLeaf requeue: false),
-        // so it isn't going to the front of the queue — it stays reachable under its
-        // parent via "Switch to subtask" instead.
-        let subtaskUnqueued = nested && strictModeEnabled
         let alert = makeAlert()
         alert.messageText = "Stop working?"
-        alert.informativeText = subtaskUnqueued
-            ? "The parent keeps running; come back to this subtask later from \u{201C}Switch to subtask\u{201D}."
-            : (nested
-                ? "It goes to the end of the queue so you can resume it later."
-                : "\(currentFocus ?? "This task") goes to the end of the queue so you can resume it later.")
+        alert.informativeText = nested
+            ? "It goes to the end of the queue so you can resume it later."
+            : "\(currentFocus ?? "This task") goes to the end of the queue so you can resume it later."
         // The scope checkbox is only offered when both scopes are available. With pausing
         // off (forceSubtaskOnly), the whole-task option is suppressed — subtask scope only.
         var box: NSButton? = nil
@@ -1023,14 +1036,16 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         if menuItem.action == #selector(abortTask) {
             return currentFocus != nil && !strictModeEnabled
         }
-        // Stop working on a subtask just drops to the still-running parent → always
-        // allowed. On a top-level task it's a heavy pause (suspend + go idle), so it's
-        // disabled when pausing is off, and in strict mode (which forbids parking a
-        // top-level task).
+        // Stop working:
+        //  • Strict mode → locked to the committed task: you can't stop it (top-level or
+        //    subtask), but a deeper subtask you created below it can be stopped (drops
+        //    back toward the commitment).
+        //  • Otherwise → a subtask drops to the still-running parent (always allowed); a
+        //    top-level task is a heavy pause, so it needs pausing enabled.
         if menuItem.action == #selector(stopWorking) {
             guard currentFocus != nil else { return false }
-            if !ancestors.isEmpty { return true }              // subtask
-            return allowPauseEnabled && !strictModeEnabled     // top-level
+            if strictModeEnabled { return !lockedToCommitment }
+            return !ancestors.isEmpty || allowPauseEnabled
         }
         if menuItem.action == #selector(togglePause) {
             menuItem.title = pausedAt != nil ? "Resume" : "Pause"
@@ -1495,6 +1510,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             intervalId = ids?.intervalId
         }
         if let iid = intervalId, let s = openSecondsStart { db.addIntervalOpenSecondsStart(id: iid, seconds: s) }
+        // A *primary* start (fresh top-level, or a queue-resume that rebuilds the stack)
+        // is a new commitment; a subtask push (parentTaskId set, or a switch attaching
+        // under a live parent) keeps the existing commitment.
+        let isPrimaryStart = (resumeTaskId != nil) ? rebuildAncestors : (parentTaskId == nil)
+        if isPrimaryStart { committedTaskId = taskId }
         if pushoverEnabled { sendPushover(title: "Focus started", message: "\(focus) — \(mmss(seconds))") }
         tick()
     }
