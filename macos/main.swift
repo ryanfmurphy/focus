@@ -582,26 +582,28 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
                 let alert = makeAlert()
                 alert.messageText = "Ready to focus?"
                 alert.informativeText = "Strict mode: next up is \"\(queueDisplayName(next))\" (\(mmss(next.seconds))). It's the only task you can start."
-                alert.addButton(withTitle: "Start next task")   // 0
-                alert.addButton(withTitle: "Close")             // 1
+                alert.addButton(withTitle: "Start next task")   // 0 — the only option in strict mode
                 alert.window.level = .floating
                 alert.window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-                if runFloatingAlert(alert) == 1 { return }   // close — stay idle
+                _ = runFloatingAlert(alert)   // no Close in strict mode — must start the next task
                 db.removeFromQueue(id: next.id)
                 beginSession(reason: "queue", seconds: next.seconds, focus: next.focus, resumeTaskId: next.taskId)
                 return
             }
 
+            // Strict mode forces you to engage → no Close (you can only reach here with an
+            // empty queue; the queued case is handled above).
+            let canClose = !strictModeEnabled
             let alert = makeAlert()
             alert.messageText = "Ready to focus?"
             alert.informativeText = hasQueue
-                ? "No task is running. Start a new focus, pick one from the queue, or close this."
-                : "No task is running. Start a new focus, or close this."
+                ? "No task is running. Start a new focus, pick one from the queue\(canClose ? ", or close this" : "")."
+                : "No task is running. Start a new focus\(canClose ? ", or close this" : "")."
             alert.addButton(withTitle: "Start a task…")                          // 0
             var pickIndex = -1
             if hasQueue { alert.addButton(withTitle: "Pick from queue…"); pickIndex = alert.buttons.count - 1 }
-            alert.addButton(withTitle: "Close")
-            let closeIndex = alert.buttons.count - 1
+            var closeIndex = -1
+            if canClose { alert.addButton(withTitle: "Close"); closeIndex = alert.buttons.count - 1 }
             alert.window.level = .floating
             alert.window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
             let clicked = runFloatingAlert(alert)
