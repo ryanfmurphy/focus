@@ -774,6 +774,20 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         db.recordPreempt(preemptedSessionId: nil, newSessionId: nil)
     }
 
+    // Quit — but strict mode won't let you bail: no quitting until you turn it off
+    // (Force Quit still works). Routed through here (not NSApp.terminate directly) so
+    // the menu items grey out and Cmd-Q is caught too.
+    @objc func quitFocus() {
+        guard !strictModeEnabled else { return }
+        NSApp.terminate(nil)
+    }
+
+    // Backstop for any other terminate path (Cmd-Q, dock, programmatic): cancel it
+    // while strict mode is on.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        return strictModeEnabled ? .terminateCancel : .terminateNow
+    }
+
     // Toggle the floating corner pill on/off (persisted). The menu-bar icon and
     // all timing/logging are unaffected — only the pill is suppressed.
     @objc func toggleShowPill() {
@@ -1033,6 +1047,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         // Strict mode: "Add to front" jumps the queue order → disabled.
         if menuItem.action == #selector(preemptNextFocus) && strictModeEnabled {
             return false
+        }
+        // Strict mode: no bailing out — "Quit focus" is disabled until you turn it off.
+        if menuItem.action == #selector(quitFocus) {
+            return !strictModeEnabled
         }
         if menuItem.action == #selector(showHistory) {
             menuItem.title = "See history (\(db.taskCount()))"
@@ -2553,8 +2571,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         let appItem = NSMenuItem()
         mainMenu.addItem(appItem)
         let appMenu = NSMenu()
-        appMenu.addItem(withTitle: "Quit focus",
-                        action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        let quitItem = appMenu.addItem(withTitle: "Quit focus",
+                                       action: #selector(quitFocus), keyEquivalent: "q")
+        quitItem.target = self   // so validateMenuItem can grey it out in strict mode
         appItem.submenu = appMenu
 
         let editItem = NSMenuItem()
@@ -2603,10 +2622,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         // App.
         menu.addItem(withTitle: "Show current task", action: #selector(toggleShowPill), keyEquivalent: "")
         menu.addItem(withTitle: "Settings", action: #selector(showSettings), keyEquivalent: "")
-        menu.addItem(withTitle: "Quit focus", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
-        for item in menu.items where item.action != #selector(NSApplication.terminate(_:)) {
-            item.target = self
-        }
+        menu.addItem(withTitle: "Quit focus", action: #selector(quitFocus), keyEquivalent: "q")
+        for item in menu.items { item.target = self }
         statusItem.menu = menu
     }
 
