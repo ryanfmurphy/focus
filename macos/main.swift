@@ -527,7 +527,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         // must NOT interrupt or restart it. Only prompt when idle.
         guard currentFocus == nil else { return }
         guard Date().timeIntervalSince(lastFired) >= cooldown else { return }
-        promptForFocus(reason: reason)
+        promptNextFocus(startReason: reason)
         lastFired = Date()          // stamp AFTER dismissal
     }
 
@@ -539,7 +539,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
               isoParser.date(from: leafIv.startedAt) != nil else {
             // No task was running — sweep any strays and show the startup chooser.
             for iv in open { db.endInterval(id: iv.id, elapsedSeconds: intervalElapsed(iv)) }
-            promptStartup()
+            promptNextFocus(startReason: "launch")
             return
         }
 
@@ -573,7 +573,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
                          estimateSeconds: task.estimateSeconds ?? 0, spentBefore: spent, deadline: dl, focus: task.focus)
         }
         guard let leaf = frame(for: leafTask) else {
-            db.endInterval(id: leafIv.id, elapsedSeconds: intervalElapsed(leafIv)); promptStartup(); return
+            db.endInterval(id: leafIv.id, elapsedSeconds: intervalElapsed(leafIv)); promptNextFocus(startReason: "launch"); return
         }
         // ancestors want root … parent (chain is leaf-first, so drop leaf and reverse).
         ancestors = chain.dropFirst().reversed().compactMap { frame(for: $0) }
@@ -586,67 +586,35 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         tick()
     }
 
-    /// Launched with no running task: ask whether to start a new focus, pick a queued
-    /// one, or quit. Only used at startup — wake/unlock/after-session use promptForFocus
-    /// (which still speaks in terms of the queue/next focus). Loops back to the chooser
-    /// if the user cancels out of either sub-prompt.
-    private func promptStartup(startReason: String = "launch") {
+    /// The single "what's next?" flow for every idle moment — launch, wake, unlock, "Set
+    /// focus", and after a session ends. With a queue, it confirms the front focus (Start /
+    /// different / pick / Close, auto-proceeding when that preference is on); with an empty
+    /// queue, it asks for a fresh focus. Close goes idle — except in strict mode, which
+    /// forces you to start something. Loops back if you cancel out of a sub-prompt.
+    private func promptNextFocus(startReason: String) {
         guard !showing else { return }
         showing = true
         defer { showing = false }
         NSApp.activate(ignoringOtherApps: true)
         while true {
-            let hasQueue = db.queueCount() > 0
-
-            // Strict mode with a queue: the front task is the only thing you can start —
-            // no free-form new focus, no picking a different queued item.
-            if strictModeEnabled, hasQueue, let next = db.frontOfQueue() {
-                let alert = makeAlert()
-                alert.messageText = "Ready to focus?"
-                alert.informativeText = "Strict mode: next up is \"\(queueDisplayName(next))\" (\(mmss(next.seconds))). It's the only task you can start."
-                alert.addButton(withTitle: "Start next task")   // 0 — the only option in strict mode
-                alert.window.level = .floating
-                alert.window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-                _ = runFloatingAlert(alert)   // no Close in strict mode — must start the next task
-                db.removeFromQueue(id: next.id)
-                beginSession(reason: "queue", seconds: next.seconds, focus: next.focus, resumeTaskId: next.taskId)
-                return
-            }
-
-            // Strict mode forces you to engage → no Close (you can only reach here with an
-            // empty queue; the queued case is handled above).
-            let canClose = !strictModeEnabled
-            let alert = makeAlert()
-            alert.messageText = "Ready to focus?"
-            alert.informativeText = hasQueue
-                ? "No task is running. Start a new focus, pick one from the queue\(canClose ? ", or close this" : "")."
-                : "No task is running. Start a new focus\(canClose ? ", or close this" : "")."
-            alert.addButton(withTitle: "Start a task…")                          // 0
-            var pickIndex = -1
-            if hasQueue { alert.addButton(withTitle: "Pick from queue…"); pickIndex = alert.buttons.count - 1 }
-            var closeIndex = -1
-            if canClose { alert.addButton(withTitle: "Close"); closeIndex = alert.buttons.count - 1 }
-            alert.window.level = .floating
-            alert.window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-            let clicked = runFloatingAlert(alert)
-
-            if clicked == closeIndex { return }   // just dismiss — app stays running, idle
-            if hasQueue && clicked == pickIndex {
-                if let item = pickFromQueue() {
-                    db.removeFromQueue(id: item.id)
-                    beginSession(reason: "queue", seconds: item.seconds, focus: item.focus, resumeTaskId: item.taskId)
-                    return
+            if let next = db.frontOfQueue() {
+                switch confirmQueued(next) {
+                case .started, .closed: return
+                case .retry: continue
                 }
-                continue   // cancelled the picker → back to the chooser
             }
-            // Start a task
-            if case let .entered(focus, seconds, openStart) = askFocusAndMinutes(
-                title: "Start a task", info: "What's your one focus right now, and for how long?",
-                confirm: "Start", cancellable: true) {
+            // Empty queue → start a fresh focus. Strict mode makes it mandatory (no cancel).
+            switch askFocusAndMinutes(
+                title: "Ready to focus?", info: "What's your one focus right now, and for how long?",
+                confirm: "Start", cancellable: !strictModeEnabled) {
+            case .entered(let focus, let seconds, let openStart):
                 beginSession(reason: startReason, seconds: seconds, focus: focus, openSecondsStart: openStart)
                 return
+            case .cancelled:
+                return   // Close → idle (only reachable when not strict)
+            case .queuePick:
+                continue // not offered here; treat as a retry
             }
-            continue   // cancelled → back to the chooser
         }
     }
 
@@ -656,10 +624,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     // now — the same idea as pre-empting a focus that's about to begin, but for
     // the one already running.
     @objc func changeFocus() {
-        // Idle "Set focus" is the same as the startup chooser (start a task / pick from
-        // the queue / close) — promptStartup manages its own `showing`. The rest of this
+        // Idle "Set focus" is the same unified next-focus flow used at launch / wake /
+        // after a session (promptNextFocus manages its own `showing`). The rest of this
         // method is the active "Switch focus now" flow, so `preempting` is always true.
-        guard taskId != nil else { promptStartup(startReason: "manual"); return }
+        guard taskId != nil else { promptNextFocus(startReason: "manual"); return }
         guard !showing else { return }
         showing = true
         defer { showing = false }
@@ -1150,7 +1118,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     /// congratulate, then lock the screen instead of prompting for another.
     private func advanceAfterSession() {
         if oneTaskOnlyEnabled { touchGrassAndLock() }
-        else { promptForFocus(reason: "after-session") }
+        else { promptNextFocus(startReason: "after-session") }
     }
 
     /// The "touch grass" send-off: a single-button modal, then lock the screen.
@@ -1213,51 +1181,31 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         try? p.run()
     }
 
-    private func promptForFocus(reason: String) {
-        guard !showing else { return }
-        showing = true
-        defer { showing = false }
+    private enum NextOutcome { case started, closed, retry }
 
-        // promptForFocus only runs with no active session (callers guard on or
-        // clear it first), so there's nothing to rate/close here.
-
-        NSApp.activate(ignoringOtherApps: true)
-
-        // Auto-starts (return / after-session) use a queued focus if present.
-        // Only the after-session chain is eligible for hands-free auto-proceed.
-        if let next = db.frontOfQueue() {
-            confirmQueued(next, autoEligible: reason == "after-session")
-            return
-        }
-
-        guard case let .entered(answer, seconds, openStart) = askFocusAndMinutes(
-            title: "Welcome back",
-            info: "What's your one focus right now, and for how long?",
-            confirm: "Start", cancellable: false) else { return }
-        beginSession(reason: reason, seconds: seconds, focus: answer, openSecondsStart: openStart)
-    }
-
-    /// Non-editable confirmation for the next queued focus. Pops it off and starts.
-    /// When `autoEligible` and the auto-proceed preference is on, a 10s countdown
-    /// auto-starts it (as if "Start" were clicked).
-    private func confirmQueued(_ item: QueueItem, autoEligible: Bool) {
+    /// The next-focus confirm for the front queued item: Start it, start a different
+    /// (ad-hoc) focus, pick another queued item, or Close (go idle). Auto-proceeds after a
+    /// 10s countdown when that preference is on. Strict mode shows Start only — no
+    /// switching, no Close. Returns what happened so the caller can loop (retry) or stop.
+    private func confirmQueued(_ item: QueueItem) -> NextOutcome {
         let confirmOpenedAt = Date()   // how long this confirm stays up → the queued session's open_seconds_start
         let alert = makeAlert()
-        alert.messageText = "Next focus"
-        alert.informativeText = "\(queueDisplayName(item))\n\n\(mmss(item.seconds))"
-        alert.addButton(withTitle: "Start")             // .alertFirstButtonReturn
+        alert.messageText = "Ready to focus?"
+        alert.informativeText = "Next up: \(queueDisplayName(item))\n\n\(mmss(item.seconds))"
+        alert.addButton(withTitle: "Start")             // 0
         // Strict mode: the front task is the only option — no switching to a new or
-        // different queued focus. Otherwise offer both alternatives.
+        // different queued focus, and no closing. Otherwise offer the alternatives + Close.
+        var differentIndex = -1, pickIndex = -1, closeIndex = -1
         if !strictModeEnabled {
-            alert.addButton(withTitle: "Start a different focus") // index 1
-            // Always shown, but disabled when there's no other queued item to pick.
-            let pickButton = alert.addButton(withTitle: "Pick another queued focus…")  // index 2
-            pickButton.isEnabled = db.queueCount() > 1
+            alert.addButton(withTitle: "Start a different focus"); differentIndex = alert.buttons.count - 1
+            let pickButton = alert.addButton(withTitle: "Pick another queued focus…"); pickIndex = alert.buttons.count - 1
+            pickButton.isEnabled = db.queueCount() > 1   // disabled when there's no other queued item
+            alert.addButton(withTitle: "Close"); closeIndex = alert.buttons.count - 1
         }
 
         var autoTimer: Timer?
         var elapsedTimer: Timer?
-        if autoEligible && autoProceedEnabled {
+        if autoProceedEnabled {
             let label = NSTextField(wrappingLabelWithString: "")
             label.frame = NSRect(x: 0, y: 0, width: 340, height: 34)
             label.alignment = .center
@@ -1290,12 +1238,13 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         }
 
         // Non-app-modal so the 🎯 menu stays usable while this prompt is up.
-        let response = runFloatingAlert(alert)   // 0 = Start, 1 = Pre-empt with new, 2 = from queue
+        let response = runFloatingAlert(alert)
         autoTimer?.invalidate()
         elapsedTimer?.invalidate()
 
-        if response == 1 {
-            // Pre-empt with new: leave the queued item where it is (still the front,
+        if response == closeIndex { return .closed }   // go idle
+        if response == differentIndex {
+            // Start a different focus: leave the queued item where it is (still the front,
             // since we never removed it) and run an ad-hoc focus right now instead.
             if case let .entered(focus, seconds, openStart) = askFocusAndMinutes(
                 title: "Start a different focus",
@@ -1304,28 +1253,30 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
                 beginSession(reason: "preempt", seconds: seconds, focus: focus, openSecondsStart: openStart)
                 // Nothing was underway → preempted_session_id is NULL.
                 db.recordPreempt(preemptedSessionId: nil, newSessionId: intervalId)
-                return
+                return .started
             }
-            // Cancelled the pre-empt → fall through and start the queued one.
-        } else if response == 2 {
-            // Pre-empt from queue: pick any focus and start it now instead of
-            // the front one (which stays queued). Same as a normal front-fetch, just
-            // for the chosen item.
+            return .retry   // cancelled → back to the chooser
+        }
+        if response == pickIndex {
+            // Pick another queued focus: start the chosen one now instead of the front
+            // (which stays queued). Same as a normal front-fetch, just for the chosen item.
             if let chosen = pickFromQueue() {
                 db.removeFromQueue(id: chosen.id)
                 let openStart = Int(Date().timeIntervalSince(confirmOpenedAt).rounded())
                 beginSession(reason: "queue", seconds: chosen.seconds, focus: chosen.focus,
                              resumeTaskId: chosen.taskId, openSecondsStart: openStart)
                 db.recordPreempt(preemptedSessionId: nil, newSessionId: intervalId)
-                return
+                return .started
             }
-            // Cancelled the picker → fall through and start the front one.
+            return .retry   // cancelled the picker → back to the chooser
         }
 
+        // Start (0), or the auto-proceed countdown fired → start the front item.
         db.removeFromQueue(id: item.id)
         let queuedOpenStart = Int(Date().timeIntervalSince(confirmOpenedAt).rounded())
         beginSession(reason: "queue", seconds: item.seconds, focus: item.focus,
                      resumeTaskId: item.taskId, openSecondsStart: queuedOpenStart)
+        return .started
     }
 
     /// Display name for a queued item: for a set-aside subtask, prefix its ancestor
