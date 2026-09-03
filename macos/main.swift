@@ -575,18 +575,18 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             let alert = makeAlert()
             alert.messageText = "Ready to focus?"
             alert.informativeText = hasQueue
-                ? "No task is running. Start a new focus, pick one from the queue, or quit."
-                : "No task is running. Start a new focus, or quit."
+                ? "No task is running. Start a new focus, pick one from the queue, or close this."
+                : "No task is running. Start a new focus, or close this."
             alert.addButton(withTitle: "Start a task…")                          // 0
             var pickIndex = -1
             if hasQueue { alert.addButton(withTitle: "Pick from queue…"); pickIndex = alert.buttons.count - 1 }
-            alert.addButton(withTitle: "Quit")
-            let quitIndex = alert.buttons.count - 1
+            alert.addButton(withTitle: "Close")
+            let closeIndex = alert.buttons.count - 1
             alert.window.level = .floating
             alert.window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
             let clicked = runFloatingAlert(alert)
 
-            if clicked == quitIndex { NSApp.terminate(nil); return }
+            if clicked == closeIndex { return }   // just dismiss — app stays running, idle
             if hasQueue && clicked == pickIndex {
                 if let item = pickFromQueue() {
                     db.removeFromQueue(id: item.id)
