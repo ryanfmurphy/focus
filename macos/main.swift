@@ -346,17 +346,20 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         clearSessionState()
     }
 
-    /// Suspend just the current subtask (leaf): close its interval, re-queue it
-    /// (carrying its parent link), then pop to the parent, which keeps ticking.
+    /// Suspend just the current subtask (leaf): close its interval, then pop to the
+    /// parent, which keeps ticking. By default the subtask is re-queued to the front
+    /// (carrying its parent link) so it's resumable from the queue; with `requeue:
+    /// false` it's simply left unfinished (still reachable via "Switch to subtask",
+    /// grayed) — used in strict mode, which keeps the queue frozen.
     /// Returns false if there's no parent (top-level) — caller uses suspendStack then.
     @discardableResult
-    private func suspendLeaf() -> Bool {
+    private func suspendLeaf(requeue: Bool = true) -> Bool {
         guard !ancestors.isEmpty, let tid = taskId, let iid = intervalId, let focus = currentFocus else { return false }
         let remaining = max(1, remainingSeconds())
         let elapsed = elapsedFocusSeconds()
         resumeStackIfPaused()
         db.endInterval(id: iid, elapsedSeconds: elapsed)
-        db.enqueueTask(focus: focus, estimateSeconds: remaining, taskId: tid, front: true)
+        if requeue { db.enqueueTask(focus: focus, estimateSeconds: remaining, taskId: tid, front: true) }
         popAncestorToLeaf()          // parent becomes the leaf and keeps ticking
         return true
     }
@@ -886,7 +889,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     // Abort the current task: rate it, mark interrupted (recording elapsed),
     // then advance to the next (queued or improvised).
     @objc func abortTask() {
-        guard !showing, let tid = taskId, let iid = intervalId, let focus = currentFocus else { return }
+        guard !showing, !strictModeEnabled,
+              let tid = taskId, let iid = intervalId, let focus = currentFocus else { return }
         showing = true
         let elapsed = elapsedFocusSeconds()   // excludes pause time
         resumeStackIfPaused()
@@ -917,7 +921,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         defer { showing = false }
         let (proceed, subtaskOnly) = promptStopScope(forceSubtaskOnly: !allowPauseEnabled)
         guard proceed else { return }
-        if subtaskOnly { suspendLeaf() } else { suspendStack() }
+        // Strict mode keeps the queue frozen → stop the subtask without re-queuing it
+        // (it stays reachable via "Switch to subtask", grayed).
+        if subtaskOnly { suspendLeaf(requeue: !strictModeEnabled) } else { suspendStack() }
         tick()   // subtask → shows the parent; whole task → hides the pill (idle)
     }
 
@@ -980,10 +986,14 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             return !resumableSubtasks(of: leaf).isEmpty
         }
         // Complete / Abort / Stop / Rename / Add time / Add subtask act on a running session.
-        if menuItem.action == #selector(completeTask) || menuItem.action == #selector(abortTask)
+        if menuItem.action == #selector(completeTask)
             || menuItem.action == #selector(addTimeToCurrent) || menuItem.action == #selector(addSubtask)
             || menuItem.action == #selector(renameTask) {
             return currentFocus != nil
+        }
+        // Strict mode: the only way off the current task is to complete it — no aborting.
+        if menuItem.action == #selector(abortTask) {
+            return currentFocus != nil && !strictModeEnabled
         }
         // Stop working on a top-level task is a heavy pause (suspend + go idle) → disabled
         // when pausing is off. On a subtask it just drops to the still-running parent, so
