@@ -912,14 +912,15 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     // still-ticking parent. No rating (it isn't done), unlike Abort.
     @objc func stopWorking() {
         guard !showing, taskId != nil else { return }
-        // Pausing off: "Stop working" is allowed on a subtask (drop to the parent) but
-        // not on a top-level task (suspend + go idle is a pause). Force the subtask scope
-        // so the whole-stack option isn't reachable.
+        // "Stop working" is allowed on a subtask (drop to the parent) but not on a
+        // top-level task when pausing is off (suspend + go idle is a pause) or in strict
+        // mode (no parking a top-level task). Force the subtask scope in those cases so
+        // the whole-stack option isn't reachable.
         let nested = !ancestors.isEmpty
-        guard allowPauseEnabled || nested else { return }
+        guard nested || (allowPauseEnabled && !strictModeEnabled) else { return }
         showing = true
         defer { showing = false }
-        let (proceed, subtaskOnly) = promptStopScope(forceSubtaskOnly: !allowPauseEnabled)
+        let (proceed, subtaskOnly) = promptStopScope(forceSubtaskOnly: !allowPauseEnabled || strictModeEnabled)
         guard proceed else { return }
         // Strict mode keeps the queue frozen → stop the subtask without re-queuing it
         // (it stays reachable via "Switch to subtask", grayed).
@@ -995,12 +996,14 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         if menuItem.action == #selector(abortTask) {
             return currentFocus != nil && !strictModeEnabled
         }
-        // Stop working on a top-level task is a heavy pause (suspend + go idle) → disabled
-        // when pausing is off. On a subtask it just drops to the still-running parent, so
-        // it stays allowed even with pausing off.
+        // Stop working on a subtask just drops to the still-running parent → always
+        // allowed. On a top-level task it's a heavy pause (suspend + go idle), so it's
+        // disabled when pausing is off, and in strict mode (which forbids parking a
+        // top-level task).
         if menuItem.action == #selector(stopWorking) {
             guard currentFocus != nil else { return false }
-            return allowPauseEnabled || !ancestors.isEmpty
+            if !ancestors.isEmpty { return true }              // subtask
+            return allowPauseEnabled && !strictModeEnabled     // top-level
         }
         if menuItem.action == #selector(togglePause) {
             menuItem.title = pausedAt != nil ? "Resume" : "Pause"
