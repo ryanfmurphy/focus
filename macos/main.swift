@@ -417,6 +417,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     // prompt doesn't seize the app, Settings can be opened over it (the one blocked action
     // exempted while it's showing).
     private var nextFocusOpen = false
+    // Set by Settings (opened over the chooser) to make the chooser tear down and rebuild
+    // so it reflects the new settings (e.g. strict mode toggled on/off).
+    private var nextFocusNeedsRerender = false
     private var lastFired = Date.distantPast
     private let cooldown: TimeInterval = 10
     private var panelResult: Int?   // set by a floating (non-app-modal) panel's button
@@ -602,16 +605,19 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         defer { showing = false; nextFocusOpen = false }
         NSApp.activate(ignoringOtherApps: true)
         while true {
+            nextFocusNeedsRerender = false   // fresh each render; Settings sets it to loop back
             if let next = db.frontOfQueue() {
                 switch confirmQueued(next) {
                 case .started, .closed: return
-                case .retry: continue
+                case .retry: continue   // includes "Settings changed → rebuild"
                 }
             }
             // Empty queue → start a fresh focus. Strict mode makes it mandatory (no cancel).
-            switch askFocusAndMinutes(
+            let entry = askFocusAndMinutes(
                 title: "Ready to focus?", info: "What's your one focus right now, and for how long?",
-                confirm: "Start", cancellable: !strictModeEnabled) {
+                confirm: "Start", cancellable: !strictModeEnabled)
+            if nextFocusNeedsRerender { continue }   // Settings changed → rebuild the chooser
+            switch entry {
             case .entered(let focus, let seconds, let openStart):
                 beginSession(reason: startReason, seconds: seconds, focus: focus, openSecondsStart: openStart)
                 return
@@ -1250,6 +1256,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         autoTimer?.invalidate()
         elapsedTimer?.invalidate()
 
+        if nextFocusNeedsRerender { return .retry }    // Settings changed → rebuild
         if response == closeIndex { return .closed }   // go idle
         if response == differentIndex {
             // Start a different focus: leave the queued item where it is (still the front,
@@ -1432,6 +1439,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             // Non-app-modal so the 🎯 menu stays usable while the prompt is up.
             let clicked = runFloatingAlert(alert, firstResponder: focusField)
 
+            // Settings (opened over the "Ready to focus?" chooser) changed → bail so the
+            // caller can rebuild. Only ever set while that chooser is up.
+            if nextFocusNeedsRerender { return .cancelled }
             if clicked == cancelIndex { return .cancelled }
             if clicked == queueIndex { return .queuePick }
 
@@ -2403,6 +2413,13 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         persistPreferences(sound, pushover, auto, total, oneTask, strict, allowPause)
         if clicked == .alertSecondButtonReturn, let secs = askLockDuration() {
             settingsLockedUntil = Date().addingTimeInterval(Double(secs))
+        }
+        // If Settings was opened over the "Ready to focus?" chooser, make it rebuild so it
+        // reflects the changes (e.g. strict mode toggled): flag it and break the chooser's
+        // event pump (Int.min ends runFloatingAlert; the flag is what's actually read).
+        if nextFocusOpen {
+            nextFocusNeedsRerender = true
+            panelResult = Int.min
         }
         tick()   // apply the pill's remaining/total toggle immediately
     }
