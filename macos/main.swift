@@ -681,38 +681,48 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
                 newFocus = f; newSeconds = s; newOpenStart = o          // fresh task
                 break prompt
             case .queuePick:
-                // Subtask mode → only set-aside subtasks of this parent. Whole-stack
-                // switch / Set focus → ALL queued items: main tasks AND set-aside
-                // subtasks (resuming a subtask rebuilds its tree, and its parent may
-                // not itself be queued, so filtering to top-level would strand it).
-                let justSubtask = subtaskMode
-                let filter: (QueueItem) -> Bool
-                if justSubtask {
-                    filter = { item in item.taskId.flatMap { tid in self.db.task(id: tid)?.parentTaskId } == parentId }
-                } else {
-                    filter = { _ in true }
+                if subtaskMode, let pid = parentId {
+                    // Switch to a SIBLING subtask (another child of the parent, minus the
+                    // current one): queued ones first, then unqueued-but-unfinished grayed
+                    // — same picker as "Switch to subtask".
+                    let sibs = resumableSubtasks(of: pid, excluding: taskId)
+                    guard !sibs.isEmpty else {
+                        let alert = makeAlert()
+                        alert.messageText = "No other subtasks"
+                        alert.informativeText = "This task has no other subtasks to switch to."
+                        alert.addButton(withTitle: "OK")
+                        alert.window.level = .floating
+                        alert.window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+                        _ = runFloatingAlert(alert)
+                        continue prompt
+                    }
+                    let rows = sibs.map { SubtaskPickRow(choice: $0, duration: mmss($0.remaining)) }
+                    var picked: SubtaskChoice?
+                    let source = SubtaskPickSource(rows: rows) { c in picked = c; NSApp.stopModal() }
+                    runPickerWindow(title: "Switch to subtask",
+                                    info: "Pick a subtask to switch to — it runs under the same parent. Grayed rows aren't in the queue.",
+                                    table: source.makeTable())
+                    guard let pick = picked else { continue prompt }
+                    if let rowId = pick.queueRowId { db.removeFromQueue(id: rowId) }   // no-op for unqueued
+                    newFocus = pick.focus; newSeconds = max(1, pick.remaining); resumeId = pick.taskId
+                    break prompt
                 }
-                if !db.queueItems().contains(where: filter) {
-                    // Nothing to pick — tell the user and return to the Switch dialog.
+                // Whole-stack switch / Set focus → pick ANY queued item.
+                guard db.queueCount() > 0 else {
                     let alert = makeAlert()
-                    alert.messageText = justSubtask ? "No set-aside subtasks" : "Nothing in the queue"
-                    alert.informativeText = justSubtask
-                        ? "This task has no set-aside subtasks waiting in the queue."
-                        : "There are no other tasks in the queue to switch to."
+                    alert.messageText = "Nothing in the queue"
+                    alert.informativeText = "There are no tasks in the queue to switch to."
                     alert.addButton(withTitle: "OK")
                     alert.window.level = .floating
                     alert.window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
                     _ = runFloatingAlert(alert)
                     continue prompt
                 }
-                // In just-subtask mode every candidate is a sibling of the same parent,
-                // so skip the redundant "Parent ›" prefix (same as Switch to subtask).
-                guard let item = pickFromQueue(filter: filter, showParentChain: !justSubtask) else { continue prompt }
+                guard let item = pickFromQueue() else { continue prompt }
                 // If the picked item is a subtask, offer going straight to it (default —
-                // rebuilds its whole tree) or to its top-level root task instead. Only in
-                // whole-stack mode; subtask mode is explicitly "switch just this subtask".
+                // rebuilds its whole tree) or to its top-level root task instead.
                 // ancestorTasks is [parent, …, root], so .last is the root.
-                if !justSubtask, let root = item.taskId.flatMap({ self.db.ancestorTasks(of: $0).last }) {
+                if let root = item.taskId.flatMap({ self.db.ancestorTasks(of: $0).last }) {
                     let choice = makeAlert()
                     choice.messageText = "Go to the subtask or its parent?"
                     choice.informativeText = "\(queueDisplayName(item))\n\nStart just this subtask, or focus its top-level task “\(root.focus)” instead (the subtask stays in the queue)."
@@ -1384,14 +1394,14 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     /// Non-terminal children of `leaf` (status nil = never finished) that you can switch
     /// to: queued ones first (in queue order), then ones that exist but aren't queued
     /// (e.g. removed from the queue), which the picker grays out.
-    private func resumableSubtasks(of leaf: Int64) -> [SubtaskChoice] {
+    private func resumableSubtasks(of leaf: Int64, excluding: Int64? = nil) -> [SubtaskChoice] {
         var queueRowForTask: [Int64: Int64] = [:]
         var orderForTask: [Int64: Int] = [:]
         for (i, q) in db.queueItems().enumerated() {
             if let t = q.taskId { queueRowForTask[t] = q.id; orderForTask[t] = i }
         }
         let choices = db.childTasks(of: leaf)
-            .filter { $0.status == nil }   // never finished (subtasks are never 'queued'-status)
+            .filter { $0.status == nil && $0.id != excluding }   // never finished; skip the current leaf
             .map { k in
                 SubtaskChoice(taskId: k.id, focus: k.focus,
                               remaining: max(0, db.remainingSeconds(taskId: k.id)),
