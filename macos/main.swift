@@ -1100,9 +1100,33 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         alert.messageText = "That was the one thing you were going to do!"
         alert.informativeText = "See you later — have fun in the actual world. 🌱"
         alert.addButton(withTitle: "OK")
+
+        // 60s countdown → auto-clicks OK (locking the screen) if you don't first.
+        let label = NSTextField(labelWithString: "")
+        label.frame = NSRect(x: 0, y: 0, width: 340, height: 18)
+        label.alignment = .center
+        label.font = NSFont.systemFont(ofSize: 11)
+        label.textColor = .secondaryLabelColor
+        alert.accessoryView = label
+        var remaining = 60
+        label.stringValue = "Locking the screen in \(remaining) seconds."
+        // .common mode so it fires while the panel is up; panelResult = 0 ends the pump
+        // exactly as an "OK" click would.
+        let timer = Timer(timeInterval: 1, repeats: true) { t in
+            remaining -= 1
+            if remaining <= 0 {
+                t.invalidate()
+                self.panelResult = 0
+            } else {
+                label.stringValue = "Locking the screen in \(remaining) second\(remaining == 1 ? "" : "s")."
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+
         alert.window.level = .floating
         alert.window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        alert.runModal()
+        _ = runFloatingAlert(alert)   // OK click or countdown — either way, lock
+        timer.invalidate()
         lockScreen()
     }
 
