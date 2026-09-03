@@ -1058,8 +1058,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             return !historyTargetNodes().isEmpty
         }
         if menuItem.action == #selector(abandonHistoryTask) {
-            // Only meaningful on an in-progress (unfinished) task.
-            return historyTargetNodes().contains { $0.task.map { $0.endedAt == nil } ?? false }
+            // Only meaningful on an in-progress (unfinished) task; never in strict mode
+            // (giving up is a way off a task the queue committed you to).
+            return !strictModeEnabled && historyTargetNodes().contains { $0.task.map { $0.endedAt == nil } ?? false }
         }
         // Resume/queue a task from history — task rows only, and never in strict mode.
         if menuItem.action == #selector(resumeHistoryTask) {
@@ -1916,7 +1917,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     // abandoned (a terminal status — kept in history with time worked so far, no
     // rating) and drop them from the queue, so they stop floating at the top.
     @objc func abandonHistoryTask() {
-        guard !showing else { return }
+        guard !showing, !strictModeEnabled else { return }
         let ids = historyTargetNodes().compactMap { $0.task }.filter { $0.endedAt == nil }.map { $0.id }   // in-progress only
         guard !ids.isEmpty else { return }
 
