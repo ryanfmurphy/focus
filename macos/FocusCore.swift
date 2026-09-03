@@ -503,6 +503,17 @@ final class DB {
         sqlite3_step(s)
     }
 
+    /// Reopen a task: clear its terminal status so it's active/in-progress again. The
+    /// task's finish time (`endedAt`) is derived from status, so clearing status alone
+    /// un-finishes it; rating/note are kept. Used by See History's "Resume task" / "Add
+    /// to queue" to pick a completed (or set-aside) task back up. No-op if already active.
+    func reopenTask(id: Int64) {
+        var s: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "UPDATE tasks SET status=NULL WHERE id=?;", -1, &s, nil) == SQLITE_OK else { return }
+        defer { sqlite3_finalize(s) }
+        sqlite3_bind_int64(s, 1, id); sqlite3_step(s)
+    }
+
     /// Add time to a task's estimate (the countdown target grows). The estimate is
     /// now the source of truth, so no separate log is kept (unlike old add-time,
     /// which existed to reconstruct original_seconds).

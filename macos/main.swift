@@ -1003,6 +1003,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         #selector(stopWorking), #selector(switchToSubtask), #selector(renameTask), #selector(togglePause), #selector(preemptNextFocus),
         #selector(clearQueue), #selector(rateUnrated), #selector(showSettings),
         #selector(deleteHistoryItems), #selector(abandonHistoryTask),
+        #selector(resumeHistoryTask), #selector(addHistoryTaskToQueue),
         #selector(deleteQueuedTaskPermanently),
     ]
 
@@ -1059,6 +1060,13 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         if menuItem.action == #selector(abandonHistoryTask) {
             // Only meaningful on an in-progress (unfinished) task.
             return historyTargetNodes().contains { $0.task.map { $0.endedAt == nil } ?? false }
+        }
+        // Resume/queue a task from history — task rows only, and never in strict mode.
+        if menuItem.action == #selector(resumeHistoryTask) {
+            return !strictModeEnabled && historyTargetNodes().compactMap { $0.task }.count == 1
+        }
+        if menuItem.action == #selector(addHistoryTaskToQueue) {
+            return !strictModeEnabled && historyTargetNodes().contains { $0.task != nil }
         }
         if menuItem.action == #selector(toggleShowPill) {
             menuItem.state = showPillEnabled ? .on : .off
@@ -1628,6 +1636,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             outline.onCopy = { [weak self] indexes in self?.copyHistoryRows(indexes) }
             // Right-click a row (or a selection) to give up / delete it.
             let histMenu = NSMenu()
+            histMenu.addItem(withTitle: "Resume task", action: #selector(resumeHistoryTask), keyEquivalent: "")
+            histMenu.addItem(withTitle: "Add to queue", action: #selector(addHistoryTaskToQueue), keyEquivalent: "")
+            histMenu.addItem(.separator())
             histMenu.addItem(withTitle: "Give up (abandon)", action: #selector(abandonHistoryTask), keyEquivalent: "")
             histMenu.addItem(withTitle: "Delete", action: #selector(deleteHistoryItems), keyEquivalent: "")
             for mi in histMenu.items { mi.target = self }
@@ -1813,6 +1824,51 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         else if clicked >= 0 { rows = IndexSet(integer: clicked) }
         else { rows = selected }
         return rows.compactMap { outline.item(atRow: $0) as? HistoryNode }
+    }
+
+    /// Reopen the task's whole chain (itself + any terminal ancestors) so it — and the
+    /// parents it runs under — are active again, not stuck "completed".
+    private func reopenTaskChain(_ tid: Int64) {
+        db.reopenTask(id: tid)
+        for a in db.ancestorTasks(of: tid) { db.reopenTask(id: a.id) }
+    }
+
+    // "Resume task" from See History: pick the selected task back up and start working on
+    // it now. Reopens it if it was completed, rebuilds its parent stack if it's a subtask,
+    // and suspends whatever's currently running (to the front of the queue) first.
+    @objc func resumeHistoryTask() {
+        guard !showing, !strictModeEnabled else { return }
+        let tasks = historyTargetNodes().compactMap { $0.task }
+        guard tasks.count == 1, let t = tasks.first else { return }
+        let tid = t.id
+        showing = true
+        defer { showing = false }
+        reopenTaskChain(tid)
+        // If it's parked in the queue, take it out — we're resuming it, not duplicating.
+        if let qid = db.queueItems().first(where: { $0.taskId == tid })?.id { db.removeFromQueue(id: qid) }
+        // Don't orphan a running task: suspend the stack to the front so it's resumable.
+        if taskId != nil { suspendStack(toFront: true) }
+        beginSession(reason: "resume", seconds: max(1, db.remainingSeconds(taskId: tid)),
+                     focus: t.focus, resumeTaskId: tid)
+        reloadHistory()
+    }
+
+    // "Add to queue" from See History: park the selected task(s) at the end of the queue
+    // to work on later. Reopens completed ones (they become live pending tasks) and skips
+    // any already queued, to avoid duplicates.
+    @objc func addHistoryTaskToQueue() {
+        guard !showing, !strictModeEnabled else { return }
+        let tasks = historyTargetNodes().compactMap { $0.task }
+        guard !tasks.isEmpty else { return }
+        showing = true
+        defer { showing = false }
+        let queuedTaskIds = Set(db.queueItems().compactMap { $0.taskId })
+        for t in tasks where !queuedTaskIds.contains(t.id) {
+            reopenTaskChain(t.id)
+            _ = db.enqueueTask(focus: t.focus, estimateSeconds: max(1, db.remainingSeconds(taskId: t.id)),
+                               taskId: t.id, front: false)
+        }
+        reloadHistory()
     }
 
     // Delete the right-clicked (or selected) history sessions, after confirming.
