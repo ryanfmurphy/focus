@@ -572,6 +572,23 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         NSApp.activate(ignoringOtherApps: true)
         while true {
             let hasQueue = db.queueCount() > 0
+
+            // Strict mode with a queue: the front task is the only thing you can start —
+            // no free-form new focus, no picking a different queued item.
+            if strictModeEnabled, hasQueue, let next = db.frontOfQueue() {
+                let alert = makeAlert()
+                alert.messageText = "Ready to focus?"
+                alert.informativeText = "Strict mode: next up is \"\(queueDisplayName(next))\" (\(mmss(next.seconds))). It's the only task you can start."
+                alert.addButton(withTitle: "Start next task")   // 0
+                alert.addButton(withTitle: "Close")             // 1
+                alert.window.level = .floating
+                alert.window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+                if runFloatingAlert(alert) == 1 { return }   // close — stay idle
+                db.removeFromQueue(id: next.id)
+                beginSession(reason: "queue", seconds: next.seconds, focus: next.focus, resumeTaskId: next.taskId)
+                return
+            }
+
             let alert = makeAlert()
             alert.messageText = "Ready to focus?"
             alert.informativeText = hasQueue
@@ -796,6 +813,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         if pausedAt != nil {
             resumeStackIfPaused()   // shift every level's deadline, close each pause row
         } else {
+            guard allowPauseEnabled else { return }   // pausing disabled in Settings
             // Pause: freeze the whole stack. tick() stops all countdowns while paused.
             pausedAt = Date()
             db.startPause(sessionId: id, at: pausedAt!)
@@ -954,7 +972,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         }
         if menuItem.action == #selector(togglePause) {
             menuItem.title = pausedAt != nil ? "Resume" : "Pause"
-            return currentFocus != nil
+            // No task → disabled. Pausing disallowed → can't Pause, but can still Resume
+            // an already-paused task (e.g. one restored paused after a quit).
+            return currentFocus != nil && (allowPauseEnabled || pausedAt != nil)
         }
         if menuItem.action == #selector(deleteHistoryItems) {
             return !historyTargetNodes().isEmpty
@@ -969,6 +989,13 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         }
         if menuItem.action == #selector(changeFocus) {
             menuItem.title = currentFocus != nil ? "Switch focus now" : "Set focus"
+            // Strict mode: no switching away from the running task. (Idle "Set focus"
+            // stays enabled — it routes through the strict, front-of-queue chooser.)
+            if strictModeEnabled && currentFocus != nil { return false }
+        }
+        // Strict mode: "Add to front" jumps the queue order → disabled.
+        if menuItem.action == #selector(preemptNextFocus) && strictModeEnabled {
+            return false
         }
         if menuItem.action == #selector(showHistory) {
             menuItem.title = "See history (\(db.taskCount()))"
@@ -1091,10 +1118,14 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         alert.messageText = "Next focus"
         alert.informativeText = "\(queueDisplayName(item))\n\n\(mmss(item.seconds))"
         alert.addButton(withTitle: "Start")             // .alertFirstButtonReturn
-        alert.addButton(withTitle: "Start a different focus") // index 1
-        // Always shown, but disabled when there's no other queued item to pick.
-        let pickButton = alert.addButton(withTitle: "Pick another queued focus…")  // index 2
-        pickButton.isEnabled = db.queueCount() > 1
+        // Strict mode: the front task is the only option — no switching to a new or
+        // different queued focus. Otherwise offer both alternatives.
+        if !strictModeEnabled {
+            alert.addButton(withTitle: "Start a different focus") // index 1
+            // Always shown, but disabled when there's no other queued item to pick.
+            let pickButton = alert.addButton(withTitle: "Pick another queued focus…")  // index 2
+            pickButton.isEnabled = db.queueCount() > 1
+        }
 
         var autoTimer: Timer?
         var elapsedTimer: Timer?
@@ -2135,10 +2166,18 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         get { UserDefaults.standard.bool(forKey: "oneTaskOnly") }                     // default off
         set { UserDefaults.standard.set(newValue, forKey: "oneTaskOnly") }
     }
+    private var strictModeEnabled: Bool {
+        get { UserDefaults.standard.bool(forKey: "strictMode") }                      // default off
+        set { UserDefaults.standard.set(newValue, forKey: "strictMode") }
+    }
+    private var allowPauseEnabled: Bool {
+        get { UserDefaults.standard.object(forKey: "allowPause") as? Bool ?? true }   // default on
+        set { UserDefaults.standard.set(newValue, forKey: "allowPause") }
+    }
 
     /// The global preference checkboxes, initialized from the stored values,
     /// for the Settings dialog.
-    private func preferenceCheckboxes() -> (sound: NSButton, pushover: NSButton, auto: NSButton, total: NSButton, oneTask: NSButton) {
+    private func preferenceCheckboxes() -> (sound: NSButton, pushover: NSButton, auto: NSButton, total: NSButton, oneTask: NSButton, strict: NSButton, allowPause: NSButton) {
         let sound = NSButton(checkboxWithTitle: "Play sound when time's up", target: nil, action: nil)
         sound.state = playSoundEnabled ? .on : .off
         let pushover = NSButton(checkboxWithTitle: "Send Pushover notification at start and end of sessions", target: nil, action: nil)
@@ -2149,15 +2188,21 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         total.state = showTotalOnPillEnabled ? .on : .off
         let oneTask = NSButton(checkboxWithTitle: "One task only, then touch grass (finish, then lock the screen)", target: nil, action: nil)
         oneTask.state = oneTaskOnlyEnabled ? .on : .off
-        return (sound, pushover, auto, total, oneTask)
+        let strict = NSButton(checkboxWithTitle: "Strict mode: Must do tasks in queue order, no switching", target: nil, action: nil)
+        strict.state = strictModeEnabled ? .on : .off
+        let allowPause = NSButton(checkboxWithTitle: "Allow pausing the current task", target: nil, action: nil)
+        allowPause.state = allowPauseEnabled ? .on : .off
+        return (sound, pushover, auto, total, oneTask, strict, allowPause)
     }
 
-    private func persistPreferences(_ sound: NSButton, _ pushover: NSButton, _ auto: NSButton, _ total: NSButton, _ oneTask: NSButton) {
+    private func persistPreferences(_ sound: NSButton, _ pushover: NSButton, _ auto: NSButton, _ total: NSButton, _ oneTask: NSButton, _ strict: NSButton, _ allowPause: NSButton) {
         playSoundEnabled = sound.state == .on
         pushoverEnabled = pushover.state == .on
         autoProceedEnabled = auto.state == .on
         showTotalOnPillEnabled = total.state == .on
         oneTaskOnlyEnabled = oneTask.state == .on
+        strictModeEnabled = strict.state == .on
+        allowPauseEnabled = allowPause.state == .on
     }
 
     // Standalone Settings dialog for the global preferences.
@@ -2167,18 +2212,22 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         defer { showing = false }
         NSApp.activate(ignoringOtherApps: true)
 
-        let (sound, pushover, auto, total, oneTask) = preferenceCheckboxes()
-        total.frame = NSRect(x: 0, y: 104, width: 460, height: 20)
-        sound.frame = NSRect(x: 0, y: 78, width: 460, height: 20)
-        pushover.frame = NSRect(x: 0, y: 52, width: 460, height: 20)
-        auto.frame = NSRect(x: 0, y: 26, width: 460, height: 20)
-        oneTask.frame = NSRect(x: 0, y: 0, width: 460, height: 20)
-        let accessory = NSView(frame: NSRect(x: 0, y: 0, width: 460, height: 124))
+        let (sound, pushover, auto, total, oneTask, strict, allowPause) = preferenceCheckboxes()
+        total.frame = NSRect(x: 0, y: 156, width: 460, height: 20)
+        sound.frame = NSRect(x: 0, y: 130, width: 460, height: 20)
+        pushover.frame = NSRect(x: 0, y: 104, width: 460, height: 20)
+        auto.frame = NSRect(x: 0, y: 78, width: 460, height: 20)
+        oneTask.frame = NSRect(x: 0, y: 52, width: 460, height: 20)
+        strict.frame = NSRect(x: 0, y: 26, width: 460, height: 20)
+        allowPause.frame = NSRect(x: 0, y: 0, width: 460, height: 20)
+        let accessory = NSView(frame: NSRect(x: 0, y: 0, width: 460, height: 182))
         accessory.addSubview(total)
         accessory.addSubview(sound)
         accessory.addSubview(pushover)
         accessory.addSubview(auto)
         accessory.addSubview(oneTask)
+        accessory.addSubview(strict)
+        accessory.addSubview(allowPause)
 
         let alert = makeAlert()
         alert.messageText = "Settings"
@@ -2189,7 +2238,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         alert.window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         alert.runModal()
 
-        persistPreferences(sound, pushover, auto, total, oneTask)
+        persistPreferences(sound, pushover, auto, total, oneTask, strict, allowPause)
         tick()   // apply the pill's remaining/total toggle immediately
     }
 
