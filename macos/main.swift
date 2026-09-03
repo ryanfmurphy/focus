@@ -948,11 +948,17 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     /// (drop to the parent) vs the whole task (go idle). Returns (proceed, subtaskOnly).
     private func promptStopScope(forceSubtaskOnly: Bool = false) -> (proceed: Bool, subtaskOnly: Bool) {
         let nested = !ancestors.isEmpty
+        // Strict mode stops a subtask without re-queuing it (suspendLeaf requeue: false),
+        // so it isn't going to the front of the queue — it stays reachable under its
+        // parent via "Switch to subtask" instead.
+        let subtaskUnqueued = nested && strictModeEnabled
         let alert = makeAlert()
         alert.messageText = "Stop working?"
-        alert.informativeText = nested
-            ? "It goes to the front of the queue so you can resume it later."
-            : "\(currentFocus ?? "This task") goes to the front of the queue so you can resume it later."
+        alert.informativeText = subtaskUnqueued
+            ? "The parent keeps running; come back to this subtask later from \u{201C}Switch to subtask\u{201D}."
+            : (nested
+                ? "It goes to the front of the queue so you can resume it later."
+                : "\(currentFocus ?? "This task") goes to the front of the queue so you can resume it later.")
         // The scope checkbox is only offered when both scopes are available. With pausing
         // off (forceSubtaskOnly), the whole-task option is suppressed — subtask scope only.
         var box: NSButton? = nil
