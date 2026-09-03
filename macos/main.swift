@@ -951,6 +951,13 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         #selector(deleteQueuedTaskPermanently),
     ]
 
+    // Per-row queue mutations (right-click / Delete key) — frozen in strict mode.
+    private static let queueEditActions: Set<Selector> = [
+        #selector(moveQueueItemUp), #selector(moveQueueItemDown),
+        #selector(moveQueueItemToTop), #selector(moveQueueItemToBottom),
+        #selector(deleteClickedQueueItem), #selector(deleteQueuedTaskPermanently),
+    ]
+
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         // While a prompt is open, actions that would spawn another prompt are guarded
         // by `showing` and would silently no-op — disable them so the menu shows that.
@@ -1015,6 +1022,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             let n = db.unratedTaskCount()
             menuItem.title = "Rate unrated sessions (\(n))"
             return n > 0
+        }
+        // Strict mode: the queue is frozen — no reordering or dropping individual items.
+        if strictModeEnabled, let a = menuItem.action, Self.queueEditActions.contains(a) {
+            return false
         }
         // Queue right-click move items: enable based on the clicked row's position.
         if menuItem.action == #selector(moveQueueItemUp) || menuItem.action == #selector(moveQueueItemToTop) {
@@ -1984,7 +1995,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     /// Move the right-clicked queue row to a new index (computed from its current
     /// one), then persist the new order and refresh.
     private func moveClickedQueueRow(_ destination: (Int) -> Int) {
-        guard let table = queueTable else { return }
+        guard !strictModeEnabled, let table = queueTable else { return }
         let src = table.clickedRow
         guard src >= 0, src < queueRows.count else { return }
         let target = min(max(destination(src), 0), queueRows.count - 1)
@@ -2004,7 +2015,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     // has no intervals) is kept as an abandoned record rather than vanishing — durable
     // identity for queue items. A started set-aside task just leaves the queue.
     private func deleteQueueRow(at row: Int) {
-        guard row >= 0, row < queueRows.count else { return }
+        guard !strictModeEnabled, row >= 0, row < queueRows.count else { return }
         let item = queueRows[row]
         db.removeFromQueue(id: item.id)
         if let tid = item.taskId, db.task(id: tid)?.status == "queued" {
@@ -2017,7 +2028,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     // "Delete permanently": remove the row AND delete the task + its history entirely.
     @objc func deleteQueuedTaskPermanently() {
         let row = queueTable?.clickedRow ?? -1
-        guard !showing, row >= 0, row < queueRows.count else { return }
+        guard !showing, !strictModeEnabled, row >= 0, row < queueRows.count else { return }
         showing = true
         defer { showing = false }
         let item = queueRows[row]
