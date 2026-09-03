@@ -907,10 +907,15 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     // the front so it's resumable) and go idle — or, for a subtask, drop to the
     // still-ticking parent. No rating (it isn't done), unlike Abort.
     @objc func stopWorking() {
-        guard !showing, taskId != nil, allowPauseEnabled else { return }
+        guard !showing, taskId != nil else { return }
+        // Pausing off: "Stop working" is allowed on a subtask (drop to the parent) but
+        // not on a top-level task (suspend + go idle is a pause). Force the subtask scope
+        // so the whole-stack option isn't reachable.
+        let nested = !ancestors.isEmpty
+        guard allowPauseEnabled || nested else { return }
         showing = true
         defer { showing = false }
-        let (proceed, subtaskOnly) = promptStopScope()
+        let (proceed, subtaskOnly) = promptStopScope(forceSubtaskOnly: !allowPauseEnabled)
         guard proceed else { return }
         if subtaskOnly { suspendLeaf() } else { suspendStack() }
         tick()   // subtask → shows the parent; whole task → hides the pill (idle)
@@ -918,15 +923,17 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
 
     /// Confirm "Stop working?" — when nested, a checkbox picks "just this subtask"
     /// (drop to the parent) vs the whole task (go idle). Returns (proceed, subtaskOnly).
-    private func promptStopScope() -> (proceed: Bool, subtaskOnly: Bool) {
+    private func promptStopScope(forceSubtaskOnly: Bool = false) -> (proceed: Bool, subtaskOnly: Bool) {
         let nested = !ancestors.isEmpty
         let alert = makeAlert()
         alert.messageText = "Stop working?"
         alert.informativeText = nested
             ? "It goes to the front of the queue so you can resume it later."
             : "\(currentFocus ?? "This task") goes to the front of the queue so you can resume it later."
+        // The scope checkbox is only offered when both scopes are available. With pausing
+        // off (forceSubtaskOnly), the whole-task option is suppressed — subtask scope only.
         var box: NSButton? = nil
-        if nested {
+        if nested && !forceSubtaskOnly {
             let cb = NSButton(checkboxWithTitle: "Just this subtask (keep the parent running)", target: nil, action: nil)
             cb.state = .on
             cb.sizeToFit()
@@ -937,7 +944,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         alert.addButton(withTitle: "Cancel")   // index 1
         alert.window.level = .floating
         alert.window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        return (runFloatingAlert(alert) == 0, box?.state == .on)
+        let proceed = runFloatingAlert(alert) == 0
+        return (proceed, forceSubtaskOnly ? true : (box?.state == .on))
     }
 
     // Menu actions that are guarded by `showing` (they open their own prompt), so
@@ -977,9 +985,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             || menuItem.action == #selector(renameTask) {
             return currentFocus != nil
         }
-        // Stop working is a heavy pause (suspend + go idle) → disabled when pausing is off.
+        // Stop working on a top-level task is a heavy pause (suspend + go idle) → disabled
+        // when pausing is off. On a subtask it just drops to the still-running parent, so
+        // it stays allowed even with pausing off.
         if menuItem.action == #selector(stopWorking) {
-            return currentFocus != nil && allowPauseEnabled
+            guard currentFocus != nil else { return false }
+            return allowPauseEnabled || !ancestors.isEmpty
         }
         if menuItem.action == #selector(togglePause) {
             menuItem.title = pausedAt != nil ? "Resume" : "Pause"
