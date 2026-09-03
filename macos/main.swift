@@ -907,7 +907,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     // the front so it's resumable) and go idle — or, for a subtask, drop to the
     // still-ticking parent. No rating (it isn't done), unlike Abort.
     @objc func stopWorking() {
-        guard !showing, taskId != nil else { return }
+        guard !showing, taskId != nil, allowPauseEnabled else { return }
         showing = true
         defer { showing = false }
         let (proceed, subtaskOnly) = promptStopScope()
@@ -967,8 +967,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         // Complete / Abort / Stop / Rename / Add time / Add subtask act on a running session.
         if menuItem.action == #selector(completeTask) || menuItem.action == #selector(abortTask)
             || menuItem.action == #selector(addTimeToCurrent) || menuItem.action == #selector(addSubtask)
-            || menuItem.action == #selector(stopWorking) || menuItem.action == #selector(renameTask) {
+            || menuItem.action == #selector(renameTask) {
             return currentFocus != nil
+        }
+        // Stop working is a heavy pause (suspend + go idle) → disabled when pausing is off.
+        if menuItem.action == #selector(stopWorking) {
+            return currentFocus != nil && allowPauseEnabled
         }
         if menuItem.action == #selector(togglePause) {
             menuItem.title = pausedAt != nil ? "Resume" : "Pause"
