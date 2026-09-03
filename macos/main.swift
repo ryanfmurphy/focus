@@ -512,9 +512,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
 
         guard let leafIv = open.first, let leafTask = db.task(id: leafIv.taskId),
               isoParser.date(from: leafIv.startedAt) != nil else {
-            // Nothing valid to resume — sweep any strays and prompt normally.
+            // No task was running — sweep any strays and show the startup chooser.
             for iv in open { db.endInterval(id: iv.id, elapsedSeconds: intervalElapsed(iv)) }
-            onReturn("launch")
+            promptStartup()
             return
         }
 
@@ -548,88 +548,62 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
                          estimateSeconds: task.estimateSeconds ?? 0, spentBefore: spent, deadline: dl, focus: task.focus)
         }
         guard let leaf = frame(for: leafTask) else {
-            db.endInterval(id: leafIv.id, elapsedSeconds: intervalElapsed(leafIv)); onReturn("launch"); return
+            db.endInterval(id: leafIv.id, elapsedSeconds: intervalElapsed(leafIv)); promptStartup(); return
         }
         // ancestors want root … parent (chain is leaf-first, so drop leaf and reverse).
         ancestors = chain.dropFirst().reversed().compactMap { frame(for: $0) }
 
-        if let pStart = pausedStart {
-            // Was paused at quit — restore the frozen paused state for the whole stack
-            // (no resume prompt). It stays paused until the user hits Resume, at which
-            // point the entire downtime is folded into the pause (deadline shifts by it).
-            setLeaf(leaf)
-            pausedAt = pStart
-            tick()
-        } else if ancestors.isEmpty {
-            // Single task — keep the familiar Resume / Switch / Start-fresh prompt.
-            // (Don't pre-set the leaf: adopt does that, and Start-fresh needs
-            // currentFocus to stay nil so onReturn prompts.)
-            if leaf.deadline > Date() {
-                offerResume(task: leafTask, interval: leafIv, deadline: leaf.deadline)
-            } else {
-                adopt(task: leafTask, interval: leafIv, deadline: leaf.deadline)
-                tick()
-            }
-        } else {
-            // A subtask stack was live — auto-adopt the whole stack (no resume prompt).
-            setLeaf(leaf)
-            pausedAt = nil
-            tick()
-        }
+        // A task/stack was running when we quit → continue it silently, with NO startup
+        // prompt: keep running if it was running, keep frozen if it was paused. (When
+        // paused, the downtime folds into the pause once the user hits Resume.)
+        setLeaf(leaf)
+        pausedAt = pausedStart   // nil = running; the open pause's start = stay paused
+        tick()
     }
 
-    private func offerResume(task: TaskRow, interval iv: Interval, deadline: Date) {
-        NSApp.activate(ignoringOtherApps: true)
+    /// Launched with no running task: ask whether to start a new focus, pick a queued
+    /// one, or quit. Only used at startup — wake/unlock/after-session use promptForFocus
+    /// (which still speaks in terms of the queue/next focus). Loops back to the chooser
+    /// if the user cancels out of either sub-prompt.
+    private func promptStartup() {
+        guard !showing else { return }
         showing = true
-        let remaining = Int(deadline.timeIntervalSinceNow.rounded())
-        let alert = makeAlert()
-        alert.messageText = "Resume focus?"
-        alert.informativeText = "\(task.focus)\n\n\(mmss(remaining)) remaining (of \(mmss(task.estimateSeconds ?? remaining)))"
-        alert.addButton(withTitle: "Resume")            // .alertFirstButtonReturn
-        alert.addButton(withTitle: "Switch focus…")     // .alertSecondButtonReturn
-        alert.addButton(withTitle: "Start fresh…")      // .alertThirdButtonReturn
-        alert.window.level = .floating
-        alert.window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        let response = alert.runModal()
-        showing = false
-
-        switch response {
-        case .alertFirstButtonReturn:            // Resume — continue where it left off
-            adopt(task: task, interval: iv, deadline: deadline)
-            tick()
-
-        case .alertSecondButtonReturn:           // Switch — adopt it, then run the
-            adopt(task: task, interval: iv, deadline: deadline)   // standard pre-empt flow
-            tick()                                                // (re-queues remaining, starts new)
-            changeFocus()
-
-        default:                                 // Start fresh — abandon it, optionally
-            showing = true                       // clear the queue, then start anew.
+        defer { showing = false }
+        NSApp.activate(ignoringOtherApps: true)
+        while true {
             let hasQueue = db.queueCount() > 0
-            let clear = hasQueue ? confirmClearQueue() : false
-            showing = false
-            if hasQueue && !clear {
-                offerResume(task: task, interval: iv, deadline: deadline)   // declined → back to the choice
+            let alert = makeAlert()
+            alert.messageText = "Ready to focus?"
+            alert.informativeText = hasQueue
+                ? "No task is running. Start a new focus, pick one from the queue, or quit."
+                : "No task is running. Start a new focus, or quit."
+            alert.addButton(withTitle: "Start a task…")                          // 0
+            var pickIndex = -1
+            if hasQueue { alert.addButton(withTitle: "Pick from queue…"); pickIndex = alert.buttons.count - 1 }
+            alert.addButton(withTitle: "Quit")
+            let quitIndex = alert.buttons.count - 1
+            alert.window.level = .floating
+            alert.window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+            let clicked = runFloatingAlert(alert)
+
+            if clicked == quitIndex { NSApp.terminate(nil); return }
+            if hasQueue && clicked == pickIndex {
+                if let item = pickFromQueue() {
+                    db.removeFromQueue(id: item.id)
+                    beginSession(reason: "queue", seconds: item.seconds, focus: item.focus, resumeTaskId: item.taskId)
+                    return
+                }
+                continue   // cancelled the picker → back to the chooser
+            }
+            // Start a task
+            if case let .entered(focus, seconds, openStart) = askFocusAndMinutes(
+                title: "Start a task", info: "What's your one focus right now, and for how long?",
+                confirm: "Start", cancellable: true) {
+                beginSession(reason: "launch", seconds: seconds, focus: focus, openSecondsStart: openStart)
                 return
             }
-            if clear { db.clearQueue() }
-            db.endInterval(id: iv.id, elapsedSeconds: intervalElapsed(iv))
-            db.finishTask(id: task.id, status: "interrupted")
-            onReturn("launch")
+            continue   // cancelled → back to the chooser
         }
-    }
-
-    /// Reload a task and its still-open interval into memory — the same interval
-    /// keeps getting written, and the countdown resumes at the task's remaining.
-    private func adopt(task: TaskRow, interval iv: Interval, deadline: Date) {
-        currentFocus = task.focus
-        self.deadline = deadline
-        taskId = task.id
-        intervalId = iv.id
-        intervalStart = isoParser.date(from: iv.startedAt) ?? Date()
-        estimateSeconds = task.estimateSeconds
-        spentBefore = db.spentSeconds(taskId: task.id)
-        pausedAt = nil                       // resumes running (any open pause was closed)
     }
 
     // "Set focus" is an explicit ad-hoc entry — it bypasses the queue.
