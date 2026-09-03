@@ -413,6 +413,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     // Debounce guards for the return-prompt (wake + unlock + session often fire
     // together). `showing` also stops any modal from stacking on another.
     private var showing = false
+    // True only while the non-app-modal "Ready to focus?" chooser is up. Because that
+    // prompt doesn't seize the app, Settings can be opened over it (the one blocked action
+    // exempted while it's showing).
+    private var nextFocusOpen = false
     private var lastFired = Date.distantPast
     private let cooldown: TimeInterval = 10
     private var panelResult: Int?   // set by a floating (non-app-modal) panel's button
@@ -594,7 +598,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     private func promptNextFocus(startReason: String) {
         guard !showing else { return }
         showing = true
-        defer { showing = false }
+        nextFocusOpen = true
+        defer { showing = false; nextFocusOpen = false }
         NSApp.activate(ignoringOtherApps: true)
         while true {
             if let next = db.frontOfQueue() {
@@ -969,7 +974,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         #selector(addNextFocus), #selector(completeTask), #selector(abortTask),
         #selector(addTimeToCurrent), #selector(changeFocus), #selector(addSubtask),
         #selector(stopWorking), #selector(switchToSubtask), #selector(renameTask), #selector(togglePause), #selector(preemptNextFocus),
-        #selector(clearQueue), #selector(rateUnrated), #selector(showSettings),
+        #selector(clearQueue), #selector(rateUnrated),   // showSettings handled explicitly (see validateMenuItem)
         #selector(deleteHistoryItems), #selector(abandonHistoryTask),
         #selector(resumeHistoryTask), #selector(addHistoryTaskToQueue),
         #selector(deleteQueuedTaskPermanently),
@@ -1063,6 +1068,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
                 return false
             }
             menuItem.title = "Settings"
+            // Blocked while another prompt is up — except the non-app-modal "Ready to
+            // focus?" chooser, over which Settings can be opened.
+            return !showing || nextFocusOpen
         }
         if menuItem.action == #selector(showHistory) {
             menuItem.title = "See history (\(db.taskCount()))"
@@ -2354,9 +2362,14 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
 
     // Standalone Settings dialog for the global preferences.
     @objc func showSettings() {
-        guard !showing, settingsLockRemaining() == nil else { return }   // locked → can't open
+        guard settingsLockRemaining() == nil else { return }   // locked → can't open
+        // Blocked while another prompt is up, except the "Ready to focus?" chooser, over
+        // which Settings may open. Save/restore `showing` so closing Settings doesn't clear
+        // the chooser's own `showing` guard.
+        guard !showing || nextFocusOpen else { return }
+        let wasShowing = showing
         showing = true
-        defer { showing = false }
+        defer { showing = wasShowing }
         NSApp.activate(ignoringOtherApps: true)
 
         let (sound, pushover, auto, total, oneTask, strict, allowPause) = preferenceCheckboxes()
