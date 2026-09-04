@@ -2086,7 +2086,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         guard let node = item as? HistoryNode, let id = tableColumn?.identifier.rawValue else { return nil }
         if let t = node.task {
             let c = taskCellText(t, id)
-            return historyCell(outlineView, id: id, text: c.0, align: c.1)
+            // Completed tasks read in a soft, comforting green (the whole row).
+            let color: NSColor = t.status == "completed" ? Self.completedGreen : .labelColor
+            return historyCell(outlineView, id: id, text: c.0, align: c.1, color: color)
         }
         if let iv = node.interval {
             // An interval is a dim child row rendered in the task columns.
@@ -2217,6 +2219,14 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         default:       text = queueDisplayName(q)
         }
         return historyCell(tableView, id: id, text: text, align: align)
+    }
+
+    // A soft, comforting green for completed rows — muted forest on light, gentle mint on
+    // dark, so it reassures without shouting in either theme.
+    private static let completedGreen = NSColor(name: nil) { appearance in
+        appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            ? NSColor(red: 0.56, green: 0.80, blue: 0.60, alpha: 1)
+            : NSColor(red: 0.19, green: 0.51, blue: 0.30, alpha: 1)
     }
 
     private func historyCell(_ table: NSTableView, id: String, text: String,
