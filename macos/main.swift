@@ -2100,7 +2100,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     // duration/rating; the task-only columns are blank.
     private func intervalInTaskColumns(_ r: IntervalHistoryRow, _ id: String) -> (String, NSTextAlignment) {
         switch id {
-        case "focus":  return (r.reason.map { "Interval: \($0)" } ?? "Interval", .left)
+        case "focus":
+            let label = "Interval: \(Int((Double(r.seconds) / 60).rounded()))m"   // e.g. "Interval: 50m"
+            return (r.reason.map { "\(label) - \($0)" } ?? label, .left)          // "… - preempt"
         case "when":   return (whenLabel(r.startedAt), .left)
         case "ended":  return (r.endedAt.map(whenLabel) ?? "—", .left)
         case "min":    return (mmss(r.seconds), .right)
