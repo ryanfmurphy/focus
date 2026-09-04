@@ -1720,13 +1720,13 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         switch key {
         case "when":    return dir(a.startedAt ?? "", b.startedAt ?? "", ascending)
         case "ended":
-            // Finished tasks sort by finish time; unfinished (nil Ended) float to the
-            // top (sentinel), and the unfinished group is tie-broken by recency so the
-            // most-recently-worked in-progress task leads.
-            if a.endedAt == nil && b.endedAt == nil {
-                return dir(a.lastActivity ?? "", b.lastActivity ?? "", ascending)
-            }
-            return dir(a.endedAt ?? "\u{FFFF}", b.endedAt ?? "\u{FFFF}", ascending)
+            // Primary: finish time — unfinished (nil Ended) float to the top via the
+            // sentinel. Tie-break by start time, so same-ended rows and the all-active
+            // group (which all share the sentinel) order by when they began — showing
+            // newest first, the most-recently-started leads.
+            let ae = a.endedAt ?? "\u{FFFF}", be = b.endedAt ?? "\u{FFFF}"
+            return ae == be ? dir(a.startedAt ?? "", b.startedAt ?? "", ascending)
+                            : dir(ae, be, ascending)
         case "min":     return dir(a.actualSeconds, b.actualSeconds, ascending)
         case "origmin": return dir(a.originalEstimateSeconds ?? -1, b.originalEstimateSeconds ?? -1, ascending)
         case "ivs":     return dir(a.intervalCount, b.intervalCount, ascending)
