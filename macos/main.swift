@@ -2101,7 +2101,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     private func intervalInTaskColumns(_ r: IntervalHistoryRow, _ id: String) -> (String, NSTextAlignment) {
         switch id {
         case "focus":
-            let label = "Interval: \(Int((Double(r.seconds) / 60).rounded()))m"   // e.g. "Interval: 50m"
+            // "50m" for a minute or more, else "37s" (don't round sub-minute down to "0m").
+            let dur = r.seconds < 60 ? "\(r.seconds)s" : "\(Int((Double(r.seconds) / 60).rounded()))m"
+            let label = "Interval: \(dur)"
             return (r.reason.map { "\(label) - \($0)" } ?? label, .left)          // "… - preempt"
         case "when":   return (whenLabel(r.startedAt), .left)
         case "ended":  return (r.endedAt.map(whenLabel) ?? "—", .left)
