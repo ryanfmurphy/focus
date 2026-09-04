@@ -1695,7 +1695,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
 
     private func sortHistoryNodes(_ nodes: inout [HistoryNode], key: String, ascending: Bool, top: Bool) {
         if !top && showIntervalsInTree {
-            nodes.sort { nodeStart($0) < nodeStart($1) }   // interleave subtasks + intervals, oldest first
+            // Interleave subtasks + intervals chronologically, following the sort direction
+            // (descending default → newest at top, matching the Intervals-off column view).
+            nodes.sort { ascending ? nodeStart($0) < nodeStart($1) : nodeStart($0) > nodeStart($1) }
         } else {
             nodes.sort { a, b in
                 if let ta = a.task, let tb = b.task { return taskLess(ta, tb, key: key, ascending: ascending) }
