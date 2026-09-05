@@ -805,6 +805,32 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         if let extra = askMinutes() { extendSession(by: extra); extendAncestorsToCoverLeaf() }
     }
 
+    // "Add time spent": correct the time already logged on the current task without
+    // changing its estimate. Positive adds spent time (remaining shrinks); negative
+    // subtracts. Accepts minutes or M:SS.
+    @objc func addSpentTime() {
+        guard !showing, taskId != nil, intervalId != nil else { return }
+        showing = true
+        defer { showing = false }
+        if let delta = askSpentDelta() { applySpentDelta(delta) }
+    }
+
+    /// Grow (or shrink) the time recorded against the current open interval by `delta`
+    /// seconds. Done by moving the interval's start earlier (durably, in the DB too, so it
+    /// survives a restart); remaining drops to match, since the estimate is unchanged. The
+    /// current interval can only be zeroed out, not driven negative, so a big subtraction
+    /// clamps at "no time on this interval".
+    private func applySpentDelta(_ delta: Int) {
+        guard let iid = intervalId, let start = intervalStart else { return }
+        let newStart = min(Date(), start.addingTimeInterval(Double(-delta)))   // earlier for +, later for −
+        let applied = Int(start.timeIntervalSince(newStart).rounded())         // actual spent-seconds shifted
+        guard applied != 0 else { return }
+        intervalStart = newStart
+        db.setIntervalStartedAt(id: iid, iso: isoParser.string(from: newStart))
+        deadline = (deadline ?? Date()).addingTimeInterval(Double(-applied))   // remaining −applied
+        tick()
+    }
+
     // Rename the running task's focus (a small prompt pre-filled with the current name).
     @objc func renameTask() {
         guard !showing, let id = taskId, let current = currentFocus else { return }
@@ -978,7 +1004,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     // they do nothing while another prompt is already up — disabled in that case.
     private static let showingBlockedActions: Set<Selector> = [
         #selector(addNextFocus), #selector(completeTask), #selector(abortTask),
-        #selector(addTimeToCurrent), #selector(changeFocus), #selector(addSubtask),
+        #selector(addTimeToCurrent), #selector(addSpentTime), #selector(changeFocus), #selector(addSubtask),
         #selector(stopWorking), #selector(switchToSubtask), #selector(renameTask), #selector(togglePause), #selector(preemptNextFocus),
         #selector(clearQueue), #selector(rateUnrated),   // showSettings handled explicitly (see validateMenuItem)
         #selector(deleteHistoryItems), #selector(abandonHistoryTask),
@@ -1006,10 +1032,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             guard let leaf = taskId else { return false }
             return !resumableSubtasks(of: leaf).isEmpty
         }
-        // Complete / Abort / Stop / Rename / Add time / Add subtask act on a running session.
+        // Complete / Abort / Stop / Rename / Add time (remaining or spent) / Add subtask
+        // act on a running session.
         if menuItem.action == #selector(completeTask)
-            || menuItem.action == #selector(addTimeToCurrent) || menuItem.action == #selector(addSubtask)
-            || menuItem.action == #selector(renameTask) {
+            || menuItem.action == #selector(addTimeToCurrent) || menuItem.action == #selector(addSpentTime)
+            || menuItem.action == #selector(addSubtask) || menuItem.action == #selector(renameTask) {
             return currentFocus != nil
         }
         // Strict mode: the only way off the current task is to complete it — no aborting.
@@ -2476,6 +2503,39 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         return m * 60
     }
 
+    /// Ask how much time to add to (or subtract from) the task's spent time — minutes
+    /// (e.g. "15"), M:SS ("1:30"), or negative to subtract ("-5"). Loops until valid or
+    /// Cancel. Returns signed seconds, or nil if cancelled.
+    private func askSpentDelta() -> Int? {
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 200, height: 24))
+        field.placeholderString = "e.g. 15, 1:30, or -5"
+        while true {
+            let alert = makeAlert()
+            alert.messageText = "Add time spent"
+            alert.informativeText = "How much to add to the time already spent on this task?\nMinutes (e.g. 15) or M:SS (e.g. 1:30); negative to subtract."
+            alert.addButton(withTitle: "Add")      // .alertFirstButtonReturn
+            alert.addButton(withTitle: "Cancel")   // .alertSecondButtonReturn
+            alert.accessoryView = field
+            alert.window.level = .floating
+            alert.window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+            alert.window.initialFirstResponder = field
+            if alert.runModal() == .alertSecondButtonReturn { return nil }
+            if let secs = parseSignedDuration(field.stringValue) { return secs }
+        }
+    }
+
+    /// Like `parseDuration` but signed: a leading "-" (or "+") applies to whole minutes or
+    /// M:SS. Returns nil for empty, malformed, or zero.
+    private func parseSignedDuration(_ s: String) -> Int? {
+        var t = s.trimmingCharacters(in: .whitespaces)
+        guard !t.isEmpty else { return nil }
+        var sign = 1
+        if t.hasPrefix("-") { sign = -1; t.removeFirst() }
+        else if t.hasPrefix("+") { t.removeFirst() }
+        guard let magnitude = parseDuration(t.trimmingCharacters(in: .whitespaces)) else { return nil }
+        return sign * magnitude
+    }
+
     /// Fire-and-forget Pushover message. Credentials come from ~/focus/pushover.json
     /// ({"token":"...","user":"..."}), so they stay out of the code/repo.
     private func sendPushover(title: String, message: String) {
@@ -2749,7 +2809,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         // The running task (these grey out when idle, except changeFocus → "Set focus").
         menu.addItem(withTitle: "Complete task", action: #selector(completeTask), keyEquivalent: "")
         menu.addItem(withTitle: "Pause", action: #selector(togglePause), keyEquivalent: "")
-        menu.addItem(withTitle: "Add time", action: #selector(addTimeToCurrent), keyEquivalent: "")
+        menu.addItem(withTitle: "Add time remaining", action: #selector(addTimeToCurrent), keyEquivalent: "")
+        menu.addItem(withTitle: "Add time spent", action: #selector(addSpentTime), keyEquivalent: "")
         menu.addItem(withTitle: "Rename task", action: #selector(renameTask), keyEquivalent: "")
         menu.addItem(withTitle: "Abort task", action: #selector(abortTask), keyEquivalent: "")
         menu.addItem(withTitle: "Stop working", action: #selector(stopWorking), keyEquivalent: "")

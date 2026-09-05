@@ -480,6 +480,17 @@ final class DB {
         if let e = openSecondsEnd { addIntervalOpenSecondsEnd(id: id, seconds: e) }
     }
 
+    /// Set an interval's recorded start time. Used by "Add time spent" to grow/shrink the
+    /// time logged against the current (open) interval durably: moving the start earlier
+    /// adds spent time, later subtracts it, and the change survives a restart (which
+    /// reconstructs the running interval from its stored `started_at`).
+    func setIntervalStartedAt(id: Int64, iso: String) {
+        var s: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "UPDATE intervals SET started_at=? WHERE id=?;", -1, &s, nil) == SQLITE_OK else { return }
+        defer { sqlite3_finalize(s) }
+        sqlite3_bind_text(s, 1, iso, -1, SQLITE_TRANSIENT); sqlite3_bind_int64(s, 2, id); sqlite3_step(s)
+    }
+
     /// "Apply this popup time": credit seconds to an interval's actual elapsed
     /// (the new-model equivalent of addToDuration).
     func addToInterval(id: Int64, seconds: Int) {
