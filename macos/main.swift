@@ -2809,7 +2809,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         // The running task (these grey out when idle, except changeFocus → "Set focus").
         menu.addItem(withTitle: "Complete task", action: #selector(completeTask), keyEquivalent: "")
         menu.addItem(withTitle: "Pause", action: #selector(togglePause), keyEquivalent: "")
-        menu.addItem(withTitle: "Add time remaining", action: #selector(addTimeToCurrent), keyEquivalent: "")
+        menu.addItem(withTitle: "Add time", action: #selector(addTimeToCurrent), keyEquivalent: "")
         menu.addItem(withTitle: "Add time spent", action: #selector(addSpentTime), keyEquivalent: "")
         menu.addItem(withTitle: "Rename task", action: #selector(renameTask), keyEquivalent: "")
         menu.addItem(withTitle: "Abort task", action: #selector(abortTask), keyEquivalent: "")
