@@ -821,6 +821,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         alreadySpent.frame = NSRect(x: 0, y: 38, width: 260, height: 20)
         let field = NSTextField(frame: NSRect(x: 0, y: 4, width: 200, height: 24))
         field.placeholderString = "e.g. 15, 1:30, or -5"
+        field.stringValue = "5"   // default: 5 minutes
         let accessory = NSView(frame: NSRect(x: 0, y: 0, width: 260, height: 86))
         accessory.addSubview(toComplete); accessory.addSubview(alreadySpent); accessory.addSubview(field)
         while true {
