@@ -796,23 +796,48 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         tick()   // apply immediately: re-show or hide the pill
     }
 
-    // Prompt for minutes and add them to the running session — same as choosing
-    // "Add time" at time's up, but available any time from the menu.
+    // "Add time" — one prompt, two modes (radio): add time *to complete* (grows the
+    // estimate → more remaining, the default) or add time *already spent* (logs work you
+    // did → remaining shrinks). Both take minutes or M:SS, negative to subtract.
     @objc func addTimeToCurrent() {
         guard !showing, taskId != nil else { return }
         showing = true
         defer { showing = false }
-        if let extra = askMinutes() { extendSession(by: extra); extendAncestorsToCoverLeaf() }
+        guard let (spent, seconds) = askAddTime() else { return }
+        if spent { applySpentDelta(seconds) }
+        else { extendSession(by: seconds); extendAncestorsToCoverLeaf() }
     }
 
-    // "Add time spent": correct the time already logged on the current task without
-    // changing its estimate. Positive adds spent time (remaining shrinks); negative
-    // subtracts. Accepts minutes or M:SS.
-    @objc func addSpentTime() {
-        guard !showing, taskId != nil, intervalId != nil else { return }
-        showing = true
-        defer { showing = false }
-        if let delta = askSpentDelta() { applySpentDelta(delta) }
+    @objc private func addTimeRadioNoop() {}   // shared action so the two radios group
+
+    /// The merged "Add time" prompt: a mode radio (to complete / already spent) over a
+    /// duration field. Returns (spentMode, signedSeconds), or nil if cancelled. Loops
+    /// until the duration parses.
+    private func askAddTime() -> (spent: Bool, seconds: Int)? {
+        let toComplete = NSButton(radioButtonWithTitle: "Add time to complete", target: self, action: #selector(addTimeRadioNoop))
+        let alreadySpent = NSButton(radioButtonWithTitle: "Add time already spent", target: self, action: #selector(addTimeRadioNoop))
+        toComplete.state = .on   // default
+        toComplete.frame = NSRect(x: 0, y: 62, width: 260, height: 20)
+        alreadySpent.frame = NSRect(x: 0, y: 38, width: 260, height: 20)
+        let field = NSTextField(frame: NSRect(x: 0, y: 4, width: 200, height: 24))
+        field.placeholderString = "e.g. 15, 1:30, or -5"
+        let accessory = NSView(frame: NSRect(x: 0, y: 0, width: 260, height: 86))
+        accessory.addSubview(toComplete); accessory.addSubview(alreadySpent); accessory.addSubview(field)
+        while true {
+            let alert = makeAlert()
+            alert.messageText = "Add time"
+            alert.informativeText = "Minutes (e.g. 15) or M:SS (e.g. 1:30); negative to subtract."
+            alert.addButton(withTitle: "Add")      // .alertFirstButtonReturn
+            alert.addButton(withTitle: "Cancel")   // .alertSecondButtonReturn
+            alert.accessoryView = accessory
+            alert.window.level = .floating
+            alert.window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+            alert.window.initialFirstResponder = field
+            if alert.runModal() == .alertSecondButtonReturn { return nil }
+            if let secs = parseSignedDuration(field.stringValue) {
+                return (alreadySpent.state == .on, secs)
+            }
+        }
     }
 
     /// Grow (or shrink) the time recorded against the current open interval by `delta`
@@ -1004,7 +1029,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     // they do nothing while another prompt is already up — disabled in that case.
     private static let showingBlockedActions: Set<Selector> = [
         #selector(addNextFocus), #selector(completeTask), #selector(abortTask),
-        #selector(addTimeToCurrent), #selector(addSpentTime), #selector(changeFocus), #selector(addSubtask),
+        #selector(addTimeToCurrent), #selector(changeFocus), #selector(addSubtask),
         #selector(stopWorking), #selector(switchToSubtask), #selector(renameTask), #selector(togglePause), #selector(preemptNextFocus),
         #selector(clearQueue), #selector(rateUnrated),   // showSettings handled explicitly (see validateMenuItem)
         #selector(deleteHistoryItems), #selector(abandonHistoryTask),
@@ -1032,11 +1057,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             guard let leaf = taskId else { return false }
             return !resumableSubtasks(of: leaf).isEmpty
         }
-        // Complete / Abort / Stop / Rename / Add time (remaining or spent) / Add subtask
-        // act on a running session.
+        // Complete / Abort / Stop / Rename / Add time / Add subtask act on a running session.
         if menuItem.action == #selector(completeTask)
-            || menuItem.action == #selector(addTimeToCurrent) || menuItem.action == #selector(addSpentTime)
-            || menuItem.action == #selector(addSubtask) || menuItem.action == #selector(renameTask) {
+            || menuItem.action == #selector(addTimeToCurrent) || menuItem.action == #selector(addSubtask)
+            || menuItem.action == #selector(renameTask) {
             return currentFocus != nil
         }
         // Strict mode: the only way off the current task is to complete it — no aborting.
@@ -2503,27 +2527,6 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         return m * 60
     }
 
-    /// Ask how much time to add to (or subtract from) the task's spent time — minutes
-    /// (e.g. "15"), M:SS ("1:30"), or negative to subtract ("-5"). Loops until valid or
-    /// Cancel. Returns signed seconds, or nil if cancelled.
-    private func askSpentDelta() -> Int? {
-        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 200, height: 24))
-        field.placeholderString = "e.g. 15, 1:30, or -5"
-        while true {
-            let alert = makeAlert()
-            alert.messageText = "Add time spent"
-            alert.informativeText = "How much to add to the time already spent on this task?\n\nMinutes (e.g. 15) or M:SS (e.g. 1:30); negative to subtract."
-            alert.addButton(withTitle: "Add")      // .alertFirstButtonReturn
-            alert.addButton(withTitle: "Cancel")   // .alertSecondButtonReturn
-            alert.accessoryView = field
-            alert.window.level = .floating
-            alert.window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-            alert.window.initialFirstResponder = field
-            if alert.runModal() == .alertSecondButtonReturn { return nil }
-            if let secs = parseSignedDuration(field.stringValue) { return secs }
-        }
-    }
-
     /// Like `parseDuration` but signed: a leading "-" (or "+") applies to whole minutes or
     /// M:SS. Returns nil for empty, malformed, or zero.
     private func parseSignedDuration(_ s: String) -> Int? {
@@ -2810,7 +2813,6 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         menu.addItem(withTitle: "Complete task", action: #selector(completeTask), keyEquivalent: "")
         menu.addItem(withTitle: "Pause", action: #selector(togglePause), keyEquivalent: "")
         menu.addItem(withTitle: "Add time", action: #selector(addTimeToCurrent), keyEquivalent: "")
-        menu.addItem(withTitle: "Add time spent", action: #selector(addSpentTime), keyEquivalent: "")
         menu.addItem(withTitle: "Rename task", action: #selector(renameTask), keyEquivalent: "")
         menu.addItem(withTitle: "Abort task", action: #selector(abortTask), keyEquivalent: "")
         menu.addItem(withTitle: "Stop working", action: #selector(stopWorking), keyEquivalent: "")
