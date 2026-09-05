@@ -2340,8 +2340,15 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         func line(focus: String, deadline: Date, estimate: Int, isLeaf: Bool) -> NSAttributedString {
             let rem = Int(deadline.timeIntervalSince(ref).rounded())
             let over = rem < 0
-            let timeStr = over ? "+\(mmss(-rem))"
-                               : (showTotalOnPillEnabled ? "\(mmss(rem)) / \(mmss(estimate))" : mmss(rem))
+            let timeStr: String
+            if pillShowsSpentEnabled {
+                // Time spent = estimate − remaining (grows past the estimate when over).
+                let spent = estimate - rem
+                timeStr = showTotalOnPillEnabled ? "\(mmss(spent)) / \(mmss(estimate))" : mmss(spent)
+            } else {
+                timeStr = over ? "+\(mmss(-rem))"
+                                : (showTotalOnPillEnabled ? "\(mmss(rem)) / \(mmss(estimate))" : mmss(rem))
+            }
             let icon = isLeaf ? (pausedAt != nil ? "⏸ " : "🎯 ") : "↳ "
             let suffix = (isLeaf && pausedAt != nil) ? " (paused)" : ""
             let font = isLeaf ? NSFont.systemFont(ofSize: 14, weight: .semibold)
@@ -2380,6 +2387,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         get { UserDefaults.standard.object(forKey: "showTotalOnPill") as? Bool ?? true }  // default on
         set { UserDefaults.standard.set(newValue, forKey: "showTotalOnPill") }
     }
+    private var pillShowsSpentEnabled: Bool {
+        get { UserDefaults.standard.bool(forKey: "pillShowsSpent") }                   // default off (show remaining)
+        set { UserDefaults.standard.set(newValue, forKey: "pillShowsSpent") }
+    }
     private var oneTaskOnlyEnabled: Bool {
         get { UserDefaults.standard.bool(forKey: "oneTaskOnly") }                     // default off
         set { UserDefaults.standard.set(newValue, forKey: "oneTaskOnly") }
@@ -2410,7 +2421,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
 
     /// The global preference checkboxes, initialized from the stored values,
     /// for the Settings dialog.
-    private func preferenceCheckboxes() -> (sound: NSButton, pushover: NSButton, auto: NSButton, total: NSButton, oneTask: NSButton, strict: NSButton, allowPause: NSButton) {
+    private func preferenceCheckboxes() -> (sound: NSButton, pushover: NSButton, auto: NSButton, total: NSButton, spent: NSButton, oneTask: NSButton, strict: NSButton, allowPause: NSButton) {
         let sound = NSButton(checkboxWithTitle: "Play sound when time's up", target: nil, action: nil)
         sound.state = playSoundEnabled ? .on : .off
         let pushover = NSButton(checkboxWithTitle: "Send Pushover notification at start and end of sessions", target: nil, action: nil)
@@ -2419,20 +2430,23 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         auto.state = autoProceedEnabled ? .on : .off
         let total = NSButton(checkboxWithTitle: "Show total session time after remaining time", target: nil, action: nil)
         total.state = showTotalOnPillEnabled ? .on : .off
+        let spent = NSButton(checkboxWithTitle: "Show time spent on the pill instead of time remaining", target: nil, action: nil)
+        spent.state = pillShowsSpentEnabled ? .on : .off
         let oneTask = NSButton(checkboxWithTitle: "One task only, then touch grass (finish, then lock the screen)", target: nil, action: nil)
         oneTask.state = oneTaskOnlyEnabled ? .on : .off
         let strict = NSButton(checkboxWithTitle: "Strict mode: Must do tasks in queue order, no switching", target: nil, action: nil)
         strict.state = strictModeEnabled ? .on : .off
         let allowPause = NSButton(checkboxWithTitle: "Allow pausing the current task", target: nil, action: nil)
         allowPause.state = allowPauseEnabled ? .on : .off
-        return (sound, pushover, auto, total, oneTask, strict, allowPause)
+        return (sound, pushover, auto, total, spent, oneTask, strict, allowPause)
     }
 
-    private func persistPreferences(_ sound: NSButton, _ pushover: NSButton, _ auto: NSButton, _ total: NSButton, _ oneTask: NSButton, _ strict: NSButton, _ allowPause: NSButton) {
+    private func persistPreferences(_ sound: NSButton, _ pushover: NSButton, _ auto: NSButton, _ total: NSButton, _ spent: NSButton, _ oneTask: NSButton, _ strict: NSButton, _ allowPause: NSButton) {
         playSoundEnabled = sound.state == .on
         pushoverEnabled = pushover.state == .on
         autoProceedEnabled = auto.state == .on
         showTotalOnPillEnabled = total.state == .on
+        pillShowsSpentEnabled = spent.state == .on
         oneTaskOnlyEnabled = oneTask.state == .on
         strictModeEnabled = strict.state == .on
         allowPauseEnabled = allowPause.state == .on
@@ -2450,16 +2464,18 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         defer { showing = wasShowing }
         NSApp.activate(ignoringOtherApps: true)
 
-        let (sound, pushover, auto, total, oneTask, strict, allowPause) = preferenceCheckboxes()
-        total.frame = NSRect(x: 0, y: 156, width: 460, height: 20)
+        let (sound, pushover, auto, total, spent, oneTask, strict, allowPause) = preferenceCheckboxes()
+        total.frame = NSRect(x: 0, y: 182, width: 460, height: 20)
+        spent.frame = NSRect(x: 0, y: 156, width: 460, height: 20)
         sound.frame = NSRect(x: 0, y: 130, width: 460, height: 20)
         pushover.frame = NSRect(x: 0, y: 104, width: 460, height: 20)
         auto.frame = NSRect(x: 0, y: 78, width: 460, height: 20)
         oneTask.frame = NSRect(x: 0, y: 52, width: 460, height: 20)
         strict.frame = NSRect(x: 0, y: 26, width: 460, height: 20)
         allowPause.frame = NSRect(x: 0, y: 0, width: 460, height: 20)
-        let accessory = NSView(frame: NSRect(x: 0, y: 0, width: 460, height: 182))
+        let accessory = NSView(frame: NSRect(x: 0, y: 0, width: 460, height: 208))
         accessory.addSubview(total)
+        accessory.addSubview(spent)
         accessory.addSubview(sound)
         accessory.addSubview(pushover)
         accessory.addSubview(auto)
@@ -2478,7 +2494,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         let clicked = alert.runModal()
 
         // Persist whatever's set now — a lock keeps the settings you just chose.
-        persistPreferences(sound, pushover, auto, total, oneTask, strict, allowPause)
+        persistPreferences(sound, pushover, auto, total, spent, oneTask, strict, allowPause)
         if clicked == .alertSecondButtonReturn, let secs = askLockDuration() {
             settingsLockedUntil = Date().addingTimeInterval(Double(secs))
         }
