@@ -2740,6 +2740,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     private func ratingAccessory() -> (view: NSView, rating: NSTextField, note: NSTextField, elapsed: NSTextField, apply: NSButton) {
         let ratingField = NSTextField(frame: NSRect(x: 0, y: 34, width: 80, height: 24))
         ratingField.placeholderString = "1–10"
+        ratingField.stringValue = "7"   // default rating
         let noteField = NSTextField(frame: NSRect(x: 0, y: 2, width: 340, height: 24))
         noteField.placeholderString = "Note (optional)"
         // When checked, the popup-open time is added to the session's duration
