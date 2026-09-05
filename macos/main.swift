@@ -2336,8 +2336,14 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             }
         }
 
-        hudLabel.attributedStringValue = pillAttributedString()
-        layoutHUD()
+        // While the pill is being dragged (primary button held), don't re-render its text.
+        // layoutHUD() no-ops mid-drag, so its forced full redraw is skipped — updating the
+        // text anyway invalidates the field without repainting it cleanly, which can leave
+        // the tail (the total) unpainted until the drag ends. It refreshes on release.
+        if (NSEvent.pressedMouseButtons & 1) == 0 {
+            hudLabel.attributedStringValue = pillAttributedString()
+            layoutHUD()
+        }
         if showPillEnabled { hudWindow.orderFrontRegardless() } else { hudWindow.orderOut(nil) }
     }
 
