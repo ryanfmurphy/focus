@@ -2439,7 +2439,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         auto.state = autoProceedEnabled ? .on : .off
         let total = NSButton(checkboxWithTitle: "Show total session time after remaining time", target: nil, action: nil)
         total.state = showTotalOnPillEnabled ? .on : .off
-        let spent = NSButton(checkboxWithTitle: "Show time spent on the pill instead of time remaining", target: nil, action: nil)
+        let spent = NSButton(checkboxWithTitle: "Show time spent instead of time remaining", target: nil, action: nil)
         spent.state = pillShowsSpentEnabled ? .on : .off
         let oneTask = NSButton(checkboxWithTitle: "One task only, then touch grass (finish, then lock the screen)", target: nil, action: nil)
         oneTask.state = oneTaskOnlyEnabled ? .on : .off
