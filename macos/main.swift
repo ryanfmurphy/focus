@@ -2696,15 +2696,15 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         }
     }
 
-    /// "Add time" minutes prompt (cancellable). The field takes whole minutes
-    /// (negative to subtract) and returns seconds (×60), or nil if cancelled.
+    /// "Add time" prompt (cancellable) — the time's-up variant. Takes minutes or M:SS
+    /// (negative to subtract) and returns signed seconds, or nil if cancelled.
     private func askMinutes() -> Int? {
-        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 80, height: 24))
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 100, height: 24))
         field.stringValue = "5"
         while true {
             let alert = makeAlert()
             alert.messageText = "Add time"
-            alert.informativeText = "How many minutes? (negative to subtract)"
+            alert.informativeText = "Minutes (e.g. 15) or M:SS (e.g. 1:30); negative to subtract."
             alert.addButton(withTitle: "Add")       // .alertFirstButtonReturn
             alert.addButton(withTitle: "Cancel")    // .alertSecondButtonReturn
             alert.accessoryView = field
@@ -2713,8 +2713,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             alert.window.initialFirstResponder = field
             let response = alert.runModal()
             if response == .alertSecondButtonReturn { return nil }
-            // Any non-zero whole number: positive adds time, negative subtracts.
-            if let m = Int(field.stringValue.trimmingCharacters(in: .whitespaces)), m != 0 { return m * 60 }
+            if let secs = parseSignedDuration(field.stringValue) { return secs }
         }
     }
 
