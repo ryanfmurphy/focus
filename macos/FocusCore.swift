@@ -491,6 +491,16 @@ final class DB {
         sqlite3_bind_text(s, 1, iso, -1, SQLITE_TRANSIENT); sqlite3_bind_int64(s, 2, id); sqlite3_step(s)
     }
 
+    /// Move a task's creation time. Used by "Add time spent" to keep `created_at` no later
+    /// than the interval it now starts — and to walk that back up the parent chain, so a
+    /// subtask never predates the task it runs under.
+    func setTaskCreatedAt(id: Int64, iso: String) {
+        var s: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "UPDATE tasks SET created_at=? WHERE id=?;", -1, &s, nil) == SQLITE_OK else { return }
+        defer { sqlite3_finalize(s) }
+        sqlite3_bind_text(s, 1, iso, -1, SQLITE_TRANSIENT); sqlite3_bind_int64(s, 2, id); sqlite3_step(s)
+    }
+
     /// "Apply this popup time": credit seconds to an interval's actual elapsed
     /// (the new-model equivalent of addToDuration).
     func addToInterval(id: Int64, seconds: Int) {

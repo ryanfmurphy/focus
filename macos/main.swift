@@ -847,12 +847,21 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     /// current interval can only be zeroed out, not driven negative, so a big subtraction
     /// clamps at "no time on this interval".
     private func applySpentDelta(_ delta: Int) {
-        guard let iid = intervalId, let start = intervalStart else { return }
+        guard let iid = intervalId, let tid = taskId, let start = intervalStart else { return }
         let newStart = min(Date(), start.addingTimeInterval(Double(-delta)))   // earlier for +, later for −
         let applied = Int(start.timeIntervalSince(newStart).rounded())         // actual spent-seconds shifted
         guard applied != 0 else { return }
         intervalStart = newStart
-        db.setIntervalStartedAt(id: iid, iso: isoParser.string(from: newStart))
+        let iso = isoParser.string(from: newStart)
+        db.setIntervalStartedAt(id: iid, iso: iso)
+        // Keep creation times consistent: a task — and every ancestor it runs under — can't
+        // have been created after work on it now starts. Pull each one back to `newStart`
+        // where it currently sits later, so a subtask never predates its parent.
+        for t in [db.task(id: tid)].compactMap({ $0 }) + db.ancestorTasks(of: tid) {
+            if let created = t.createdAt.flatMap(isoParser.date(from:)), newStart < created {
+                db.setTaskCreatedAt(id: t.id, iso: iso)
+            }
+        }
         deadline = (deadline ?? Date()).addingTimeInterval(Double(-applied))   // remaining −applied
         tick()
     }
