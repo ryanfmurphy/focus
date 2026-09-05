@@ -1044,14 +1044,13 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         #selector(clearQueue), #selector(rateUnrated),   // showSettings handled explicitly (see validateMenuItem)
         #selector(deleteHistoryItems), #selector(abandonHistoryTask),
         #selector(resumeHistoryTask), #selector(addHistoryTaskToQueue),
-        #selector(deleteQueuedTaskPermanently),
     ]
 
     // Per-row queue mutations (right-click / Delete key) — frozen in strict mode.
     private static let queueEditActions: Set<Selector> = [
         #selector(moveQueueItemUp), #selector(moveQueueItemDown),
         #selector(moveQueueItemToTop), #selector(moveQueueItemToBottom),
-        #selector(deleteClickedQueueItem), #selector(deleteQueuedTaskPermanently),
+        #selector(deleteClickedQueueItem),
     ]
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
@@ -2051,7 +2050,6 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             rowMenu.addItem(withTitle: "Move to bottom", action: #selector(moveQueueItemToBottom), keyEquivalent: "")
             rowMenu.addItem(.separator())
             rowMenu.addItem(withTitle: "Remove from queue", action: #selector(deleteClickedQueueItem), keyEquivalent: "")
-            rowMenu.addItem(withTitle: "Delete permanently", action: #selector(deleteQueuedTaskPermanently), keyEquivalent: "")
             for mi in rowMenu.items { mi.target = self }
             table.menu = rowMenu
 
@@ -2224,27 +2222,6 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         if let tid = item.taskId, db.task(id: tid)?.status == "queued" {
             db.finishTask(id: tid, status: "abandoned")
         }
-        reloadQueueData()
-        queueTable?.reloadData()
-    }
-
-    // "Delete permanently": remove the row AND delete the task + its history entirely.
-    @objc func deleteQueuedTaskPermanently() {
-        let row = queueTable?.clickedRow ?? -1
-        guard !showing, !strictModeEnabled, row >= 0, row < queueRows.count else { return }
-        showing = true
-        defer { showing = false }
-        let item = queueRows[row]
-        let alert = makeAlert()
-        alert.messageText = "Delete permanently?"
-        alert.informativeText = "\(queueDisplayName(item)) — removes it from the queue and deletes the task and its history. Can't be undone."
-        alert.addButton(withTitle: "Delete")   // 0
-        alert.addButton(withTitle: "Cancel")   // 1
-        alert.window.level = .floating
-        alert.window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        guard runFloatingAlert(alert) == 0 else { return }
-        db.removeFromQueue(id: item.id)
-        if let tid = item.taskId { db.deleteTasks(ids: [tid]) }
         reloadQueueData()
         queueTable?.reloadData()
     }
