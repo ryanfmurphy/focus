@@ -2512,7 +2512,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         while true {
             let alert = makeAlert()
             alert.messageText = "Add time spent"
-            alert.informativeText = "How much to add to the time already spent on this task?\nMinutes (e.g. 15) or M:SS (e.g. 1:30); negative to subtract."
+            alert.informativeText = "How much to add to the time already spent on this task?\n\nMinutes (e.g. 15) or M:SS (e.g. 1:30); negative to subtract."
             alert.addButton(withTitle: "Add")      // .alertFirstButtonReturn
             alert.addButton(withTitle: "Cancel")   // .alertSecondButtonReturn
             alert.accessoryView = field
