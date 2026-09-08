@@ -119,15 +119,17 @@ final class QueueTableView: NSTableView {
 
 // The pill's content view. It replaces isMovableByWindowBackground with manual handling so
 // a *click* and a *drag* don't fight: a press that moves past a small threshold drives the
-// window drag; a press that doesn't fires `onClick` on mouse-up (used to resume a paused
-// task). hitTest returns self so clicks over the label are captured too.
+// window drag; a press that doesn't, and lands on the ⏸ icon, fires `onResumeClick`. You can
+// drag from anywhere on the pill, but only the pause glyph resumes. `resumeHitRect` (in view
+// coords) is set by layout while paused, nil otherwise.
 final class PillView: NSVisualEffectView {
-    var onClick: (() -> Void)?
+    var onResumeClick: (() -> Void)?
+    var resumeHitRect: NSRect?
     private var downAt: NSPoint = .zero
     private var dragging = false
 
     override func hitTest(_ point: NSPoint) -> NSView? {
-        super.hitTest(point) == nil ? nil : self   // claim the whole pill, label included
+        super.hitTest(point) == nil ? nil : self   // claim the whole pill (drag anywhere), label included
     }
     override func mouseDown(with event: NSEvent) {
         downAt = event.locationInWindow
@@ -142,7 +144,8 @@ final class PillView: NSVisualEffectView {
         }
     }
     override func mouseUp(with event: NSEvent) {
-        if !dragging { onClick?() }           // a click, not a drag
+        guard !dragging, let rect = resumeHitRect else { return }   // a click, and paused
+        if rect.contains(convert(downAt, from: nil)) { onResumeClick?() }   // …on the ⏸ icon
     }
 }
 
@@ -462,6 +465,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     // ---- ui ----
     private var statusItem: NSStatusItem!
     private var hudWindow: NSWindow!
+    private var hudPill: PillView!
     private var hudLabel: NSTextField!
     private var hudAnchorTopRight: NSPoint? // set once the user drags the pill; layout keeps this corner fixed
     private var hudProgrammaticMove = false // guards windowDidMove during our own setFrame
@@ -2966,11 +2970,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         hudWindow.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
 
         let blur = PillView(frame: hudWindow.contentView!.bounds)
-        blur.onClick = { [weak self] in
-            // Click the pill to resume — only when paused (a click never pauses a running task).
+        blur.onResumeClick = { [weak self] in
+            // Click the ⏸ icon to resume — only when paused (a click never pauses a running task).
             guard let self, self.pausedAt != nil else { return }
             self.togglePause()
         }
+        hudPill = blur
         blur.material = .hudWindow
         blur.state = .active
         blur.blendingMode = .behindWindow
@@ -3003,6 +3008,17 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         let w = hudLabel.frame.width + padX * 2
         let h = hudLabel.frame.height + padY * 2
         hudLabel.setFrameOrigin(NSPoint(x: padX, y: padY))
+
+        // The ⏸ icon sits at the left of the leaf line (the bottom line of the label). While
+        // paused, make just that glyph the resume target — a generous box around it — so a
+        // click there resumes, but clicks elsewhere on the pill only drag.
+        if pausedAt != nil {
+            let iconFont = NSFont.systemFont(ofSize: 14, weight: .semibold)
+            let g = ("⏸" as NSString).size(withAttributes: [.font: iconFont])
+            hudPill.resumeHitRect = NSRect(x: padX - 4, y: padY - 3, width: g.width + 12, height: g.height + 6)
+        } else {
+            hudPill.resumeHitRect = nil
+        }
 
         // Anchor the top-right corner (right edge + top edge), so the pill grows
         // left/down as the focus text changes and stays neatly justified — whether
