@@ -1050,6 +1050,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         #selector(clearQueue), #selector(rateUnrated),   // showSettings handled explicitly (see validateMenuItem)
         #selector(deleteHistoryItems), #selector(abandonHistoryTask),
         #selector(resumeHistoryTask), #selector(addHistoryTaskToQueue),
+        #selector(workOnQueueItemNow),
     ]
 
     // Per-row queue mutations (right-click / Delete key) — frozen in strict mode.
@@ -1175,6 +1176,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         if menuItem.action == #selector(deleteClickedQueueItem) {
             let r = queueTable?.clickedRow ?? -1
             return r >= 0 && r < queueRows.count
+        }
+        // "Work on now": a valid clicked row, and not in strict mode (out-of-turn start).
+        if menuItem.action == #selector(workOnQueueItemNow) {
+            let r = queueTable?.clickedRow ?? -1
+            return !strictModeEnabled && r >= 0 && r < queueRows.count
         }
         return true
     }
@@ -1880,6 +1886,19 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         for a in db.ancestorTasks(of: tid) { db.reopenTask(id: a.id) }
     }
 
+    /// Start working on `tid` right now: reopen its chain (so a completed task and its
+    /// ancestors go active again), pull it from the queue if parked there, suspend any
+    /// running stack to the front so it isn't orphaned, then begin the session — rebuilding
+    /// the ancestor stack for a subtask. Shared by See History "Resume task" and See Queue
+    /// "Work on now". Callers hold `showing` and refresh their own window afterward.
+    private func startWorkingOn(taskId tid: Int64, focus: String) {
+        reopenTaskChain(tid)
+        if let qid = db.queueItems().first(where: { $0.taskId == tid })?.id { db.removeFromQueue(id: qid) }
+        if taskId != nil { suspendStack(toFront: true) }
+        beginSession(reason: "resume", seconds: max(1, db.remainingSeconds(taskId: tid)),
+                     focus: focus, resumeTaskId: tid)
+    }
+
     // "Resume task" from See History: pick the selected task back up and start working on
     // it now. Reopens it if it was completed, rebuilds its parent stack if it's a subtask,
     // and suspends whatever's currently running (to the front of the queue) first.
@@ -1887,17 +1906,24 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         guard !showing, !strictModeEnabled else { return }
         let tasks = historyTargetNodes().compactMap { $0.task }
         guard tasks.count == 1, let t = tasks.first else { return }
-        let tid = t.id
         showing = true
         defer { showing = false }
-        reopenTaskChain(tid)
-        // If it's parked in the queue, take it out — we're resuming it, not duplicating.
-        if let qid = db.queueItems().first(where: { $0.taskId == tid })?.id { db.removeFromQueue(id: qid) }
-        // Don't orphan a running task: suspend the stack to the front so it's resumable.
-        if taskId != nil { suspendStack(toFront: true) }
-        beginSession(reason: "resume", seconds: max(1, db.remainingSeconds(taskId: tid)),
-                     focus: t.focus, resumeTaskId: tid)
+        startWorkingOn(taskId: t.id, focus: t.focus)
         reloadHistory()
+    }
+
+    // "Work on now" from See Queue (context menu or double-click): start the clicked queued
+    // item immediately, out of turn. Disabled in strict mode (that would jump the order).
+    @objc func workOnQueueItemNow() {
+        let row = queueTable?.clickedRow ?? -1
+        guard !showing, !strictModeEnabled, row >= 0, row < queueRows.count else { return }
+        let item = queueRows[row]
+        guard let tid = item.taskId else { return }
+        showing = true
+        defer { showing = false }
+        startWorkingOn(taskId: tid, focus: item.focus)
+        reloadQueueData()
+        queueTable?.reloadData()
     }
 
     // "Add to queue" from See History: park the selected task(s) at the end of the queue
@@ -2060,8 +2086,13 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             table.onDelete = { [weak self] row in self?.deleteQueueRow(at: row) }
             table.onCopy = { [weak self] indexes in self?.copyQueueRows(indexes) }
             table.onMove = { [weak self] delta in self?.moveSelectedQueueRow(by: delta) }
-            // Right-click a row to re-order it within the queue, or remove it.
+            // Double-click a row → work on it now (same as the context-menu item).
+            table.target = self
+            table.doubleAction = #selector(workOnQueueItemNow)
+            // Right-click a row to work on it now, re-order it within the queue, or remove it.
             let rowMenu = NSMenu()
+            rowMenu.addItem(withTitle: "Work on now", action: #selector(workOnQueueItemNow), keyEquivalent: "")
+            rowMenu.addItem(.separator())
             rowMenu.addItem(withTitle: "Move up", action: #selector(moveQueueItemUp), keyEquivalent: "")
             rowMenu.addItem(withTitle: "Move down", action: #selector(moveQueueItemDown), keyEquivalent: "")
             rowMenu.addItem(.separator())
