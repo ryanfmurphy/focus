@@ -1941,13 +1941,29 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
 
     // "Work on now" from See Queue (context menu or double-click): start the clicked queued
     // item immediately, out of turn. Disabled in strict mode (that would jump the order).
-    @objc func workOnQueueItemNow() {
+    // Context-menu "Work on now" — a deliberate choice, so no confirm.
+    @objc func workOnQueueItemNow() { workOnClickedQueueRow(confirm: false) }
+
+    // Double-click a queue row — easy to trigger by accident, so confirm first.
+    @objc func workOnQueueItemDoubleClicked() { workOnClickedQueueRow(confirm: true) }
+
+    private func workOnClickedQueueRow(confirm: Bool) {
         let row = queueTable?.clickedRow ?? -1
         guard !showing, !strictModeEnabled, row >= 0, row < queueRows.count else { return }
         let item = queueRows[row]
         guard let tid = item.taskId else { return }
         showing = true
         defer { showing = false }
+        if confirm {
+            let alert = makeAlert()
+            alert.messageText = "Work on now?"
+            alert.informativeText = "Start \u{201C}\(queueDisplayName(item))\u{201D} now."
+            alert.addButton(withTitle: "OK")       // 0
+            alert.addButton(withTitle: "Cancel")   // 1
+            alert.window.level = .floating
+            alert.window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+            guard runFloatingAlert(alert) == 0 else { return }
+        }
         startWorkingOn(taskId: tid, focus: item.focus)
         queueWindow?.close()   // we're now working on it — close the queue
     }
@@ -2114,7 +2130,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             table.onMove = { [weak self] delta in self?.moveSelectedQueueRow(by: delta) }
             // Double-click a row → work on it now (same as the context-menu item).
             table.target = self
-            table.doubleAction = #selector(workOnQueueItemNow)
+            table.doubleAction = #selector(workOnQueueItemDoubleClicked)
             // Right-click a row to work on it now, re-order it within the queue, or remove it.
             let rowMenu = NSMenu()
             rowMenu.addItem(withTitle: "Work on now", action: #selector(workOnQueueItemNow), keyEquivalent: "")
