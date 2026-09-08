@@ -1844,7 +1844,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
                 r.originalEstimateSeconds.map { "\($0)" } ?? "",
                 "\(r.intervalCount)",
                 r.rating.map { "\($0)" } ?? "",
-                r.status ?? (r.endedAt == nil ? "active" : ""),
+                historyStatusLabel(r, placeholder: ""),
                 indent + r.focus,
                 r.note ?? "",
             ]
@@ -2174,6 +2174,16 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         }
     }
 
+    /// Status label for a task row. Terminal status wins; an unfinished task (nil status,
+    /// no finish time) is "active" ONLY if it's the task currently being worked on (the
+    /// leaf) — every other unfinished task (set aside, queued-and-started, an ancestor) is
+    /// merely "open".
+    private func historyStatusLabel(_ r: TaskHistoryRow, placeholder: String) -> String {
+        if let s = r.status { return s }
+        guard r.endedAt == nil else { return placeholder }
+        return r.id == taskId ? "active" : "open"
+    }
+
     private func taskCellText(_ r: TaskHistoryRow, _ id: String) -> (String, NSTextAlignment) {
         switch id {
         case "when":    return (r.startedAt.map(whenLabel) ?? "—", .left)
@@ -2182,7 +2192,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         case "origmin": return (r.originalEstimateSeconds.map { mmss($0) } ?? "—", .right)
         case "ivs":     return ("\(r.intervalCount)", .right)
         case "rating":  return (r.rating.map { "\($0)/10" } ?? "—", .right)
-        case "status":  return (r.status ?? (r.endedAt == nil ? "active" : "—"), .left)
+        case "status":  return (historyStatusLabel(r, placeholder: "—"), .left)
         case "note":    return (r.note ?? "", .left)
         default:        return (r.focus, .left)
         }
