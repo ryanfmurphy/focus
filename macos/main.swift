@@ -117,6 +117,35 @@ final class QueueTableView: NSTableView {
     }
 }
 
+// The pill's content view. It replaces isMovableByWindowBackground with manual handling so
+// a *click* and a *drag* don't fight: a press that moves past a small threshold drives the
+// window drag; a press that doesn't fires `onClick` on mouse-up (used to resume a paused
+// task). hitTest returns self so clicks over the label are captured too.
+final class PillView: NSVisualEffectView {
+    var onClick: (() -> Void)?
+    private var downAt: NSPoint = .zero
+    private var dragging = false
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        super.hitTest(point) == nil ? nil : self   // claim the whole pill, label included
+    }
+    override func mouseDown(with event: NSEvent) {
+        downAt = event.locationInWindow
+        dragging = false
+    }
+    override func mouseDragged(with event: NSEvent) {
+        guard !dragging, let window = window else { return }
+        let moved = hypot(event.locationInWindow.x - downAt.x, event.locationInWindow.y - downAt.y)
+        if moved > 3 {                       // past the click/drag threshold → it's a drag
+            dragging = true
+            window.performDrag(with: event)  // runs the drag loop; the window follows the mouse
+        }
+    }
+    override func mouseUp(with event: NSEvent) {
+        if !dragging { onClick?() }           // a click, not a drag
+    }
+}
+
 // A read-only "See Queue"-style table used to pick a queued focus to pre-empt
 // with. Single-clicking a row fires `onPick` with that item. Self-contained data
 // source/delegate so it doesn't collide with AppController's own two tables.
@@ -2930,12 +2959,18 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         hudWindow.isOpaque = false
         hudWindow.backgroundColor = .clear
         hudWindow.hasShadow = true
-        hudWindow.isMovableByWindowBackground = true   // drag the pill anywhere on it
+        // Dragging is handled inside PillView (click vs. drag), not by the window, so a
+        // click can resume a paused task without moving the pill.
         hudWindow.delegate = self                      // to notice user drags (windowDidMove)
         hudWindow.level = .statusBar                   // above normal windows
         hudWindow.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
 
-        let blur = NSVisualEffectView(frame: hudWindow.contentView!.bounds)
+        let blur = PillView(frame: hudWindow.contentView!.bounds)
+        blur.onClick = { [weak self] in
+            // Click the pill to resume — only when paused (a click never pauses a running task).
+            guard let self, self.pausedAt != nil else { return }
+            self.togglePause()
+        }
         blur.material = .hudWindow
         blur.state = .active
         blur.blendingMode = .behindWindow
