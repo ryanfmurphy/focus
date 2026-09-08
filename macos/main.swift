@@ -1949,8 +1949,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         showing = true
         defer { showing = false }
         startWorkingOn(taskId: tid, focus: item.focus)
-        reloadQueueData()
-        queueTable?.reloadData()
+        queueWindow?.close()   // we're now working on it — close the queue
     }
 
     // "Add to queue" from See History: park the selected task(s) at the end of the queue
