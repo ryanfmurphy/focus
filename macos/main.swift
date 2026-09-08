@@ -2907,9 +2907,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         menu.addItem(withTitle: "Switch to subtask…", action: #selector(switchToSubtask), keyEquivalent: "")
         menu.addItem(.separator())
         // The queue.
+        menu.addItem(withTitle: "See queue", action: #selector(showQueue), keyEquivalent: "")
         menu.addItem(withTitle: "Add to queue", action: #selector(addNextFocus), keyEquivalent: "")
         menu.addItem(withTitle: "Add to front", action: #selector(preemptNextFocus), keyEquivalent: "")
-        menu.addItem(withTitle: "See queue", action: #selector(showQueue), keyEquivalent: "")
         menu.addItem(withTitle: "Clear queue", action: #selector(clearQueue), keyEquivalent: "")
         menu.addItem(.separator())
         // Review.
