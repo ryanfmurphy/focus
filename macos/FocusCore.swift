@@ -20,6 +20,18 @@ func mmss(_ seconds: Int) -> String {
 
 func isoNow() -> String { ISO8601DateFormatter().string(from: Date()) }
 
+// Column readers — nil-aware wrappers over the sqlite3_column_* family, shared by the
+// row-building queries instead of re-declaring these as nested closures in each method.
+func colInt(_ s: OpaquePointer?, _ c: Int32) -> Int? {
+    sqlite3_column_type(s, c) == SQLITE_NULL ? nil : Int(sqlite3_column_int(s, c))
+}
+func colInt64(_ s: OpaquePointer?, _ c: Int32) -> Int64? {
+    sqlite3_column_type(s, c) == SQLITE_NULL ? nil : sqlite3_column_int64(s, c)
+}
+func colText(_ s: OpaquePointer?, _ c: Int32) -> String? {
+    sqlite3_column_text(s, c).map { String(cString: $0) }
+}
+
 /// Parse the session-setup duration field. A plain number is whole minutes
 /// ("25" -> 1500). If a colon is present it's MINUTES:SECONDS ("2:30" -> 150,
 /// "0:45" -> 45, ":30" -> 30, "2:" -> 120). Returns total seconds, or nil if it
@@ -371,26 +383,20 @@ final class DB {
     // MARK: - Tasks + intervals (new model)
 
     /// All tasks, newest first.
-    func allTasks() -> [TaskRow] {
-        let sql = "SELECT id, parent_task_id, created_at, focus, estimate_seconds, status, rating, note FROM tasks ORDER BY id DESC;"
-        var stmt: OpaquePointer?
-        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else { return [] }
-        defer { sqlite3_finalize(stmt) }
-        func intOrNil(_ c: Int32) -> Int? { sqlite3_column_type(stmt, c) == SQLITE_NULL ? nil : Int(sqlite3_column_int(stmt, c)) }
-        func int64OrNil(_ c: Int32) -> Int64? { sqlite3_column_type(stmt, c) == SQLITE_NULL ? nil : sqlite3_column_int64(stmt, c) }
-        func text(_ c: Int32) -> String? { sqlite3_column_text(stmt, c).map { String(cString: $0) } }
+    /// Run a standard task-columns SELECT (`TaskRow.columns`) and build the rows. `bind`
+    /// binds any `?` parameters. All the single-table task reads share this.
+    private func queryTasks(_ sql: String, bind: (OpaquePointer?) -> Void = { _ in }) -> [TaskRow] {
+        var s: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &s, nil) == SQLITE_OK else { return [] }
+        defer { sqlite3_finalize(s) }
+        bind(s)
         var rows: [TaskRow] = []
-        while sqlite3_step(stmt) == SQLITE_ROW {
-            rows.append(TaskRow(id: sqlite3_column_int64(stmt, 0),
-                                parentTaskId: int64OrNil(1),
-                                createdAt: text(2),
-                                focus: text(3) ?? "",
-                                estimateSeconds: intOrNil(4),
-                                status: text(5),
-                                rating: intOrNil(6),
-                                note: text(7)))
-        }
+        while sqlite3_step(s) == SQLITE_ROW { rows.append(TaskRow(row: s)) }
         return rows
+    }
+
+    func allTasks() -> [TaskRow] {
+        queryTasks("SELECT \(TaskRow.columns) FROM tasks ORDER BY id DESC;")
     }
 
     /// Intervals for a task, earliest first.
@@ -555,17 +561,9 @@ final class DB {
 
     /// One task by id.
     func task(id: Int64) -> TaskRow? {
-        var s: OpaquePointer?
-        guard sqlite3_prepare_v2(db, "SELECT id, parent_task_id, created_at, focus, estimate_seconds, status, rating, note FROM tasks WHERE id=?;", -1, &s, nil) == SQLITE_OK else { return nil }
-        defer { sqlite3_finalize(s) }
-        sqlite3_bind_int64(s, 1, id)
-        guard sqlite3_step(s) == SQLITE_ROW else { return nil }
-        func intOrNil(_ c: Int32) -> Int? { sqlite3_column_type(s, c) == SQLITE_NULL ? nil : Int(sqlite3_column_int(s, c)) }
-        func int64OrNil(_ c: Int32) -> Int64? { sqlite3_column_type(s, c) == SQLITE_NULL ? nil : sqlite3_column_int64(s, c) }
-        func text(_ c: Int32) -> String? { sqlite3_column_text(s, c).map { String(cString: $0) } }
-        return TaskRow(id: sqlite3_column_int64(s, 0), parentTaskId: int64OrNil(1), createdAt: text(2),
-                       focus: text(3) ?? "", estimateSeconds: intOrNil(4), status: text(5),
-                       rating: intOrNil(6), note: text(7))
+        queryTasks("SELECT \(TaskRow.columns) FROM tasks WHERE id=? LIMIT 1;") {
+            sqlite3_bind_int64($0, 1, id)
+        }.first
     }
 
     /// A task's ancestors, nearest first: [parent, grandparent, …, root]. Empty for
@@ -586,21 +584,9 @@ final class DB {
 
     /// Direct child tasks (subtasks) of a task, oldest first.
     func childTasks(of taskId: Int64) -> [TaskRow] {
-        let sql = "SELECT id, parent_task_id, created_at, focus, estimate_seconds, status, rating, note FROM tasks WHERE parent_task_id=? ORDER BY id ASC;"
-        var s: OpaquePointer?
-        guard sqlite3_prepare_v2(db, sql, -1, &s, nil) == SQLITE_OK else { return [] }
-        defer { sqlite3_finalize(s) }
-        sqlite3_bind_int64(s, 1, taskId)
-        func intOrNil(_ c: Int32) -> Int? { sqlite3_column_type(s, c) == SQLITE_NULL ? nil : Int(sqlite3_column_int(s, c)) }
-        func int64OrNil(_ c: Int32) -> Int64? { sqlite3_column_type(s, c) == SQLITE_NULL ? nil : sqlite3_column_int64(s, c) }
-        func text(_ c: Int32) -> String? { sqlite3_column_text(s, c).map { String(cString: $0) } }
-        var rows: [TaskRow] = []
-        while sqlite3_step(s) == SQLITE_ROW {
-            rows.append(TaskRow(id: sqlite3_column_int64(s, 0), parentTaskId: int64OrNil(1), createdAt: text(2),
-                                focus: text(3) ?? "", estimateSeconds: intOrNil(4), status: text(5),
-                                rating: intOrNil(6), note: text(7)))
+        queryTasks("SELECT \(TaskRow.columns) FROM tasks WHERE parent_task_id=? ORDER BY id ASC;") {
+            sqlite3_bind_int64($0, 1, taskId)
         }
-        return rows
     }
 
     /// Total ACTUAL seconds worked on a task (sum of its CLOSED intervals).
@@ -703,20 +689,7 @@ final class DB {
 
     /// Completed tasks that were never rated, newest first (for "Rate unrated").
     func unratedCompletedTasks() -> [TaskRow] {
-        let sql = "SELECT id, parent_task_id, created_at, focus, estimate_seconds, status, rating, note FROM tasks WHERE status='completed' AND rating IS NULL ORDER BY id DESC;"
-        var s: OpaquePointer?
-        guard sqlite3_prepare_v2(db, sql, -1, &s, nil) == SQLITE_OK else { return [] }
-        defer { sqlite3_finalize(s) }
-        func intOrNil(_ c: Int32) -> Int? { sqlite3_column_type(s, c) == SQLITE_NULL ? nil : Int(sqlite3_column_int(s, c)) }
-        func int64OrNil(_ c: Int32) -> Int64? { sqlite3_column_type(s, c) == SQLITE_NULL ? nil : sqlite3_column_int64(s, c) }
-        func text(_ c: Int32) -> String? { sqlite3_column_text(s, c).map { String(cString: $0) } }
-        var rows: [TaskRow] = []
-        while sqlite3_step(s) == SQLITE_ROW {
-            rows.append(TaskRow(id: sqlite3_column_int64(s, 0), parentTaskId: int64OrNil(1), createdAt: text(2),
-                                focus: text(3) ?? "", estimateSeconds: intOrNil(4), status: text(5),
-                                rating: intOrNil(6), note: text(7)))
-        }
-        return rows
+        queryTasks("SELECT \(TaskRow.columns) FROM tasks WHERE status='completed' AND rating IS NULL ORDER BY id DESC;")
     }
 
     /// Count of completed-but-unrated tasks (menu label).
@@ -842,6 +815,23 @@ struct TaskRow {
     let status: String?
     let rating: Int?
     let note: String?
+}
+
+extension TaskRow {
+    /// The task columns every single-table task read selects, in this order.
+    static let columns = "id, parent_task_id, created_at, focus, estimate_seconds, status, rating, note"
+
+    /// Build a TaskRow from a stepped statement whose columns are `TaskRow.columns`.
+    init(row s: OpaquePointer?) {
+        self.init(id: sqlite3_column_int64(s, 0),
+                  parentTaskId: colInt64(s, 1),
+                  createdAt: colText(s, 2),
+                  focus: colText(s, 3) ?? "",
+                  estimateSeconds: colInt(s, 4),
+                  status: colText(s, 5),
+                  rating: colInt(s, 6),
+                  note: colText(s, 7))
+    }
 }
 
 struct Interval {

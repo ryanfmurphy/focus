@@ -974,21 +974,15 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     // then advance to the next (queued or improvised).
     @objc func abortTask() {
         guard !showing, !strictModeEnabled,
-              let tid = taskId, let iid = intervalId, let focus = currentFocus else { return }
+              taskId != nil, intervalId != nil, let focus = currentFocus else { return }
         showing = true
-        let elapsed = elapsedFocusSeconds()   // excludes pause time
-        resumeStackIfPaused()
-        // Return to the parent now (it keeps ticking, shown behind the rating); if
-        // there's no parent, clear the leaf so the pill hides during the prompt.
-        let hadParent = popAncestorToLeaf()
-        if !hadParent { clearSessionState() }
-        hudWindow.orderOut(nil)
-        let (rating, note, openSeconds, applyTime) = promptRating(focus: "\(focus) · \(mmss(elapsed))", title: "Rate this session")
-        db.endInterval(id: iid, elapsedSeconds: elapsed, openSecondsEnd: applyTime ? nil : openSeconds)
-        if applyTime { db.addToInterval(id: iid, seconds: openSeconds) }
-        db.finishTask(id: tid, status: "interrupted", rating: rating, note: note)
+        // Detach (returns to the parent, which keeps ticking behind the rating), then rate
+        // and mark interrupted (recording the elapsed time).
+        let d = detachLeafForFinish()
+        let (rating, note, openSeconds, applyTime) = promptRating(focus: "\(focus) · \(mmss(d.elapsed))", title: "Rate this session")
+        commitFinish(d, status: "interrupted", rating: rating, note: note, popup: (openSeconds, applyTime))
         showing = false
-        if hadParent { tick() } else { advanceAfterSession() }
+        if d.hadParent { tick() } else { advanceAfterSession() }
     }
 
     // Stop working on the current task without finishing it: suspend it (re-queued to
@@ -2593,20 +2587,13 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         }
     }
 
-    /// Parse "M:SS" (minutes:seconds) or a plain integer number of minutes into seconds.
-    /// Returns nil for anything empty, malformed, or non-positive.
+    /// Parse a positive duration — plain minutes or "M:SS" — into seconds, or nil if it
+    /// can't be parsed or is zero. Delegates to `parseDurationSeconds` (the single, tested
+    /// duration rule shared with the session-setup field) so every duration input in the
+    /// app accepts the same syntax; this wrapper just additionally rejects zero.
     private func parseDuration(_ s: String) -> Int? {
-        let t = s.trimmingCharacters(in: .whitespaces)
-        guard !t.isEmpty else { return nil }
-        if t.contains(":") {
-            let parts = t.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)
-            guard parts.count == 2, let m = Int(parts[0]), let sec = Int(parts[1]),
-                  m >= 0, sec >= 0, sec < 60 else { return nil }
-            let total = m * 60 + sec
-            return total > 0 ? total : nil
-        }
-        guard let m = Int(t), m > 0 else { return nil }
-        return m * 60
+        guard let secs = parseDurationSeconds(s), secs > 0 else { return nil }
+        return secs
     }
 
     /// Like `parseDuration` but signed: a leading "-" (or "+") applies to whole minutes or
@@ -2665,15 +2652,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         // Hands-free: complete without a rating (defer it to "Rate unrated
         // sessions") and roll straight into the next queued focus.
         if autoProceedEnabled {
-            let tid = taskId, iid = intervalId
-            let elapsed = elapsedFocusSeconds()
-            resumeStackIfPaused()
-            let hadParent = popAncestorToLeaf()
-            if !hadParent { clearSessionState() }
-            if let iid = iid { db.endInterval(id: iid, elapsedSeconds: elapsed) }
-            if let tid = tid { db.finishTask(id: tid, status: "completed") }   // rating deferred to "Rate unrated"
+            let d = detachLeafForFinish()
+            commitFinish(d, status: "completed")   // no popup; rating deferred to "Rate unrated"
             showing = false
-            if hadParent { tick() } else { advanceAfterSession() }
+            if d.hadParent { tick() } else { advanceAfterSession() }
             return
         }
 
@@ -2686,19 +2668,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             showing = false
 
         case .rate(let rating, let note, let openSeconds, let applyTime):
-            let tid = taskId, iid = intervalId
-            let elapsed = elapsedFocusSeconds()
-            resumeStackIfPaused()
-            let hadParent = popAncestorToLeaf()
-            if !hadParent { clearSessionState() }
-            if let iid = iid {
-                db.endInterval(id: iid, elapsedSeconds: elapsed, openSecondsEnd: applyTime ? nil : openSeconds)
-                if applyTime { db.addToInterval(id: iid, seconds: openSeconds) }
-            }
-            if let tid = tid { db.finishTask(id: tid, status: "completed", rating: rating, note: note) }
+            let d = detachLeafForFinish()
+            commitFinish(d, status: "completed", rating: rating, note: note, popup: (openSeconds, applyTime))
             // Back to the parent subtask (if any) or on to the next focus.
             showing = false
-            if hadParent { tick() } else { advanceAfterSession() }
+            if d.hadParent { tick() } else { advanceAfterSession() }
         }
     }
 
@@ -2767,22 +2741,50 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         }
     }
 
-    /// Force a rating, close the leaf as completed, and pop back to the parent (if a
-    /// subtask) or clear the leaf. Returns whether a parent was popped. Caller holds
-    /// `showing`. Completing early records the time actually used as the interval's.
-    @discardableResult
-    private func rateAndComplete() -> Bool {
-        guard let tid = taskId, let iid = intervalId, let focus = currentFocus else { return false }
+    private struct DetachedLeaf { let taskId: Int64?; let intervalId: Int64?; let elapsed: Int; let hadParent: Bool }
+
+    /// Detach the current leaf so it can be finished: snapshot its focus time (BEFORE any
+    /// pause is folded away), resume the stack if paused, pop to the parent (or clear the
+    /// leaf if top-level), and hide the pill. The caller then prompts for a rating — with
+    /// the parent showing behind — and calls `commitFinish` with the snapshot. Splitting it
+    /// this way keeps the delicate ordering (elapsed-before-resume, pop/clear-before-prompt)
+    /// in ONE place for every end path.
+    private func detachLeafForFinish() -> DetachedLeaf {
+        let tid = taskId, iid = intervalId
         let elapsed = elapsedFocusSeconds()   // excludes pause time
         resumeStackIfPaused()
         let hadParent = popAncestorToLeaf()
         if !hadParent { clearSessionState() }
         hudWindow.orderOut(nil)
+        return DetachedLeaf(taskId: tid, intervalId: iid, elapsed: elapsed, hadParent: hadParent)
+    }
+
+    /// Close a detached leaf's interval and mark its task finished. `popup` is the rating
+    /// modal's popup-open accounting (split to the interval's duration when applyTime, else
+    /// banked as end-open); pass nil when there was no rating popup (auto-proceed).
+    private func commitFinish(_ d: DetachedLeaf, status: String, rating: Int? = nil,
+                              note: String = "", popup: (openSeconds: Int, applyTime: Bool)? = nil) {
+        if let iid = d.intervalId {
+            if let p = popup {
+                db.endInterval(id: iid, elapsedSeconds: d.elapsed, openSecondsEnd: p.applyTime ? nil : p.openSeconds)
+                if p.applyTime { db.addToInterval(id: iid, seconds: p.openSeconds) }
+            } else {
+                db.endInterval(id: iid, elapsedSeconds: d.elapsed)
+            }
+        }
+        if let tid = d.taskId { db.finishTask(id: tid, status: status, rating: rating, note: note) }
+    }
+
+    /// Force a rating, close the leaf as completed, and pop back to the parent (if a
+    /// subtask) or clear the leaf. Returns whether a parent was popped. Caller holds
+    /// `showing`. Completing early records the time actually used as the interval's.
+    @discardableResult
+    private func rateAndComplete() -> Bool {
+        guard taskId != nil, intervalId != nil, let focus = currentFocus else { return false }
+        let d = detachLeafForFinish()
         let (rating, note, openSeconds, applyTime) = promptRating(focus: focus, title: "Rate this session")
-        db.endInterval(id: iid, elapsedSeconds: elapsed, openSecondsEnd: applyTime ? nil : openSeconds)
-        if applyTime { db.addToInterval(id: iid, seconds: openSeconds) }
-        db.finishTask(id: tid, status: "completed", rating: rating, note: note)
-        return hadParent
+        commitFinish(d, status: "completed", rating: rating, note: note, popup: (openSeconds, applyTime))
+        return d.hadParent
     }
 
     /// A rating (1–10) field over an optional note field, for the rating modals,
