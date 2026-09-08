@@ -93,8 +93,14 @@ final class HistoryNode {
 final class QueueTableView: NSTableView {
     var onDelete: ((Int) -> Void)?
     var onCopy: ((IndexSet) -> Void)?
+    var onMove: ((Int) -> Void)?   // ⌘↑ / ⌘↓ → move the selected row by ∓1
 
     override func keyDown(with event: NSEvent) {
+        // ⌘↑ / ⌘↓ move the selected row up / down one (126 = up arrow, 125 = down).
+        if event.modifierFlags.contains(.command), event.keyCode == 126 || event.keyCode == 125 {
+            onMove?(event.keyCode == 126 ? -1 : 1)
+            return
+        }
         // 51 = Delete (backspace), 117 = forward delete (fn+Delete).
         if (event.keyCode == 51 || event.keyCode == 117), selectedRow >= 0 {
             onDelete?(selectedRow)
@@ -2041,6 +2047,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             table.allowsMultipleSelection = true   // Shift/⌘-click to select a range, then ⌘C
             table.onDelete = { [weak self] row in self?.deleteQueueRow(at: row) }
             table.onCopy = { [weak self] indexes in self?.copyQueueRows(indexes) }
+            table.onMove = { [weak self] delta in self?.moveSelectedQueueRow(by: delta) }
             // Right-click a row to re-order it within the queue, or remove it.
             let rowMenu = NSMenu()
             rowMenu.addItem(withTitle: "Move up", action: #selector(moveQueueItemUp), keyEquivalent: "")
@@ -2198,25 +2205,36 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         }
     }
     // ---- queue reordering (right-click menu on the queue table) ----
-    @objc func moveQueueItemUp()      { moveClickedQueueRow { $0 - 1 } }
-    @objc func moveQueueItemDown()    { moveClickedQueueRow { $0 + 1 } }
-    @objc func moveQueueItemToTop()   { moveClickedQueueRow { _ in 0 } }
-    @objc func moveQueueItemToBottom(){ moveClickedQueueRow { _ in Int.max } }
+    @objc func moveQueueItemUp()      { moveQueueRow(at: queueTable?.clickedRow ?? -1) { $0 - 1 } }
+    @objc func moveQueueItemDown()    { moveQueueRow(at: queueTable?.clickedRow ?? -1) { $0 + 1 } }
+    @objc func moveQueueItemToTop()   { moveQueueRow(at: queueTable?.clickedRow ?? -1) { _ in 0 } }
+    @objc func moveQueueItemToBottom(){ moveQueueRow(at: queueTable?.clickedRow ?? -1) { _ in Int.max } }
 
-    /// Move the right-clicked queue row to a new index (computed from its current
-    /// one), then persist the new order and refresh.
-    private func moveClickedQueueRow(_ destination: (Int) -> Int) {
-        guard !strictModeEnabled, let table = queueTable else { return }
-        let src = table.clickedRow
-        guard src >= 0, src < queueRows.count else { return }
+    /// Move the queue row at `src` to a new index (computed from its current one), then
+    /// persist the new order and refresh. Returns the row the moved item lands on, or nil
+    /// if nothing moved — the keyboard path uses it to keep the selection with the item.
+    @discardableResult
+    private func moveQueueRow(at src: Int, _ destination: (Int) -> Int) -> Int? {
+        guard !strictModeEnabled, let table = queueTable else { return nil }
+        guard src >= 0, src < queueRows.count else { return nil }
         let target = min(max(destination(src), 0), queueRows.count - 1)
-        guard target != src else { return }
+        guard target != src else { return nil }
         var ids = queueRows.map { $0.id }
         let moved = ids.remove(at: src)
         ids.insert(moved, at: target)
         db.reorderQueue(ids: ids)
         reloadQueueData()
         table.reloadData()
+        return target
+    }
+
+    // Move the SELECTED queue row by one (⌘↑ / ⌘↓), keeping it selected so you can chain
+    // moves. No-op in strict mode (the queue is frozen).
+    private func moveSelectedQueueRow(by delta: Int) {
+        guard let table = queueTable, table.selectedRow >= 0 else { return }
+        if let landed = moveQueueRow(at: table.selectedRow, { $0 + delta }) {
+            table.selectRowIndexes(IndexSet(integer: landed), byExtendingSelection: false)
+        }
     }
 
     // Remove the right-clicked queue row (menu), or the selected row (Delete key).
