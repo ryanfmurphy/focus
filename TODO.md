@@ -3,3 +3,4 @@
     - Split before and after into 2 separate sessions (current behavior)
     - Remove session that is there before. Move entire session back to the queue including all minutes. Don't include (continue X) at the end
 - In "See History", add a "Work on task" option. If the task is completed, change it to not complete (reopen it).
+- Revisit the code review in macos/CODE-REVIEW-refactors.md and tackle items as needed (start with #1 + #2 + the duration-parser bug)
