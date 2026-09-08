@@ -2031,7 +2031,19 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             window.isReleasedWhenClosed = false
             window.center()
 
-            let scroll = NSScrollView(frame: window.contentView!.bounds)
+            let container = NSView(frame: window.contentView!.bounds)
+            container.autoresizingMask = [.width, .height]
+
+            // Footer hint (bottom, full width) — surfaces the reorder shortcut.
+            let hintH: CGFloat = 22
+            let hint = NSTextField(labelWithString: "Tip: ⌘↑ / ⌘↓ move the selected item up or down. Right-click for more.")
+            hint.font = NSFont.systemFont(ofSize: 11)
+            hint.textColor = .secondaryLabelColor
+            hint.frame = NSRect(x: 10, y: 3, width: container.bounds.width - 20, height: hintH - 4)
+            hint.autoresizingMask = [.width, .maxYMargin]
+
+            let scroll = NSScrollView(frame: NSRect(x: 0, y: hintH, width: container.bounds.width,
+                                                    height: container.bounds.height - hintH))
             scroll.autoresizingMask = [.width, .height]
             scroll.hasVerticalScroller = true
             scroll.hasHorizontalScroller = true   // long "Parent › Subtask" chains can scroll
@@ -2076,7 +2088,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             addColumn("focus", "Focus (next up first)", width: 540, min: 260)
 
             scroll.documentView = table
-            window.contentView = scroll
+            container.addSubview(scroll)
+            container.addSubview(hint)
+            window.contentView = container
 
             queueWindow = window
             queueTable = table
