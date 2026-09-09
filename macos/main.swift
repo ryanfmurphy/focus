@@ -2856,13 +2856,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
                 }
                 continue   // cancelled the add → back to the time's-up modal
             }
-            let rating = Int(ratingField.stringValue.trimmingCharacters(in: .whitespaces)) ?? 0
-            if (1...10).contains(rating) {
+            if let rating = parseRating(ratingField.stringValue) {
                 return .rate(rating: rating,
                              note: noteField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines),
                              openSeconds: openSeconds(), applyTime: apply.state == .on)
             }
-            // invalid rating → loop
+            // invalid rating → parseRating explained why; loop back to the modal
         }
     }
 
@@ -2983,13 +2982,30 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     }
 
     /// Mandatory 1–10 rating modal (+ optional note) — floating, loops until valid.
+    /// Parse the rating field: a whole number 1–10. Returns it, or shows an explanatory
+    /// alert and returns nil (so the caller re-prompts) — instead of failing silently on a
+    /// decimal / out-of-range / empty value.
+    private func parseRating(_ s: String) -> Int? {
+        let t = s.trimmingCharacters(in: .whitespaces)
+        if let n = Int(t), (1...10).contains(n) { return n }
+        let alert = makeAlert()
+        alert.messageText = "Enter a rating from 1 to 10"
+        alert.informativeText = t.isEmpty
+            ? "Type a whole number from 1 to 10 to rate this session."
+            : "\u{201C}\(t)\u{201D} isn't a whole number from 1 to 10 (no decimals). Please try again."
+        alert.addButton(withTitle: "OK")
+        alert.window.level = .floating
+        alert.window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        _ = runFloatingAlert(alert)
+        return nil
+    }
+
     private func promptRating(focus: String, title: String) -> (rating: Int, note: String, openSeconds: Int, applyTime: Bool) {
         NSApp.activate(ignoringOtherApps: true)
         let (accessory, ratingField, noteField, elapsed, apply) = ratingAccessory()
         let (timer, openSeconds, _) = startElapsedTimer(elapsed)
         defer { timer.invalidate() }
-        var rating = 0
-        while rating < 1 || rating > 10 {
+        while true {
             let alert = makeAlert()
             alert.messageText = title
             alert.informativeText = "Focus: \(focus)\n\nRate it 1–10 (optional note):"
@@ -2997,10 +3013,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             alert.accessoryView = accessory
             // Non-app-modal so the 🎯 menu stays usable while the prompt is up.
             _ = runFloatingAlert(alert, firstResponder: ratingField)
-            rating = Int(ratingField.stringValue.trimmingCharacters(in: .whitespaces)) ?? 0
+            if let rating = parseRating(ratingField.stringValue) {
+                return (rating, noteField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines),
+                        openSeconds(), apply.state == .on)
+            }
         }
-        return (rating, noteField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines),
-                openSeconds(), apply.state == .on)
     }
 
     // ---- UI construction ----
