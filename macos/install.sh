@@ -4,16 +4,19 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 PLIST="$HOME/Library/LaunchAgents/com.murftown.focus.plist"
+BIN="$PWD/focus"   # absolute path to the built binary on THIS machine
 
 echo "Building..."
 swiftc main.swift FocusCore.swift -o focus
 
 echo "Installing LaunchAgent -> $PLIST"
-cp com.murftown.focus.plist "$PLIST"
+# Fill the plist template's __FOCUS_BIN__ with this machine's binary path (launchd
+# needs an absolute path, so it's generated here rather than hardcoded in the repo).
+sed "s|__FOCUS_BIN__|$BIN|g" com.murftown.focus.plist > "$PLIST"
 
 # Reload cleanly. bootout is async, so wait for the old instance to fully
 # unload before bootstrapping — otherwise bootstrap races with an I/O error.
-pkill -f "__FOCUS_BIN__" 2>/dev/null || true
+pkill -f "$BIN" 2>/dev/null || true
 launchctl bootout "gui/$(id -u)/com.murftown.focus" 2>/dev/null || true
 sleep 1
 launchctl bootstrap "gui/$(id -u)" "$PLIST"

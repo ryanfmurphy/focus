@@ -6,6 +6,8 @@
     <key>Label</key>
     <string>com.murftown.focus</string>
 
+    <!-- __FOCUS_BIN__ is substituted with the built binary's absolute path by
+         install.sh (launchd requires an absolute path, so it's filled in per machine). -->
     <key>ProgramArguments</key>
     <array>
         <string>__FOCUS_BIN__</string>
