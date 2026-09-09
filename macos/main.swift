@@ -1937,8 +1937,34 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         guard tasks.count == 1, let t = tasks.first else { return }
         showing = true
         defer { showing = false }
+        // A completed task has no time left — reopening it would be instantly "done" again.
+        // Ask how much time to add to its estimate first (cancel aborts the resume).
+        if t.status == "completed" {
+            guard let added = askResumeAddTime(focus: t.focus) else { return }
+            db.addTimeToTask(id: t.id, seconds: added)
+        }
         startWorkingOn(taskId: t.id, focus: t.focus)
         reloadHistory()
+    }
+
+    /// Ask how much time to add to a completed task's estimate before reopening it
+    /// (minutes or M:SS). Loops until valid; returns seconds, or nil if cancelled.
+    private func askResumeAddTime(focus: String) -> Int? {
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 100, height: 24))
+        field.stringValue = "5"
+        while true {
+            let alert = makeAlert()
+            alert.messageText = "Resume \u{201C}\(focus)\u{201D}"
+            alert.informativeText = "This task is complete. How much time to add before reopening it?\n\nMinutes (e.g. 15) or M:SS (e.g. 1:30)."
+            alert.addButton(withTitle: "Add & resume")   // .alertFirstButtonReturn
+            alert.addButton(withTitle: "Cancel")          // .alertSecondButtonReturn
+            alert.accessoryView = field
+            alert.window.level = .floating
+            alert.window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+            alert.window.initialFirstResponder = field
+            if alert.runModal() == .alertSecondButtonReturn { return nil }
+            if let secs = parseDuration(field.stringValue) { return secs }
+        }
     }
 
     // "Work on now" from See Queue (context menu or double-click): start the clicked queued
@@ -2968,7 +2994,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         // The running task (these grey out when idle, except changeFocus → "Set focus").
         menu.addItem(withTitle: "Complete task", action: #selector(completeTask), keyEquivalent: "")
         menu.addItem(withTitle: "Pause", action: #selector(togglePause), keyEquivalent: "")
-        menu.addItem(withTitle: "Add time", action: #selector(addTimeToCurrent), keyEquivalent: "")
+        menu.addItem(withTitle: "Add/subtract time", action: #selector(addTimeToCurrent), keyEquivalent: "")
         menu.addItem(withTitle: "Rename task", action: #selector(renameTask), keyEquivalent: "")
         menu.addItem(withTitle: "Abort task", action: #selector(abortTask), keyEquivalent: "")
         menu.addItem(withTitle: "Stop working", action: #selector(stopWorking), keyEquivalent: "")
