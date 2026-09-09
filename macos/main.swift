@@ -1306,10 +1306,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         alert.messageText = "Ready to focus?"
         alert.informativeText = "Next up: \(queueDisplayName(item))\n\n\(mmss(item.seconds))"
         alert.addButton(withTitle: "Start")             // 0
-        // Strict mode: the front task is the only option — no switching to a new or
-        // different queued focus, and no closing. Otherwise offer the alternatives + Close.
+        // Front task is the only option — no switching to a new or different queued focus,
+        // and no closing — under strict mode OR auto-proceed (which is meant to roll on
+        // hands-free). Otherwise offer the alternatives + Close.
+        let proceedOnly = strictModeEnabled || autoProceedEnabled
         var differentIndex = -1, pickIndex = -1, closeIndex = -1
-        if !strictModeEnabled {
+        if !proceedOnly {
             alert.addButton(withTitle: "Start a new focus"); differentIndex = alert.buttons.count - 1
             let pickButton = alert.addButton(withTitle: "Pick another queued focus…"); pickIndex = alert.buttons.count - 1
             pickButton.isEnabled = db.queueCount() > 1   // disabled when there's no other queued item
