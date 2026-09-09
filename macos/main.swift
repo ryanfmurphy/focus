@@ -835,47 +835,76 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         tick()   // apply immediately: re-show or hide the pill
     }
 
-    // "Add time" — one prompt, two modes (radio): add time *to complete* (grows the
-    // estimate → more remaining, the default) or add time *already spent* (logs work you
-    // did → remaining shrinks). Both take minutes or M:SS, negative to subtract.
+    private enum AddTimeMode { case complete, spent, setSpent }
+
+    // Wired only while the Add/remove-time prompt is up, so the radios can reset the field's
+    // default (0 for "set spent to", 5 for the add/remove modes).
+    private weak var addTimeField: NSTextField?
+    private weak var addTimeSetSpentRadio: NSButton?
+
+    // "Add/remove time" — one prompt, three modes (radio): add/subtract time *to complete*
+    // (grows the estimate → more remaining, the default), add/subtract time *already spent*
+    // (logs work → remaining shrinks), or *set* the total spent to an absolute value.
     @objc func addTimeToCurrent() {
         guard !showing, taskId != nil else { return }
         showing = true
         defer { showing = false }
-        guard let (spent, seconds) = askAddTime() else { return }
-        if spent { applySpentDelta(seconds) }
-        else { extendSession(by: seconds); extendAncestorsToCoverLeaf() }
+        guard let (mode, seconds) = askAddTime() else { return }
+        switch mode {
+        case .complete:
+            extendSession(by: seconds); extendAncestorsToCoverLeaf()
+        case .spent:
+            applySpentDelta(seconds)
+        case .setSpent:
+            // Move the current spent to the target: delta = target − (prior + this interval).
+            let currentSpent = (spentBefore ?? 0) + elapsedFocusSeconds()
+            applySpentDelta(seconds - currentSpent)
+        }
     }
 
-    @objc private func addTimeRadioNoop() {}   // shared action so the two radios group
+    // Reset the field to the newly-selected mode's default when a radio is clicked.
+    @objc private func addTimeModeChanged(_ sender: NSButton) {
+        addTimeField?.stringValue = (sender === addTimeSetSpentRadio) ? "0" : "5"
+    }
 
-    /// The merged "Add time" prompt: a mode radio (to complete / already spent) over a
-    /// duration field. Returns (spentMode, signedSeconds), or nil if cancelled. Loops
-    /// until the duration parses.
-    private func askAddTime() -> (spent: Bool, seconds: Int)? {
-        let toComplete = NSButton(radioButtonWithTitle: "Add/subtract time to complete", target: self, action: #selector(addTimeRadioNoop))
-        let alreadySpent = NSButton(radioButtonWithTitle: "Add/subtract time already spent", target: self, action: #selector(addTimeRadioNoop))
+    /// The merged "Add/remove time" prompt: a mode radio (to complete / already spent / set
+    /// spent) over a duration field. Returns (mode, seconds), or nil if cancelled. Loops
+    /// until the duration parses. Set-spent takes a non-negative value; the others are
+    /// signed (negative to subtract).
+    private func askAddTime() -> (mode: AddTimeMode, seconds: Int)? {
+        let toComplete = NSButton(radioButtonWithTitle: "Add/subtract time to complete", target: self, action: #selector(addTimeModeChanged(_:)))
+        let alreadySpent = NSButton(radioButtonWithTitle: "Add/subtract time already spent", target: self, action: #selector(addTimeModeChanged(_:)))
+        let setSpent = NSButton(radioButtonWithTitle: "Set time spent to", target: self, action: #selector(addTimeModeChanged(_:)))
         toComplete.state = .on   // default
-        toComplete.frame = NSRect(x: 0, y: 62, width: 260, height: 20)
-        alreadySpent.frame = NSRect(x: 0, y: 38, width: 260, height: 20)
+        toComplete.frame = NSRect(x: 0, y: 88, width: 260, height: 20)
+        alreadySpent.frame = NSRect(x: 0, y: 64, width: 260, height: 20)
+        setSpent.frame = NSRect(x: 0, y: 40, width: 260, height: 20)
         let field = NSTextField(frame: NSRect(x: 0, y: 4, width: 200, height: 24))
         field.placeholderString = "e.g. 15, 1:30, or -5"
-        field.stringValue = "5"   // default: 5 minutes
-        let accessory = NSView(frame: NSRect(x: 0, y: 0, width: 260, height: 86))
-        accessory.addSubview(toComplete); accessory.addSubview(alreadySpent); accessory.addSubview(field)
+        field.stringValue = "5"   // default for the add/remove modes
+        addTimeField = field
+        addTimeSetSpentRadio = setSpent
+        defer { addTimeField = nil; addTimeSetSpentRadio = nil }
+        let accessory = NSView(frame: NSRect(x: 0, y: 0, width: 260, height: 112))
+        for v in [toComplete, alreadySpent, setSpent, field] { accessory.addSubview(v) }
         while true {
             let alert = makeAlert()
-            alert.messageText = "Add time"
+            alert.messageText = "Add/remove time"
             alert.informativeText = "Minutes (e.g. 15) or M:SS (e.g. 1:30); negative to subtract."
-            alert.addButton(withTitle: "Add")      // .alertFirstButtonReturn
+            alert.addButton(withTitle: "OK")       // .alertFirstButtonReturn
             alert.addButton(withTitle: "Cancel")   // .alertSecondButtonReturn
             alert.accessoryView = accessory
             alert.window.level = .floating
             alert.window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
             alert.window.initialFirstResponder = field
             if alert.runModal() == .alertSecondButtonReturn { return nil }
-            if let secs = parseSignedDuration(field.stringValue) {
-                return (alreadySpent.state == .on, secs)
+            let mode: AddTimeMode = setSpent.state == .on ? .setSpent
+                                  : (alreadySpent.state == .on ? .spent : .complete)
+            if mode == .setSpent {
+                // Absolute total; 0 is valid, negative is not.
+                if let secs = parseDurationSeconds(field.stringValue), secs >= 0 { return (mode, secs) }
+            } else if let secs = parseSignedDuration(field.stringValue) {
+                return (mode, secs)
             }
         }
     }
