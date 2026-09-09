@@ -853,8 +853,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     /// duration field. Returns (spentMode, signedSeconds), or nil if cancelled. Loops
     /// until the duration parses.
     private func askAddTime() -> (spent: Bool, seconds: Int)? {
-        let toComplete = NSButton(radioButtonWithTitle: "Add time to complete", target: self, action: #selector(addTimeRadioNoop))
-        let alreadySpent = NSButton(radioButtonWithTitle: "Add time already spent", target: self, action: #selector(addTimeRadioNoop))
+        let toComplete = NSButton(radioButtonWithTitle: "Add/subtract time to complete", target: self, action: #selector(addTimeRadioNoop))
+        let alreadySpent = NSButton(radioButtonWithTitle: "Add/subtract time already spent", target: self, action: #selector(addTimeRadioNoop))
         toComplete.state = .on   // default
         toComplete.frame = NSRect(x: 0, y: 62, width: 260, height: 20)
         alreadySpent.frame = NSRect(x: 0, y: 38, width: 260, height: 20)
