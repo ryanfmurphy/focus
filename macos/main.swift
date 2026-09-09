@@ -854,11 +854,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         case .complete:
             extendSession(by: seconds); extendAncestorsToCoverLeaf()
         case .spent:
-            applySpentDelta(seconds)
+            if !applySpentDelta(seconds) { showSpentFloorError() }
         case .setSpent:
             // Move the current spent to the target: delta = target − (prior + this interval).
             let currentSpent = (spentBefore ?? 0) + elapsedFocusSeconds()
-            applySpentDelta(seconds - currentSpent)
+            if !applySpentDelta(seconds - currentSpent) { showSpentFloorError() }
         }
     }
 
@@ -910,15 +910,18 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     }
 
     /// Grow (or shrink) the time recorded against the current open interval by `delta`
-    /// seconds. Done by moving the interval's start earlier (durably, in the DB too, so it
-    /// survives a restart); remaining drops to match, since the estimate is unchanged. The
-    /// current interval can only be zeroed out, not driven negative, so a big subtraction
-    /// clamps at "no time on this interval".
-    private func applySpentDelta(_ delta: Int) {
-        guard let iid = intervalId, let tid = taskId, let start = intervalStart else { return }
-        let newStart = min(Date(), start.addingTimeInterval(Double(-delta)))   // earlier for +, later for −
-        let applied = Int(start.timeIntervalSince(newStart).rounded())         // actual spent-seconds shifted
-        guard applied != 0 else { return }
+    /// seconds, by moving the interval's start earlier (durably, in the DB too, so it
+    /// survives a restart); remaining shifts to match, since the estimate is unchanged.
+    /// The current interval can't go below zero spent, so a subtraction larger than it holds
+    /// is REJECTED (returns false without changing anything) rather than silently clamped —
+    /// the caller reports the error. Returns true on success (including a no-op zero delta).
+    @discardableResult
+    private func applySpentDelta(_ delta: Int) -> Bool {
+        guard let iid = intervalId, let tid = taskId, let start = intervalStart else { return false }
+        let newStart = start.addingTimeInterval(Double(-delta))   // earlier for +, later for −
+        if newStart > Date() { return false }                     // would drive this interval's spent < 0
+        let applied = Int(start.timeIntervalSince(newStart).rounded())   // actual spent-seconds shifted
+        guard applied != 0 else { return true }
         intervalStart = newStart
         let iso = isoParser.string(from: newStart)
         db.setIntervalStartedAt(id: iid, iso: iso)
@@ -932,6 +935,22 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         }
         deadline = (deadline ?? Date()).addingTimeInterval(Double(-applied))   // remaining −applied
         tick()
+        return true
+    }
+
+    /// Explain why a spent-time reduction was rejected (would push spent below 0 / below the
+    /// time already logged in this task's earlier sessions).
+    private func showSpentFloorError() {
+        let floor = spentBefore ?? 0
+        let alert = makeAlert()
+        alert.messageText = "Can't reduce time spent that far"
+        alert.informativeText = floor > 0
+            ? "Time spent can't go below the \(mmss(floor)) already recorded in earlier sessions of this task. Enter a smaller reduction."
+            : "Time spent can't go below zero. Enter a smaller reduction."
+        alert.addButton(withTitle: "OK")
+        alert.window.level = .floating
+        alert.window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        _ = runFloatingAlert(alert)
     }
 
     // Rename the running task's focus (a small prompt pre-filled with the current name).
