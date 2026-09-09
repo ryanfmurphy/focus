@@ -1324,7 +1324,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             label.alignment = .center
             label.font = NSFont.systemFont(ofSize: 12)
             alert.accessoryView = label
-            var remaining = 10
+            var remaining = 15
             label.stringValue = "Will automatically proceed with this focus in \(remaining) seconds."
             // .common mode so it fires while the panel is up; setting panelResult to
             // the first button's index ends the pump exactly as a "Start" click would.
