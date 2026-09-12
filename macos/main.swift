@@ -149,6 +149,158 @@ final class PillView: NSVisualEffectView {
     }
 }
 
+/// A modal that collects ONE OR MORE (focus, minutes) rows for batch-enqueuing. Each row is
+/// a name field + a minutes field + a "−" remove button; "+ Add another" appends a row.
+/// Submit returns every row that's filled and valid, top-to-bottom (queue order); fully-empty
+/// rows are skipped, and a half-filled/invalid row blocks submit. Cancel/Esc returns nil.
+/// Used only by the queue-add paths — the single-task start-now prompts keep askFocusAndMinutes.
+final class MultiFocusPrompt: NSObject {
+    struct Entry { let focus: String; let seconds: Int }
+
+    private final class RowView: NSView {
+        let focus = NSTextField()
+        let minutes = NSTextField()
+        let remove = NSButton(title: "\u{2212}", target: nil, action: nil)   // − (minus)
+    }
+
+    private let titleText: String, infoText: String, confirmText: String
+    private var window: NSWindow!
+    private var infoLabel: NSTextField!
+    private var addButton: NSButton!
+    private var submitButton: NSButton!
+    private var cancelButton: NSButton!
+    private var rows: [RowView] = []
+    private var result: [Entry]?
+
+    private let width: CGFloat = 460, pad: CGFloat = 16, rowH: CGFloat = 30
+    private let infoH: CGFloat = 34, btnH: CGFloat = 28, gap: CGFloat = 10
+
+    init(title: String, info: String, confirm: String) {
+        titleText = title; infoText = info; confirmText = confirm
+        super.init()
+    }
+
+    /// Show the modal (app-modal). Returns the entered rows, or nil if cancelled / all empty.
+    func run() -> [Entry]? {
+        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: width, height: 300),
+                          styleMask: [.titled], backing: .buffered, defer: false)
+        window.title = titleText
+        window.level = .floating
+        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+
+        infoLabel = NSTextField(wrappingLabelWithString: infoText)
+        infoLabel.font = NSFont.systemFont(ofSize: 12)
+        window.contentView!.addSubview(infoLabel)
+
+        addButton = NSButton(title: "+ Add another", target: self, action: #selector(addRowClicked))
+        addButton.bezelStyle = .rounded
+        window.contentView!.addSubview(addButton)
+
+        submitButton = NSButton(title: confirmText, target: self, action: #selector(submit))
+        submitButton.bezelStyle = .rounded
+        submitButton.keyEquivalent = "\r"   // Enter submits
+        window.contentView!.addSubview(submitButton)
+
+        cancelButton = NSButton(title: "Cancel", target: self, action: #selector(cancel))
+        cancelButton.bezelStyle = .rounded
+        cancelButton.keyEquivalent = "\u{1b}"   // Esc
+        window.contentView!.addSubview(cancelButton)
+
+        addRow()   // start with one row
+        relayout()
+        NSApp.activate(ignoringOtherApps: true)
+        window.center()
+        window.makeKeyAndOrderFront(nil)
+        window.makeFirstResponder(rows.first?.focus)
+        NSApp.runModal(for: window)
+        window.orderOut(nil)
+        return result
+    }
+
+    private func addRow() {
+        let row = RowView()
+        row.focus.placeholderString = "e.g. \(randomFocusSuggestion())"
+        row.minutes.stringValue = String(defaultMinutes)
+        row.remove.bezelStyle = .circular
+        row.remove.target = self
+        row.remove.action = #selector(removeRowClicked(_:))
+        row.addSubview(row.focus); row.addSubview(row.minutes); row.addSubview(row.remove)
+        rows.append(row)
+        window.contentView!.addSubview(row)
+    }
+
+    @objc private func addRowClicked() {
+        addRow(); relayout(); window.makeFirstResponder(rows.last?.focus)
+    }
+
+    @objc private func removeRowClicked(_ sender: NSButton) {
+        guard rows.count > 1, let row = rows.first(where: { $0.remove === sender }) else { return }
+        row.removeFromSuperview()
+        rows.removeAll { $0 === row }
+        relayout()
+    }
+
+    @objc private func submit() {
+        var out: [Entry] = []
+        for r in rows {
+            let f = r.focus.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            let m = r.minutes.stringValue.trimmingCharacters(in: .whitespaces)
+            if f.isEmpty && m.isEmpty { continue }   // fully empty row → skip
+            guard !f.isEmpty, let s = parseDurationSeconds(m), s > 0 else {
+                // half-filled / invalid → focus the offending field and block submit
+                window.makeFirstResponder(f.isEmpty ? r.focus : r.minutes)
+                NSSound.beep()
+                return
+            }
+            out.append(Entry(focus: f, seconds: s))
+        }
+        result = out.isEmpty ? nil : out
+        NSApp.stopModal()
+    }
+
+    @objc private func cancel() { result = nil; NSApp.stopModal() }
+
+    private func relayout() {
+        let rowWidth = width - 2 * pad
+        let n = CGFloat(rows.count)
+        let contentH = pad + infoH + gap + n * rowH + gap + btnH + gap + btnH + pad
+
+        // Grow/shrink downward: keep the window's TOP edge fixed as rows are added/removed.
+        let oldTop = window.frame.maxY
+        window.setContentSize(NSSize(width: width, height: contentH))
+        if oldTop > 0 {
+            var origin = window.frame.origin
+            origin.y = oldTop - window.frame.height
+            window.setFrameOrigin(origin)
+        }
+
+        var topY = contentH - pad
+        topY -= infoH
+        infoLabel.frame = NSRect(x: pad, y: topY, width: rowWidth, height: infoH)
+        topY -= gap
+        for row in rows {
+            topY -= rowH
+            row.frame = NSRect(x: pad, y: topY, width: rowWidth, height: rowH)
+            layoutRow(row, rowWidth: rowWidth)
+            row.remove.isHidden = (rows.count == 1)   // no "−" when a single row remains
+        }
+        topY -= gap
+        topY -= btnH
+        addButton.frame = NSRect(x: pad, y: topY, width: 150, height: btnH)
+        // Submit / Cancel pinned to the bottom-right.
+        submitButton.frame = NSRect(x: width - pad - 100, y: pad, width: 100, height: btnH)
+        cancelButton.frame = NSRect(x: width - pad - 100 - 8 - 90, y: pad, width: 90, height: btnH)
+    }
+
+    private func layoutRow(_ row: RowView, rowWidth: CGFloat) {
+        let removeW: CGFloat = 26, minutesW: CGFloat = 56, fieldGap: CGFloat = 8
+        let focusW = rowWidth - removeW - minutesW - 2 * fieldGap
+        row.focus.frame = NSRect(x: 0, y: 3, width: focusW, height: 24)
+        row.minutes.frame = NSRect(x: focusW + fieldGap, y: 3, width: minutesW, height: 24)
+        row.remove.frame = NSRect(x: rowWidth - removeW, y: 3, width: removeW, height: 24)
+    }
+}
+
 // A read-only "See Queue"-style table used to pick a queued focus to pre-empt
 // with. Single-clicking a row fires `onPick` with that item. Self-contained data
 // source/delegate so it doesn't collide with AppController's own two tables.
@@ -806,11 +958,14 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         guard !showing else { return }
         showing = true
         defer { showing = false }
-        guard case let .entered(focus, seconds, _) = askFocusAndMinutes(
+        let entries = MultiFocusPrompt(
             title: "Add to front",
-            info: "This goes to the front of the queue — it runs before whatever's queued next.",
-            confirm: "Add to front", cancellable: true) else { return }
-        db.enqueueTask(focus: focus, estimateSeconds: seconds, front: true)
+            info: "These go to the front of the queue — before whatever's queued next. Click + to add another.",
+            confirm: "Add to front").run() ?? []
+        guard !entries.isEmpty else { return }
+        // Insert as a block preserving order: enqueue in reverse (each to the front) so
+        // row 1 ends up frontmost.
+        for e in entries.reversed() { db.enqueueTask(focus: e.focus, estimateSeconds: e.seconds, front: true) }
         db.recordPreempt(preemptedSessionId: nil, newSessionId: nil)
     }
 
@@ -1266,12 +1421,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         guard !showing else { return }
         showing = true
         defer { showing = false }
-        if case let .entered(focus, seconds, _) = askFocusAndMinutes(
-            title: "Add next focus",
-            info: "Queue a focus to run after the current one.",
-            confirm: "Add to queue", cancellable: true) {
-            db.enqueueTask(focus: focus, estimateSeconds: seconds)
-        }
+        // Batch-add: each row (top-to-bottom) is appended in order.
+        let entries = MultiFocusPrompt(
+            title: "Add to queue",
+            info: "Queue one or more focuses to run after the current one. Click + to add another.",
+            confirm: "Add to queue").run() ?? []
+        for e in entries { db.enqueueTask(focus: e.focus, estimateSeconds: e.seconds) }
     }
 
     /// A top-level task just finished. Normally roll on to the next focus — but in
