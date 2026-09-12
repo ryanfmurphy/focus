@@ -429,20 +429,29 @@ final class DB {
     // "intervals"; the active work is a task with an open (unfinished) interval.
 
     /// Create a task and open its first interval. Returns both ids.
-    func startTask(reason: String, estimateSeconds: Int, focus: String,
-                   parentTaskId: Int64? = nil) -> (taskId: Int64, intervalId: Int64)? {
+    /// Insert one `tasks` row — the SINGLE place a task is created. `status` nil means an
+    /// active task (started immediately, via startTask); "queued" means a never-started
+    /// plan minted by enqueueTask. `original_estimate_seconds` is stamped equal to the
+    /// working estimate at creation (the frozen calibration baseline). Returns the new id.
+    private func insertTask(focus: String, estimateSeconds: Int,
+                            parentTaskId: Int64? = nil, status: String? = nil) -> Int64? {
         var t: OpaquePointer?
-        guard sqlite3_prepare_v2(db, "INSERT INTO tasks (parent_task_id, created_at, focus, estimate_seconds, original_estimate_seconds) VALUES (?,?,?,?,?);", -1, &t, nil) == SQLITE_OK else { return nil }
+        guard sqlite3_prepare_v2(db, "INSERT INTO tasks (parent_task_id, created_at, focus, estimate_seconds, original_estimate_seconds, status) VALUES (?,?,?,?,?,?);", -1, &t, nil) == SQLITE_OK else { return nil }
+        defer { sqlite3_finalize(t) }
         if let p = parentTaskId { sqlite3_bind_int64(t, 1, p) } else { sqlite3_bind_null(t, 1) }
         sqlite3_bind_text(t, 2, isoNow(), -1, SQLITE_TRANSIENT)
         sqlite3_bind_text(t, 3, focus, -1, SQLITE_TRANSIENT)
         sqlite3_bind_int(t, 4, Int32(estimateSeconds))
         sqlite3_bind_int(t, 5, Int32(estimateSeconds))   // original == working at creation
-        let done = sqlite3_step(t) == SQLITE_DONE
-        sqlite3_finalize(t)
-        guard done else { return nil }
-        let taskId = sqlite3_last_insert_rowid(db)
-        guard let intervalId = startInterval(taskId: taskId, reason: reason) else { return nil }
+        if let s = status { sqlite3_bind_text(t, 6, s, -1, SQLITE_TRANSIENT) } else { sqlite3_bind_null(t, 6) }
+        guard sqlite3_step(t) == SQLITE_DONE else { return nil }
+        return sqlite3_last_insert_rowid(db)
+    }
+
+    func startTask(reason: String, estimateSeconds: Int, focus: String,
+                   parentTaskId: Int64? = nil) -> (taskId: Int64, intervalId: Int64)? {
+        guard let taskId = insertTask(focus: focus, estimateSeconds: estimateSeconds, parentTaskId: parentTaskId),
+              let intervalId = startInterval(taskId: taskId, reason: reason) else { return nil }
         return (taskId, intervalId)
     }
 
@@ -722,16 +731,9 @@ final class DB {
         if let t = taskId {
             tid = t
         } else {
-            var t: OpaquePointer?
-            guard sqlite3_prepare_v2(db, "INSERT INTO tasks (created_at, focus, estimate_seconds, original_estimate_seconds, status) VALUES (?,?,?,?, 'queued');", -1, &t, nil) == SQLITE_OK else { return nil }
-            sqlite3_bind_text(t, 1, isoNow(), -1, SQLITE_TRANSIENT)
-            sqlite3_bind_text(t, 2, focus, -1, SQLITE_TRANSIENT)
-            sqlite3_bind_int(t, 3, Int32(estimateSeconds))
-            sqlite3_bind_int(t, 4, Int32(estimateSeconds))   // original == working at creation
-            let done = sqlite3_step(t) == SQLITE_DONE
-            sqlite3_finalize(t)
-            guard done else { return nil }
-            tid = sqlite3_last_insert_rowid(db)
+            // No existing task → mint a never-started `queued` one.
+            guard let minted = insertTask(focus: focus, estimateSeconds: estimateSeconds, status: "queued") else { return nil }
+            tid = minted
         }
         let pos = front ? "(SELECT COALESCE(MIN(position), 0) - 1 FROM queue)"
                         : "(SELECT COALESCE(MAX(position), 0) + 1 FROM queue)"
