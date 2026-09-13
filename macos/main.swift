@@ -652,9 +652,37 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     private var showIntervalsInTree = false               // nest each task's intervals as dim child rows
     private var queueWindow: NSWindow?
     private var queueTable: NSTableView?
+    private var queueFilterLabel: NSTextField?        // "Filter: work, urgent" in the See Queue top bar
+    private var queueFilterClearButton: NSButton?
     private var queueRows: [QueueItem] = []
     private var queueEstimates: [(start: Date, finish: Date)] = []
     private var queueTags: [Int64: [String]] = [:]       // task id → tag names (for the queue Tags column)
+
+    // Queue tag filter — a persisted set of tag names (case-insensitive). Empty = no filter.
+    // When non-empty, See Queue shows only items whose task has ≥1 of these tags, the
+    // next-task choice considers only those, and untagged items are ineligible. Edited from
+    // the See Queue window's filter control.
+    private var queueFilterTags: [String] {
+        get { (UserDefaults.standard.array(forKey: "queueFilterTags") as? [String]) ?? [] }
+        set { UserDefaults.standard.set(newValue, forKey: "queueFilterTags") }
+    }
+    private func queueFilterActive() -> Bool { !queueFilterTags.isEmpty }
+
+    /// Does this queue item match the active filter? Always true when no filter is set;
+    /// with a filter active, an untagged item (or one with none of the selected tags) is
+    /// ineligible.
+    private func matchesQueueFilter(_ item: QueueItem, tagsByTask: [Int64: [String]]) -> Bool {
+        let filter = Set(queueFilterTags.map { $0.lowercased() })
+        if filter.isEmpty { return true }
+        guard let tid = item.taskId, let names = tagsByTask[tid] else { return false }
+        return names.contains { filter.contains($0.lowercased()) }
+    }
+
+    /// The front-most queue item eligible under the active filter, or nil.
+    private func nextEligibleQueueItem() -> QueueItem? {
+        let byTask = db.tagNamesByTask()
+        return db.queueItems().first { matchesQueueFilter($0, tagsByTask: byTask) }
+    }
     private lazy var alertIcon = emojiImage("🎯", size: 256)
 
     // NSAlert's default icon is the (missing) app icon; force 🎯 on every modal.
@@ -821,7 +849,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         NSApp.activate(ignoringOtherApps: true)
         while true {
             nextFocusNeedsRerender = false   // fresh each render; Settings sets it to loop back
-            if let next = db.frontOfQueue() {
+            if let next = nextEligibleQueueItem() {   // front-most item passing the tag filter
                 switch confirmQueued(next) {
                 case .started, .closed: return
                 case .retry: continue   // includes "Settings changed → rebuild"
@@ -1422,13 +1450,15 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             return false
         }
         // Queue right-click move items: enable based on the clicked row's position.
+        // Reordering is disabled while a tag filter is active — "move" is ambiguous across
+        // hidden rows. (Strict mode already froze these; queueEditActions covers that.)
         if menuItem.action == #selector(moveQueueItemUp) || menuItem.action == #selector(moveQueueItemToTop) {
             let r = queueTable?.clickedRow ?? -1
-            return r > 0
+            return r > 0 && !queueFilterActive()
         }
         if menuItem.action == #selector(moveQueueItemDown) || menuItem.action == #selector(moveQueueItemToBottom) {
             let r = queueTable?.clickedRow ?? -1
-            return r >= 0 && r < queueRows.count - 1
+            return r >= 0 && r < queueRows.count - 1 && !queueFilterActive()
         }
         if menuItem.action == #selector(deleteClickedQueueItem) {
             let r = queueTable?.clickedRow ?? -1
@@ -1644,7 +1674,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     /// with the same Est. start/finish schedule. Returns the one the user clicks,
     /// or nil if they cancel.
     private func pickFromQueue(filter: ((QueueItem) -> Bool)? = nil, showParentChain: Bool = true) -> QueueItem? {
-        let items = filter.map { f in db.queueItems().filter(f) } ?? db.queueItems()
+        // Default: honor the active queue tag filter (only eligible items are pickable).
+        // A caller can pass its own predicate (e.g. subtask siblings) to override.
+        let byTask = db.tagNamesByTask()
+        let predicate = filter ?? { self.matchesQueueFilter($0, tagsByTask: byTask) }
+        let items = db.queueItems().filter(predicate)
         guard !items.isEmpty else { return nil }
 
         // Same estimate chain as the queue window: from the current deadline if a
@@ -2447,8 +2481,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
 
     // Reload queue rows and recompute the estimated schedule (front to back).
     private func reloadQueueData() {
-        queueRows = db.queueItems()
         queueTags = db.tagNamesByTask()
+        // Apply the active tag filter to what's shown (and thus what reorder/remove act on).
+        queueRows = db.queueItems().filter { matchesQueueFilter($0, tagsByTask: queueTags) }
         // Start from when the current session finishes (its deadline, if one is
         // running and still ahead), else now, then chain each queued item's duration.
         var cursor = Date()
@@ -2484,8 +2519,27 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             hint.frame = NSRect(x: 10, y: 3, width: container.bounds.width - 20, height: hintH - 4)
             hint.autoresizingMask = [.width, .maxYMargin]
 
+            // Top bar: tag filter control.
+            let topBarH: CGFloat = 34
+            let filterButton = NSButton(title: "Filter by tags…", target: self, action: #selector(editQueueFilter))
+            filterButton.bezelStyle = .rounded
+            filterButton.frame = NSRect(x: 10, y: container.bounds.height - topBarH + 5, width: 140, height: 24)
+            filterButton.autoresizingMask = [.minYMargin]
+            let filterLabel = NSTextField(labelWithString: "")
+            filterLabel.font = NSFont.systemFont(ofSize: 11)
+            filterLabel.textColor = .secondaryLabelColor
+            filterLabel.lineBreakMode = .byTruncatingTail
+            filterLabel.frame = NSRect(x: 160, y: container.bounds.height - topBarH + 8, width: container.bounds.width - 160 - 120, height: 18)
+            filterLabel.autoresizingMask = [.width, .minYMargin]
+            let clearButton = NSButton(title: "Clear", target: self, action: #selector(clearQueueFilter))
+            clearButton.bezelStyle = .rounded
+            clearButton.frame = NSRect(x: container.bounds.width - 90, y: container.bounds.height - topBarH + 5, width: 80, height: 24)
+            clearButton.autoresizingMask = [.minXMargin, .minYMargin]
+            queueFilterLabel = filterLabel
+            queueFilterClearButton = clearButton
+
             let scroll = NSScrollView(frame: NSRect(x: 0, y: hintH, width: container.bounds.width,
-                                                    height: container.bounds.height - hintH))
+                                                    height: container.bounds.height - hintH - topBarH))
             scroll.autoresizingMask = [.width, .height]
             scroll.hasVerticalScroller = true
             scroll.hasHorizontalScroller = true   // long "Parent › Subtask" chains can scroll
@@ -2540,15 +2594,84 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             scroll.documentView = table
             container.addSubview(scroll)
             container.addSubview(hint)
+            container.addSubview(filterButton)
+            container.addSubview(filterLabel)
+            container.addSubview(clearButton)
             window.contentView = container
 
             queueWindow = window
             queueTable = table
         }
 
+        updateQueueFilterUI()
         queueTable?.reloadData()
         NSApp.activate(ignoringOtherApps: true)
         queueWindow?.makeKeyAndOrderFront(nil)
+    }
+
+    /// Refresh the See Queue top bar to reflect the active filter.
+    private func updateQueueFilterUI() {
+        if queueFilterActive() {
+            queueFilterLabel?.stringValue = "Filter: \(queueFilterTags.joined(separator: ", "))  (showing \(queueRows.count) of \(db.queueCount()))"
+            queueFilterClearButton?.isHidden = false
+        } else {
+            queueFilterLabel?.stringValue = "No filter — showing all queued items."
+            queueFilterClearButton?.isHidden = true
+        }
+    }
+
+    // "Filter by tags…" — pick which tags the queue is filtered to (0 = no filter).
+    @objc func editQueueFilter() {
+        guard !showing else { return }
+        showing = true
+        defer { showing = false }
+        let tags = db.allTags().map { $0.name }
+        guard !tags.isEmpty else {
+            let alert = makeAlert()
+            alert.messageText = "No tags yet"
+            alert.informativeText = "Tag some tasks first (right-click a task → Edit tags…), then you can filter the queue by tag."
+            alert.addButton(withTitle: "OK")
+            alert.window.level = .floating
+            alert.window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+            _ = runFloatingAlert(alert)
+            return
+        }
+        let current = Set(queueFilterTags.map { $0.lowercased() })
+        // A checkbox per tag, in a scroll view (tags can be many).
+        let rowH: CGFloat = 22, viewW: CGFloat = 300
+        let inner = NSView(frame: NSRect(x: 0, y: 0, width: viewW, height: CGFloat(tags.count) * rowH))
+        var boxes: [NSButton] = []
+        for (i, name) in tags.enumerated() {
+            let cb = NSButton(checkboxWithTitle: name, target: nil, action: nil)
+            cb.frame = NSRect(x: 4, y: inner.frame.height - CGFloat(i + 1) * rowH, width: viewW - 8, height: rowH - 2)
+            cb.state = current.contains(name.lowercased()) ? .on : .off
+            inner.addSubview(cb); boxes.append(cb)
+        }
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: viewW, height: min(220, CGFloat(tags.count) * rowH)))
+        scroll.documentView = inner
+        scroll.hasVerticalScroller = true
+        scroll.borderType = .bezelBorder
+
+        let alert = makeAlert()
+        alert.messageText = "Filter queue by tags"
+        alert.informativeText = "Show only queued items with at least one checked tag. Check none to show everything."
+        alert.addButton(withTitle: "Apply")    // 0
+        alert.addButton(withTitle: "Cancel")   // 1
+        alert.accessoryView = scroll
+        alert.window.level = .floating
+        alert.window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        guard runFloatingAlert(alert) == 0 else { return }
+        queueFilterTags = zip(tags, boxes).filter { $0.1.state == .on }.map { $0.0 }
+        reloadQueueData()
+        queueTable?.reloadData()
+        updateQueueFilterUI()
+    }
+
+    @objc func clearQueueFilter() {
+        queueFilterTags = []
+        reloadQueueData()
+        queueTable?.reloadData()
+        updateQueueFilterUI()
     }
 
     @objc func clearQueue() {
@@ -2680,7 +2803,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     /// if nothing moved — the keyboard path uses it to keep the selection with the item.
     @discardableResult
     private func moveQueueRow(at src: Int, _ destination: (Int) -> Int) -> Int? {
-        guard !strictModeEnabled, let table = queueTable else { return nil }
+        guard !strictModeEnabled, !queueFilterActive(), let table = queueTable else { return nil }
         guard src >= 0, src < queueRows.count else { return nil }
         let target = min(max(destination(src), 0), queueRows.count - 1)
         guard target != src else { return nil }
