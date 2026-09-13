@@ -647,12 +647,14 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     private var historyWindow: NSWindow?
     private var historyOutline: NSOutlineView?
     private var historyRows: [TaskHistoryRow] = []       // all tasks (flat), for building the tree
+    private var historyTags: [Int64: [String]] = [:]     // task id → its tag names (for the Tags column)
     private var historyNodes: [HistoryNode] = []          // root nodes shown in the outline
     private var showIntervalsInTree = false               // nest each task's intervals as dim child rows
     private var queueWindow: NSWindow?
     private var queueTable: NSTableView?
     private var queueRows: [QueueItem] = []
     private var queueEstimates: [(start: Date, finish: Date)] = []
+    private var queueTags: [Int64: [String]] = [:]       // task id → tag names (for the queue Tags column)
     private lazy var alertIcon = emojiImage("🎯", size: 256)
 
     // NSAlert's default icon is the (missing) app icon; force 🎯 on every modal.
@@ -1301,8 +1303,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         #selector(stopWorking), #selector(switchToSubtask), #selector(renameTask), #selector(togglePause), #selector(preemptNextFocus),
         #selector(clearQueue), #selector(rateUnrated),   // showSettings handled explicitly (see validateMenuItem)
         #selector(deleteHistoryItems), #selector(abandonHistoryTask),
-        #selector(resumeHistoryTask), #selector(addHistoryTaskToQueue),
-        #selector(workOnQueueItemNow), #selector(deleteQueuedTaskPermanently),
+        #selector(resumeHistoryTask), #selector(addHistoryTaskToQueue), #selector(editHistoryTaskTags),
+        #selector(workOnQueueItemNow), #selector(deleteQueuedTaskPermanently), #selector(editQueueItemTags),
     ]
 
     // Per-row queue mutations (right-click / Delete key) — frozen in strict mode.
@@ -1366,6 +1368,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         }
         if menuItem.action == #selector(addHistoryTaskToQueue) {
             return !strictModeEnabled && historyTargetNodes().contains { $0.task != nil }
+        }
+        if menuItem.action == #selector(editHistoryTaskTags) {
+            return historyTargetNodes().compactMap { $0.task }.count == 1   // one task row (not an interval)
         }
         if menuItem.action == #selector(toggleShowPill) {
             menuItem.state = showPillEnabled ? .on : .off
@@ -1433,6 +1438,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         if menuItem.action == #selector(workOnQueueItemNow) {
             let r = queueTable?.clickedRow ?? -1
             return !strictModeEnabled && r >= 0 && r < queueRows.count
+        }
+        // "Edit tags…" (queue): any valid clicked row — allowed even in strict mode (tags
+        // don't affect queue order).
+        if menuItem.action == #selector(editQueueItemTags) {
+            let r = queueTable?.clickedRow ?? -1
+            return r >= 0 && r < queueRows.count
         }
         return true
     }
@@ -1943,6 +1954,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             let histMenu = NSMenu()
             histMenu.addItem(withTitle: "Resume task", action: #selector(resumeHistoryTask), keyEquivalent: "")
             histMenu.addItem(withTitle: "Add to queue", action: #selector(addHistoryTaskToQueue), keyEquivalent: "")
+            histMenu.addItem(withTitle: "Edit tags…", action: #selector(editHistoryTaskTags), keyEquivalent: "")
             histMenu.addItem(.separator())
             histMenu.addItem(withTitle: "Give up (abandon)", action: #selector(abandonHistoryTask), keyEquivalent: "")
             histMenu.addItem(withTitle: "Delete", action: #selector(deleteHistoryItems), keyEquivalent: "")
@@ -1971,6 +1983,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     /// Load the task rows, build the node tree, install columns, sort, refresh.
     private func reloadHistory() {
         historyRows = db.taskHistory()
+        historyTags = db.tagNamesByTask()
         configureHistoryColumns()
         // Default sort: Ended desc (most-recently-worked, with in-progress on top).
         let current = historyOutline?.sortDescriptors.first?.key
@@ -2008,7 +2021,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
 
     // Sort keys valid for the task columns.
     private func historyColumnKeys() -> Set<String> {
-        ["when", "ended", "min", "origmin", "ivs", "rating", "status", "focus", "note"]
+        ["when", "ended", "min", "origmin", "ivs", "rating", "status", "focus", "tags", "note"]
     }
 
     // Sort the tree: top-level tasks by the clicked column; a task's children
@@ -2059,6 +2072,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         case "rating":  return dir(a.rating ?? -1, b.rating ?? -1, ascending)
         case "status":  return dir(a.status ?? "", b.status ?? "", ascending)
         case "focus":   return dir(a.focus.lowercased(), b.focus.lowercased(), ascending)
+        case "tags":    return dir((historyTags[a.id] ?? []).joined(separator: ", ").lowercased(),
+                                    (historyTags[b.id] ?? []).joined(separator: ", ").lowercased(), ascending)
         case "note":    return dir(a.note ?? "", b.note ?? "", ascending)
         default:        return dir(a.id, b.id, ascending)
         }
@@ -2090,6 +2105,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         add("ivs", "Intervals", width: 70, min: 56, align: .right)
         add("rating", "Rating", width: 60, min: 50, align: .right)
         add("status", "Status", width: 95, min: 70)
+        add("tags", "Tags", width: 160, min: 80)
         add("note", "Note", width: 320, min: 100)
         outline.outlineTableColumn = first   // disclosure triangles + indentation live here
         outline.removeTableColumn(placeholder)   // now safe — no longer the outline column
@@ -2099,7 +2115,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     private func copyHistoryRows(_ indexes: IndexSet) {
         guard let outline = historyOutline, !indexes.isEmpty else { return }
         let nodes = indexes.compactMap { outline.item(atRow: $0) as? HistoryNode }
-        var lines = ["Started\tEnded\tActual (s)\tOrig est (s)\tIntervals\tRating\tStatus\tFocus\tNote"]
+        var lines = ["Started\tEnded\tActual (s)\tOrig est (s)\tIntervals\tRating\tStatus\tFocus\tTags\tNote"]
         for node in nodes {
             guard let r = node.task else { continue }
             let indent = String(repeating: "  ", count: outline.level(forItem: node))   // subtask depth
@@ -2112,6 +2128,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
                 r.rating.map { "\($0)" } ?? "",
                 historyStatusLabel(r, placeholder: ""),
                 indent + r.focus,
+                (historyTags[r.id] ?? []).joined(separator: ", "),
                 r.note ?? "",
             ]
             lines.append(fields.map(tsvClean).joined(separator: "\t"))
@@ -2221,6 +2238,20 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         queueWindow?.close()   // we're now working on it — close the queue
     }
 
+    // "Edit tags…" from See Queue: edit the clicked queue item's (task's) tags.
+    @objc func editQueueItemTags() {
+        let row = queueTable?.clickedRow ?? -1
+        guard !showing, row >= 0, row < queueRows.count else { return }
+        let item = queueRows[row]
+        guard let tid = item.taskId else { return }
+        showing = true
+        defer { showing = false }
+        if promptEditTags(taskId: tid, focus: item.focus) {
+            reloadQueueData()
+            queueTable?.reloadData()
+        }
+    }
+
     // "Add to queue" from See History: park the selected task(s) at the end of the queue
     // to work on later. Reopens completed ones (they become live pending tasks) and skips
     // any already queued, to avoid duplicates.
@@ -2237,6 +2268,37 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
                                taskId: t.id, front: false)
         }
         reloadHistory()
+    }
+
+    // "Edit tags…" from See History: edit the selected task's tags.
+    @objc func editHistoryTaskTags() {
+        guard !showing else { return }
+        let tasks = historyTargetNodes().compactMap { $0.task }
+        guard tasks.count == 1, let t = tasks.first else { return }
+        showing = true
+        defer { showing = false }
+        if promptEditTags(taskId: t.id, focus: t.focus) { reloadHistory() }
+    }
+
+    /// Shared "Edit tags…" prompt: a comma-separated field pre-filled with the task's
+    /// current tags. On Save, replaces the task's tags (empty clears them). Returns whether
+    /// it was applied (false on Cancel). Caller holds `showing` and refreshes its window.
+    @discardableResult
+    private func promptEditTags(taskId: Int64, focus: String) -> Bool {
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 320, height: 24))
+        field.stringValue = db.tags(forTask: taskId).map { $0.name }.joined(separator: ", ")
+        field.placeholderString = "comma-separated, e.g. work, urgent"
+        let alert = makeAlert()
+        alert.messageText = "Tags for \u{201C}\(focus)\u{201D}"
+        alert.informativeText = "Comma-separated tags. Leave empty to clear."
+        alert.addButton(withTitle: "Save")     // 0
+        alert.addButton(withTitle: "Cancel")   // 1
+        alert.accessoryView = field
+        alert.window.level = .floating
+        alert.window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        guard runFloatingAlert(alert, firstResponder: field) == 0 else { return false }
+        db.setTags(taskId: taskId, names: field.stringValue.split(separator: ",").map(String.init))
+        return true
     }
 
     // Delete the right-clicked (or selected) history sessions, after confirming.
@@ -2328,6 +2390,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     // Reload queue rows and recompute the estimated schedule (front to back).
     private func reloadQueueData() {
         queueRows = db.queueItems()
+        queueTags = db.tagNamesByTask()
         // Start from when the current session finishes (its deadline, if one is
         // running and still ahead), else now, then chain each queued item's duration.
         var cursor = Date()
@@ -2387,6 +2450,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             // Right-click a row to work on it now, re-order it within the queue, or remove it.
             let rowMenu = NSMenu()
             rowMenu.addItem(withTitle: "Work on now", action: #selector(workOnQueueItemNow), keyEquivalent: "")
+            rowMenu.addItem(withTitle: "Edit tags…", action: #selector(editQueueItemTags), keyEquivalent: "")
             rowMenu.addItem(.separator())
             rowMenu.addItem(withTitle: "Move up", action: #selector(moveQueueItemUp), keyEquivalent: "")
             rowMenu.addItem(withTitle: "Move down", action: #selector(moveQueueItemDown), keyEquivalent: "")
@@ -2412,7 +2476,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             addColumn("min", "Duration", width: 70, min: 56, align: .right)
             addColumn("start", "Est. start", width: 90, min: 70, align: .right)
             addColumn("finish", "Est. finish", width: 90, min: 70, align: .right)
-            addColumn("focus", "Focus (next up first)", width: 540, min: 260)
+            addColumn("focus", "Focus (next up first)", width: 400, min: 220)
+            addColumn("tags", "Tags", width: 160, min: 80)
 
             scroll.documentView = table
             container.addSubview(scroll)
@@ -2541,6 +2606,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         case "ivs":     return ("\(r.intervalCount)", .right)
         case "rating":  return (r.rating.map { "\($0)/10" } ?? "—", .right)
         case "status":  return (historyStatusLabel(r, placeholder: "—"), .left)
+        case "tags":    return ((historyTags[r.id] ?? []).joined(separator: ", "), .left)
         case "note":    return (r.note ?? "", .left)
         default:        return (r.focus, .left)
         }
@@ -2644,6 +2710,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         case "min":    text = mmss(q.seconds); align = .right
         case "start":  text = est.map { localClockFormatter.string(from: $0.start) } ?? ""; align = .right
         case "finish": text = est.map { localClockFormatter.string(from: $0.finish) } ?? ""; align = .right
+        case "tags":   text = q.taskId.flatMap { queueTags[$0] }?.joined(separator: ", ") ?? ""
         default:       text = queueDisplayName(q)
         }
         return historyCell(tableView, id: id, text: text, align: align)
