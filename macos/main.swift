@@ -166,6 +166,8 @@ final class MultiFocusPrompt: NSObject {
     private let titleText: String, infoText: String, confirmText: String
     private var window: NSWindow!
     private var infoLabel: NSTextField!
+    private var headerFocus: NSTextField!
+    private var headerMinutes: NSTextField!
     private var addButton: NSButton!
     private var submitButton: NSButton!
     private var cancelButton: NSButton!
@@ -173,7 +175,7 @@ final class MultiFocusPrompt: NSObject {
     private var result: [Entry]?
 
     private let width: CGFloat = 460, pad: CGFloat = 16, rowH: CGFloat = 30
-    private let infoH: CGFloat = 34, btnH: CGFloat = 28, gap: CGFloat = 10
+    private let infoH: CGFloat = 34, btnH: CGFloat = 28, gap: CGFloat = 10, headerH: CGFloat = 16
 
     init(title: String, info: String, confirm: String) {
         titleText = title; infoText = info; confirmText = confirm
@@ -191,6 +193,11 @@ final class MultiFocusPrompt: NSObject {
         infoLabel = NSTextField(wrappingLabelWithString: infoText)
         infoLabel.font = NSFont.systemFont(ofSize: 12)
         window.contentView!.addSubview(infoLabel)
+
+        headerFocus = columnHeader("Focus / task")
+        headerMinutes = columnHeader("Duration (min)")
+        window.contentView!.addSubview(headerFocus)
+        window.contentView!.addSubview(headerMinutes)
 
         addButton = NSButton(title: "+ Add another", target: self, action: #selector(addRowClicked))
         addButton.bezelStyle = .rounded
@@ -260,10 +267,21 @@ final class MultiFocusPrompt: NSObject {
 
     @objc private func cancel() { result = nil; NSApp.stopModal() }
 
+    // Column geometry, shared by the header labels and every row so they line up.
+    private let removeW: CGFloat = 26, minutesW: CGFloat = 56, fieldGap: CGFloat = 8
+    private func focusW(_ rowWidth: CGFloat) -> CGFloat { rowWidth - removeW - minutesW - 2 * fieldGap }
+
+    private func columnHeader(_ text: String) -> NSTextField {
+        let l = NSTextField(labelWithString: text)
+        l.font = NSFont.systemFont(ofSize: 10, weight: .medium)
+        l.textColor = .secondaryLabelColor
+        return l
+    }
+
     private func relayout() {
         let rowWidth = width - 2 * pad
         let n = CGFloat(rows.count)
-        let contentH = pad + infoH + gap + n * rowH + gap + btnH + gap + btnH + pad
+        let contentH = pad + infoH + gap + headerH + n * rowH + gap + btnH + gap + btnH + pad
 
         // Grow/shrink downward: keep the window's TOP edge fixed as rows are added/removed.
         let oldTop = window.frame.maxY
@@ -274,10 +292,15 @@ final class MultiFocusPrompt: NSObject {
             window.setFrameOrigin(origin)
         }
 
+        let fW = focusW(rowWidth)
         var topY = contentH - pad
         topY -= infoH
         infoLabel.frame = NSRect(x: pad, y: topY, width: rowWidth, height: infoH)
         topY -= gap
+        // Header labels, aligned to the row columns below.
+        topY -= headerH
+        headerFocus.frame = NSRect(x: pad, y: topY, width: fW, height: headerH)
+        headerMinutes.frame = NSRect(x: pad + fW + fieldGap, y: topY, width: minutesW + fieldGap + removeW, height: headerH)
         for row in rows {
             topY -= rowH
             row.frame = NSRect(x: pad, y: topY, width: rowWidth, height: rowH)
@@ -293,10 +316,9 @@ final class MultiFocusPrompt: NSObject {
     }
 
     private func layoutRow(_ row: RowView, rowWidth: CGFloat) {
-        let removeW: CGFloat = 26, minutesW: CGFloat = 56, fieldGap: CGFloat = 8
-        let focusW = rowWidth - removeW - minutesW - 2 * fieldGap
-        row.focus.frame = NSRect(x: 0, y: 3, width: focusW, height: 24)
-        row.minutes.frame = NSRect(x: focusW + fieldGap, y: 3, width: minutesW, height: 24)
+        let fW = focusW(rowWidth)
+        row.focus.frame = NSRect(x: 0, y: 3, width: fW, height: 24)
+        row.minutes.frame = NSRect(x: fW + fieldGap, y: 3, width: minutesW, height: 24)
         row.remove.frame = NSRect(x: rowWidth - removeW, y: 3, width: removeW, height: 24)
     }
 }
