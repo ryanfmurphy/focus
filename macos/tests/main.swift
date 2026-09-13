@@ -409,6 +409,49 @@ section("Original estimate is stamped at creation and never drifts (add-time gro
     eq(hist().originalEstimateSeconds ?? -1, 1500, "…but the original is frozen (calibration baseline)")
 }
 
+section("tags: upsert is case-insensitive & reused; task↔tag add/remove/set; delete cascades") {
+    let db = freshDB()
+    let (t1, _) = db.startTask(reason: "launch", estimateSeconds: 600, focus: "Task one")!
+    let (t2, _) = db.startTask(reason: "launch", estimateSeconds: 600, focus: "Task two")!
+
+    // upsert: same name (any case) → same tag id, one catalog row.
+    let work = db.upsertTag(name: "Work")!
+    eq(db.upsertTag(name: "work")!, work, "upsert is case-insensitive → same id")
+    eq(db.upsertTag(name: "  WORK ")!, work, "upsert trims + case-folds → same id")
+    ok(db.upsertTag(name: "   ") == nil, "blank tag name → nil")
+    eq(db.allTags().count, 1, "only one 'work' tag in the catalog")
+
+    // associate.
+    let urgent = db.upsertTag(name: "urgent")!
+    db.addTag(taskId: t1, tagId: work)
+    db.addTag(taskId: t1, tagId: urgent)
+    db.addTag(taskId: t1, tagId: work)   // dupe association → no-op
+    eq(db.tags(forTask: t1).map { $0.name }, ["urgent", "Work"], "t1 tags name-sorted, no dupes")
+    eq(db.tags(forTask: t2).count, 0, "t2 has no tags")
+
+    // remove.
+    db.removeTag(taskId: t1, tagId: urgent)
+    eq(db.tags(forTask: t1).map { $0.name }, ["Work"], "removing 'urgent' leaves 'work'")
+    eq(db.allTags().count, 2, "the tag catalog keeps 'urgent' after it's unused")
+
+    // setTags: replace from names (create new, drop missing, ignore blanks/dupes).
+    db.setTags(taskId: t2, names: ["home", "home", "  ", "Errands"])
+    eq(db.tags(forTask: t2).map { $0.name }, ["Errands", "home"], "setTags dedupes + ignores blanks")
+    db.setTags(taskId: t2, names: ["home"])
+    eq(db.tags(forTask: t2).map { $0.name }, ["home"], "setTags replaces the whole set")
+
+    // bulk map.
+    db.setTags(taskId: t1, names: ["work"])
+    let byTask = db.tagNamesByTask()
+    eq(byTask[t1] ?? [], ["Work"], "tagNamesByTask maps t1")
+    eq(byTask[t2] ?? [], ["home"], "tagNamesByTask maps t2")
+
+    // delete a task → its task_tags rows go, but the tags survive.
+    db.deleteTasks(ids: [t1])
+    eq(db.tags(forTask: t1).count, 0, "deleted task has no associations")
+    ok(db.allTags().contains { $0.name == "Work" }, "the 'work' tag survives its task's deletion")
+}
+
 // MARK: - Summary
 
 print("")

@@ -195,7 +195,30 @@ final class DB {
             rating       INTEGER                   -- optional per-interval rating (headline rating is on tasks)
         );
         """)
-        exec("PRAGMA user_version = 1;")   // schema baseline; future migrations guard on this
+        // --- tags (v2) ---------------------------------------------------------
+        // A tag is a small reusable label; tasks associate with 0+ tags via task_tags.
+        // Additive tables (IF NOT EXISTS) so an existing v1 DB gains them on next open.
+        // Tag names are unique case-insensitively (one shared "work" tag, reused).
+        exec("""
+        CREATE TABLE IF NOT EXISTS tags (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            name       TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+        """)
+        exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_tags_name_nocase ON tags(name COLLATE NOCASE);")
+        // The task↔tag join. A queue item's tags are just its task's tags. Deleting a task
+        // removes its rows here (in deleteTasks); the tags themselves stay in the catalog.
+        exec("""
+        CREATE TABLE IF NOT EXISTS task_tags (
+            task_id INTEGER NOT NULL,
+            tag_id  INTEGER NOT NULL,
+            PRIMARY KEY (task_id, tag_id)
+        );
+        """)
+        exec("CREATE INDEX IF NOT EXISTS idx_task_tags_tag ON task_tags(tag_id);")
+
+        exec("PRAGMA user_version = 2;")   // schema version; future migrations guard on this
     }
 
     private func exec(_ sql: String) { sqlite3_exec(db, sql, nil, nil, nil) }
@@ -678,7 +701,9 @@ final class DB {
     func deleteTasks(ids: [Int64]) {
         guard !ids.isEmpty else { return }
         let ph = ids.map { _ in "?" }.joined(separator: ",")
-        for sql in ["DELETE FROM intervals WHERE task_id IN (\(ph));", "DELETE FROM tasks WHERE id IN (\(ph));"] {
+        for sql in ["DELETE FROM intervals WHERE task_id IN (\(ph));",
+                    "DELETE FROM task_tags WHERE task_id IN (\(ph));",
+                    "DELETE FROM tasks WHERE id IN (\(ph));"] {
             var s: OpaquePointer?
             if sqlite3_prepare_v2(db, sql, -1, &s, nil) == SQLITE_OK {
                 for (i, id) in ids.enumerated() { sqlite3_bind_int64(s, Int32(i + 1), id) }
@@ -686,6 +711,98 @@ final class DB {
             }
             sqlite3_finalize(s)
         }
+    }
+
+    // --- tags -----------------------------------------------------------------
+
+    /// Create the tag `name` if it doesn't exist (case-insensitive), and return its id —
+    /// or the existing tag's id. Trims whitespace; returns nil for an empty name.
+    @discardableResult
+    func upsertTag(name: String) -> Int64? {
+        let n = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !n.isEmpty else { return nil }
+        // Insert; if a case-insensitive dupe exists the unique index makes it a no-op.
+        var ins: OpaquePointer?
+        if sqlite3_prepare_v2(db, "INSERT OR IGNORE INTO tags (name, created_at) VALUES (?, ?);", -1, &ins, nil) == SQLITE_OK {
+            sqlite3_bind_text(ins, 1, n, -1, SQLITE_TRANSIENT)
+            sqlite3_bind_text(ins, 2, isoNow(), -1, SQLITE_TRANSIENT)
+            sqlite3_step(ins)
+        }
+        sqlite3_finalize(ins)
+        // Read back the id (whether just-inserted or pre-existing), matched case-insensitively.
+        var sel: OpaquePointer?
+        defer { sqlite3_finalize(sel) }
+        guard sqlite3_prepare_v2(db, "SELECT id FROM tags WHERE name = ? COLLATE NOCASE LIMIT 1;", -1, &sel, nil) == SQLITE_OK else { return nil }
+        sqlite3_bind_text(sel, 1, n, -1, SQLITE_TRANSIENT)
+        return sqlite3_step(sel) == SQLITE_ROW ? sqlite3_column_int64(sel, 0) : nil
+    }
+
+    /// All tags in the catalog, name-sorted (case-insensitive).
+    func allTags() -> [Tag] {
+        var s: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "SELECT id, name, created_at FROM tags ORDER BY name COLLATE NOCASE;", -1, &s, nil) == SQLITE_OK else { return [] }
+        defer { sqlite3_finalize(s) }
+        var out: [Tag] = []
+        while sqlite3_step(s) == SQLITE_ROW {
+            out.append(Tag(id: sqlite3_column_int64(s, 0), name: colText(s, 1) ?? "", createdAt: colText(s, 2) ?? ""))
+        }
+        return out
+    }
+
+    /// The tags on one task, name-sorted.
+    func tags(forTask taskId: Int64) -> [Tag] {
+        let sql = "SELECT t.id, t.name, t.created_at FROM tags t JOIN task_tags tt ON tt.tag_id = t.id WHERE tt.task_id = ? ORDER BY t.name COLLATE NOCASE;"
+        var s: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &s, nil) == SQLITE_OK else { return [] }
+        defer { sqlite3_finalize(s) }
+        sqlite3_bind_int64(s, 1, taskId)
+        var out: [Tag] = []
+        while sqlite3_step(s) == SQLITE_ROW {
+            out.append(Tag(id: sqlite3_column_int64(s, 0), name: colText(s, 1) ?? "", createdAt: colText(s, 2) ?? ""))
+        }
+        return out
+    }
+
+    /// Tag names for EVERY task, as a map — one query, for populating the History/Queue
+    /// columns without an N+1 per-row lookup.
+    func tagNamesByTask() -> [Int64: [String]] {
+        let sql = "SELECT tt.task_id, t.name FROM task_tags tt JOIN tags t ON t.id = tt.tag_id ORDER BY t.name COLLATE NOCASE;"
+        var s: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &s, nil) == SQLITE_OK else { return [:] }
+        defer { sqlite3_finalize(s) }
+        var out: [Int64: [String]] = [:]
+        while sqlite3_step(s) == SQLITE_ROW {
+            out[sqlite3_column_int64(s, 0), default: []].append(colText(s, 1) ?? "")
+        }
+        return out
+    }
+
+    /// Associate an existing tag with a task (no-op if already associated).
+    func addTag(taskId: Int64, tagId: Int64) {
+        var s: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "INSERT OR IGNORE INTO task_tags (task_id, tag_id) VALUES (?, ?);", -1, &s, nil) == SQLITE_OK else { return }
+        defer { sqlite3_finalize(s) }
+        sqlite3_bind_int64(s, 1, taskId); sqlite3_bind_int64(s, 2, tagId); sqlite3_step(s)
+    }
+
+    /// Remove a tag from a task (the tag itself stays in the catalog).
+    func removeTag(taskId: Int64, tagId: Int64) {
+        var s: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "DELETE FROM task_tags WHERE task_id = ? AND tag_id = ?;", -1, &s, nil) == SQLITE_OK else { return }
+        defer { sqlite3_finalize(s) }
+        sqlite3_bind_int64(s, 1, taskId); sqlite3_bind_int64(s, 2, tagId); sqlite3_step(s)
+    }
+
+    /// Replace a task's tags from a list of names (create/reuse each, drop the rest) — the
+    /// "Edit tags…" comma-separated flow. Blank/duplicate names are ignored.
+    func setTags(taskId: Int64, names: [String]) {
+        let ids = Set(names.compactMap { upsertTag(name: $0) })
+        var del: OpaquePointer?
+        if sqlite3_prepare_v2(db, "DELETE FROM task_tags WHERE task_id = ?;", -1, &del, nil) == SQLITE_OK {
+            sqlite3_bind_int64(del, 1, taskId); sqlite3_step(del)
+        }
+        sqlite3_finalize(del)
+        for id in ids { addTag(taskId: taskId, tagId: id) }
     }
 
     /// Total number of tasks (for the history menu label).
@@ -808,6 +925,12 @@ struct QueueItem {
 
 // New model. `TaskRow` (not `Task`, to avoid shadowing Swift's concurrency type)
 // is the unit of identity/estimate/rating; `Interval` is one timed chunk of work.
+struct Tag {
+    let id: Int64
+    let name: String
+    let createdAt: String
+}
+
 struct TaskRow {
     let id: Int64
     let parentTaskId: Int64?
