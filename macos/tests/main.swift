@@ -446,6 +446,13 @@ section("tags: upsert is case-insensitive & reused; task↔tag add/remove/set; d
     eq(byTask[t1] ?? [], ["Work"], "tagNamesByTask maps t1")
     eq(byTask[t2] ?? [], ["home"], "tagNamesByTask maps t2")
 
+    // bulk addTags / removeTags (the multi-row Add/Remove flow).
+    db.addTags(taskId: t1, names: ["Blue", "green", "  "])   // blanks ignored
+    eq(db.tags(forTask: t1).map { $0.name }.sorted(), ["Blue", "Work", "green"], "addTags unions in new tags, keeps existing")
+    db.removeTags(taskId: t1, names: ["green", "nonexistent"])   // unknown name = no-op, no tag created
+    eq(db.tags(forTask: t1).map { $0.name }.sorted(), ["Blue", "Work"], "removeTags drops named tags; unknown is a no-op")
+    ok(!db.allTags().contains { $0.name.lowercased() == "nonexistent" }, "removeTags never creates a tag")
+
     // delete a task → its task_tags rows go, but the tags survive.
     db.deleteTasks(ids: [t1])
     eq(db.tags(forTask: t1).count, 0, "deleted task has no associations")

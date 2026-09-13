@@ -1370,7 +1370,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             return !strictModeEnabled && historyTargetNodes().contains { $0.task != nil }
         }
         if menuItem.action == #selector(editHistoryTaskTags) {
-            return historyTargetNodes().compactMap { $0.task }.count == 1   // one task row (not an interval)
+            return !historyTargetNodes().compactMap { $0.task }.isEmpty   // one or more task rows
         }
         if menuItem.action == #selector(toggleShowPill) {
             menuItem.state = showPillEnabled ? .on : .off
@@ -2238,17 +2238,32 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         queueWindow?.close()   // we're now working on it — close the queue
     }
 
-    // "Edit tags…" from See Queue: edit the clicked queue item's (task's) tags.
+    // Queue rows a right-click acts on: the whole selection if the clicked row is part of
+    // it, otherwise just the clicked row (matching See History's targeting).
+    private func queueTargetItems() -> [QueueItem] {
+        guard let table = queueTable else { return [] }
+        let clicked = table.clickedRow
+        let selected = table.selectedRowIndexes
+        let rows: IndexSet
+        if clicked >= 0 && selected.contains(clicked) { rows = selected }
+        else if clicked >= 0 { rows = IndexSet(integer: clicked) }
+        else { rows = selected }
+        return rows.compactMap { $0 < queueRows.count ? queueRows[$0] : nil }
+    }
+
+    // "Edit tags…" from See Queue: one row → replace its tags; multiple → bulk add/remove.
     @objc func editQueueItemTags() {
-        let row = queueTable?.clickedRow ?? -1
-        guard !showing, row >= 0, row < queueRows.count else { return }
-        let item = queueRows[row]
-        guard let tid = item.taskId else { return }
+        guard !showing else { return }
+        let items = queueTargetItems()
+        guard !items.isEmpty else { return }
         showing = true
         defer { showing = false }
-        if promptEditTags(taskId: tid, focus: item.focus) {
-            reloadQueueData()
-            queueTable?.reloadData()
+        func refresh() { reloadQueueData(); queueTable?.reloadData() }
+        if items.count == 1, let tid = items[0].taskId {
+            if promptEditTags(taskId: tid, focus: items[0].focus) { refresh() }
+        } else if let decision = promptBulkTags(count: items.count) {
+            applyBulkTags(decision, to: items.compactMap { $0.taskId })
+            refresh()
         }
     }
 
@@ -2274,10 +2289,15 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     @objc func editHistoryTaskTags() {
         guard !showing else { return }
         let tasks = historyTargetNodes().compactMap { $0.task }
-        guard tasks.count == 1, let t = tasks.first else { return }
+        guard !tasks.isEmpty else { return }
         showing = true
         defer { showing = false }
-        if promptEditTags(taskId: t.id, focus: t.focus) { reloadHistory() }
+        if tasks.count == 1 {
+            if promptEditTags(taskId: tasks[0].id, focus: tasks[0].focus) { reloadHistory() }
+        } else if let decision = promptBulkTags(count: tasks.count) {
+            applyBulkTags(decision, to: tasks.map { $0.id })
+            reloadHistory()
+        }
     }
 
     /// Shared "Edit tags…" prompt: a comma-separated field pre-filled with the task's
@@ -2299,6 +2319,44 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         guard runFloatingAlert(alert, firstResponder: field) == 0 else { return false }
         db.setTags(taskId: taskId, names: field.stringValue.split(separator: ",").map(String.init))
         return true
+    }
+
+    @objc private func radioNoop() {}   // shared action so a pair of radios group
+
+    /// Bulk "Edit tags…" prompt for a MULTI-row selection: an Add / Remove radio (Add is
+    /// the default) over an empty comma-separated field. Existing tags aren't shown (the
+    /// rows may differ). Returns (add, names), or nil if cancelled or the field is empty.
+    private func promptBulkTags(count: Int) -> (add: Bool, names: [String])? {
+        let addRadio = NSButton(radioButtonWithTitle: "Add tags", target: self, action: #selector(radioNoop))
+        let removeRadio = NSButton(radioButtonWithTitle: "Remove tags", target: self, action: #selector(radioNoop))
+        addRadio.state = .on   // default
+        addRadio.frame = NSRect(x: 0, y: 32, width: 140, height: 20)
+        removeRadio.frame = NSRect(x: 0, y: 8, width: 140, height: 20)
+        let field = NSTextField(frame: NSRect(x: 150, y: 8, width: 190, height: 24))
+        field.placeholderString = "comma-separated"
+        let accessory = NSView(frame: NSRect(x: 0, y: 0, width: 340, height: 56))
+        accessory.addSubview(addRadio); accessory.addSubview(removeRadio); accessory.addSubview(field)
+
+        let alert = makeAlert()
+        alert.messageText = "Edit tags — \(count) tasks"
+        alert.informativeText = "Add or remove these tags on all \(count) selected tasks."
+        alert.addButton(withTitle: "Apply")    // 0
+        alert.addButton(withTitle: "Cancel")   // 1
+        alert.accessoryView = accessory
+        alert.window.level = .floating
+        alert.window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        guard runFloatingAlert(alert, firstResponder: field) == 0 else { return nil }
+        let names = field.stringValue.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        guard !names.isEmpty else { return nil }
+        return (addRadio.state == .on, names)
+    }
+
+    /// Apply a bulk add/remove to a set of task ids.
+    private func applyBulkTags(_ decision: (add: Bool, names: [String]), to taskIds: [Int64]) {
+        for tid in taskIds {
+            if decision.add { db.addTags(taskId: tid, names: decision.names) }
+            else { db.removeTags(taskId: tid, names: decision.names) }
+        }
     }
 
     // Delete the right-clicked (or selected) history sessions, after confirming.

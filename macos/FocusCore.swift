@@ -793,6 +793,27 @@ final class DB {
         sqlite3_bind_int64(s, 1, taskId); sqlite3_bind_int64(s, 2, tagId); sqlite3_step(s)
     }
 
+    /// Add tags to a task by name (create/reuse each) — the bulk "Add tags" flow. Keeps the
+    /// task's existing tags; blank names are ignored.
+    func addTags(taskId: Int64, names: [String]) {
+        for n in names { if let id = upsertTag(name: n) { addTag(taskId: taskId, tagId: id) } }
+    }
+
+    /// Remove tags from a task by name — the bulk "Remove tags" flow. Only removes tags that
+    /// already exist (never creates one); a name not in the catalog is a no-op.
+    func removeTags(taskId: Int64, names: [String]) {
+        for n in names {
+            let t = n.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !t.isEmpty else { continue }
+            var s: OpaquePointer?
+            if sqlite3_prepare_v2(db, "SELECT id FROM tags WHERE name = ? COLLATE NOCASE LIMIT 1;", -1, &s, nil) == SQLITE_OK {
+                sqlite3_bind_text(s, 1, t, -1, SQLITE_TRANSIENT)
+                if sqlite3_step(s) == SQLITE_ROW { removeTag(taskId: taskId, tagId: sqlite3_column_int64(s, 0)) }
+            }
+            sqlite3_finalize(s)
+        }
+    }
+
     /// Replace a task's tags from a list of names (create/reuse each, drop the rest) — the
     /// "Edit tags…" comma-separated flow. Blank/duplicate names are ignored.
     func setTags(taskId: Int64, names: [String]) {
