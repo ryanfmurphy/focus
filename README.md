@@ -35,37 +35,25 @@ There's also an early **iPhone** port (SwiftUI + Live Activity) scaffolded under
 - **History & review** — browse every past session (and the pending queue) in
   native table windows; batch-rate any sessions whose rating you deferred.
 
-## Requirements
-
-- macOS (developed on Ventura 13.x).
-- Xcode **Command Line Tools** (`xcode-select --install`) — provides `swiftc`.
-  No full Xcode needed.
-
 ## Install
+
+Needs macOS + the Xcode **Command Line Tools** (`xcode-select --install`, for `swiftc` —
+no full Xcode). Then:
 
 ```sh
 cd macos
 ./install.sh
 ```
 
-This compiles `main.swift` + `FocusCore.swift` to `macos/focus`, copies the LaunchAgent to
-`~/Library/LaunchAgents/com.murftown.focus.plist`, and (re)loads it. The agent
-has `RunAtLoad` + a conditional `KeepAlive`, so it starts at login and relaunches
-if it *crashes* — but a clean quit (Cmd-Q) stays closed (see
-[Quitting & reopening](#quitting--reopening)). The focus prompt appears
-immediately (launching counts as a return).
+This compiles `main.swift` + `FocusCore.swift` to `macos/focus`, installs the LaunchAgent
+to `~/Library/LaunchAgents/com.murftown.focus.plist`, and (re)loads it — so it starts at
+login and relaunches on a crash, but a clean quit (Cmd-Q) stays closed (see
+[Quitting & reopening](#quitting--reopening)). Re-run `./install.sh` to update after
+editing the source; `./uninstall.sh` removes the agent (your `~/focus/` data is left
+untouched).
 
-To update after editing `main.swift`, just re-run `./install.sh` — it kills the
-old instance and loads the rebuilt binary cleanly.
-
-## Uninstall
-
-```sh
-cd macos
-./uninstall.sh
-```
-
-Stops and unloads the agent. Your data in `~/focus/` is left untouched.
+**Full instructions — requirements, a clickable launcher, Pushover notifications,
+updating, uninstalling, and troubleshooting — are in [INSTALL.md](INSTALL.md).**
 
 ## Quitting & reopening
 
@@ -88,22 +76,8 @@ entirely (this also works while a modal is up, since prompts are app-modal):
 launchctl bootout gui/$(id -u)/com.murftown.focus
 ```
 
-### A clickable launcher icon (Applications / Dock)
-
-The app itself is a menu-bar-only LaunchAgent binary (no Dock icon). To get a
-🎯 icon you can click to launch it — handy after a clean quit — build a small
-launcher bundle:
-
-```sh
-cd macos
-./make-app.sh                # builds ./Focus.app (drag it into /Applications)
-./make-app.sh /Applications  # …or build and install straight to /Applications
-```
-
-`Focus.app` doesn't run the app itself; clicking it just tells launchd to start
-the managed agent (so you never get a second instance — if it's already running,
-the click is a no-op). Drag it to the Dock to keep it one click away. Re-run
-`make-app.sh` if you ever want to regenerate it.
+> Want a clickable 🎯 launcher for the Dock/Applications? See
+> [INSTALL.md → A clickable launcher](INSTALL.md#4-a-clickable-launcher-optional).
 
 ## Menu reference
 
