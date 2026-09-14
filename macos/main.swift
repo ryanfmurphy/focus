@@ -1450,15 +1450,15 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             return false
         }
         // Queue right-click move items: enable based on the clicked row's position.
-        // Reordering is disabled while a tag filter is active — "move" is ambiguous across
-        // hidden rows. (Strict mode already froze these; queueEditActions covers that.)
+        // Reordering works within the filtered view too (moves relative to visible rows,
+        // leaving hidden ones in place). Strict mode still freezes it (queueEditActions).
         if menuItem.action == #selector(moveQueueItemUp) || menuItem.action == #selector(moveQueueItemToTop) {
             let r = queueTable?.clickedRow ?? -1
-            return r > 0 && !queueFilterActive()
+            return r > 0
         }
         if menuItem.action == #selector(moveQueueItemDown) || menuItem.action == #selector(moveQueueItemToBottom) {
             let r = queueTable?.clickedRow ?? -1
-            return r >= 0 && r < queueRows.count - 1 && !queueFilterActive()
+            return r >= 0 && r < queueRows.count - 1
         }
         if menuItem.action == #selector(deleteClickedQueueItem) {
             let r = queueTable?.clickedRow ?? -1
@@ -2803,17 +2803,33 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     /// if nothing moved — the keyboard path uses it to keep the selection with the item.
     @discardableResult
     private func moveQueueRow(at src: Int, _ destination: (Int) -> Int) -> Int? {
-        guard !strictModeEnabled, !queueFilterActive(), let table = queueTable else { return nil }
+        guard !strictModeEnabled, let table = queueTable else { return nil }
         guard src >= 0, src < queueRows.count else { return nil }
-        let target = min(max(destination(src), 0), queueRows.count - 1)
+        let target = min(max(destination(src), 0), queueRows.count - 1)   // index in the VISIBLE list
         guard target != src else { return nil }
-        var ids = queueRows.map { $0.id }
-        let moved = ids.remove(at: src)
-        ids.insert(moved, at: target)
-        db.reorderQueue(ids: ids)
+        let moved = queueRows[src]
+
+        // Splice within the FULL queue so hidden (filtered-out) items keep their places.
+        // `queueRows` is the visible list, so move relative to the visible neighbor. With no
+        // filter active, queueRows == the full queue and this reduces to a plain move.
+        var full = db.queueItems().map { $0.id }
+        guard let fullMovedIdx = full.firstIndex(of: moved.id) else { return nil }
+        full.remove(at: fullMovedIdx)
+        let insertIdx: Int
+        if target <= 0 {
+            insertIdx = 0                                              // to the front
+        } else if target >= queueRows.count - 1 {
+            insertIdx = full.count                                    // to the back
+        } else if target < src {
+            insertIdx = full.firstIndex(of: queueRows[target].id) ?? 0            // just before that visible item
+        } else {
+            insertIdx = full.firstIndex(of: queueRows[target].id).map { $0 + 1 } ?? full.count  // just after it
+        }
+        full.insert(moved.id, at: min(insertIdx, full.count))
+        db.reorderQueue(ids: full)
         reloadQueueData()
         table.reloadData()
-        return target
+        return queueRows.firstIndex(where: { $0.id == moved.id })     // new visible index of the moved item
     }
 
     // Move the SELECTED queue row by one (⌘↑ / ⌘↓), keeping it selected so you can chain
