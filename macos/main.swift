@@ -319,9 +319,12 @@ final class MultiFocusPrompt: NSObject {
         topY -= gap
         topY -= btnH
         addButton.frame = NSRect(x: pad, y: topY, width: 150, height: btnH)
-        // Submit / Cancel pinned to the bottom-right.
-        submitButton.frame = NSRect(x: width - pad - 100, y: pad, width: 100, height: btnH)
-        cancelButton.frame = NSRect(x: width - pad - 100 - 8 - 90, y: pad, width: 90, height: btnH)
+        // Submit / Cancel pinned to the bottom-right, sized to fit their titles.
+        submitButton.sizeToFit(); cancelButton.sizeToFit()
+        let submitW = max(100, submitButton.frame.width + 20)
+        let cancelW = max(80, cancelButton.frame.width + 20)
+        submitButton.frame = NSRect(x: width - pad - submitW, y: pad, width: submitW, height: btnH)
+        cancelButton.frame = NSRect(x: width - pad - submitW - 8 - cancelW, y: pad, width: cancelW, height: btnH)
     }
 
     private func layoutRow(_ row: RowView, rowWidth: CGFloat) {
