@@ -1064,7 +1064,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             if !applySpentDelta(seconds) { showSpentFloorError() }
         case .setSpent:
             // Set the total spent directly to the target (re-syncs both spent clocks).
-            if !setSpentTo(seconds) { showSpentFloorError() }
+            if !setSpentTo(seconds) { showSpentFloorError(setMode: true) }
         }
     }
 
@@ -1177,13 +1177,17 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
 
     /// Explain why a spent-time reduction was rejected (would push spent below 0 / below the
     /// time already logged in this task's earlier sessions).
-    private func showSpentFloorError() {
+    private func showSpentFloorError(setMode: Bool = false) {
         let floor = spentBefore ?? 0
+        // Advise per mode: "set" wants a minimum value; subtract wants a smaller reduction.
+        let advice = setMode
+            ? (floor > 0 ? "Enter a value of at least \(mmss(floor))." : "Enter 0 or more.")
+            : "Enter a smaller reduction."
         let alert = makeAlert()
         alert.messageText = "Can't reduce time spent that far"
-        alert.informativeText = floor > 0
-            ? "Time spent can't go below the \(mmss(floor)) already recorded in earlier sessions of this task. Enter a smaller reduction."
-            : "Time spent can't go below zero. Enter a smaller reduction."
+        alert.informativeText = (floor > 0
+            ? "Time spent can't go below the \(mmss(floor)) already recorded in earlier sessions of this task. "
+            : "Time spent can't go below zero. ") + advice
         alert.addButton(withTitle: "OK")
         alert.window.level = .floating
         alert.window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
