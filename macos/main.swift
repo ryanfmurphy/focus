@@ -155,18 +155,21 @@ final class PillView: NSVisualEffectView {
 /// rows are skipped, and a half-filled/invalid row blocks submit. Cancel/Esc returns nil.
 /// Used only by the queue-add paths — the single-task start-now prompts keep askFocusAndMinutes.
 final class MultiFocusPrompt: NSObject {
-    struct Entry { let focus: String; let seconds: Int }
+    struct Entry { let focus: String; let seconds: Int; let tags: [String] }
 
     private final class RowView: NSView {
         let focus = NSTextField()
         let minutes = NSTextField()
+        let tags = NSTextField()
         let remove = NSButton(title: "\u{2212}", target: nil, action: nil)   // − (minus)
     }
 
     private let titleText: String, infoText: String, confirmText: String
+    private let defaultTags: String
     private var window: NSWindow!
     private var infoLabel: NSTextField!
     private var headerFocus: NSTextField!
+    private var headerTags: NSTextField!
     private var headerMinutes: NSTextField!
     private var addButton: NSButton!
     private var submitButton: NSButton!
@@ -174,11 +177,11 @@ final class MultiFocusPrompt: NSObject {
     private var rows: [RowView] = []
     private var result: [Entry]?
 
-    private let width: CGFloat = 460, pad: CGFloat = 16, rowH: CGFloat = 30
+    private let width: CGFloat = 620, pad: CGFloat = 16, rowH: CGFloat = 30
     private let infoH: CGFloat = 34, btnH: CGFloat = 28, gap: CGFloat = 10, headerH: CGFloat = 16
 
-    init(title: String, info: String, confirm: String) {
-        titleText = title; infoText = info; confirmText = confirm
+    init(title: String, info: String, confirm: String, defaultTags: String = "") {
+        titleText = title; infoText = info; confirmText = confirm; self.defaultTags = defaultTags
         super.init()
     }
 
@@ -195,8 +198,10 @@ final class MultiFocusPrompt: NSObject {
         window.contentView!.addSubview(infoLabel)
 
         headerFocus = columnHeader("Focus / task")
+        headerTags = columnHeader("Tags (comma-separated)")
         headerMinutes = columnHeader("Duration (min)")
         window.contentView!.addSubview(headerFocus)
+        window.contentView!.addSubview(headerTags)
         window.contentView!.addSubview(headerMinutes)
 
         addButton = NSButton(title: "+ Add another", target: self, action: #selector(addRowClicked))
@@ -228,10 +233,12 @@ final class MultiFocusPrompt: NSObject {
         let row = RowView()
         row.focus.placeholderString = "e.g. \(randomFocusSuggestion())"
         row.minutes.stringValue = String(defaultMinutes)
+        row.tags.stringValue = defaultTags
+        row.tags.placeholderString = "optional"
         row.remove.bezelStyle = .circular
         row.remove.target = self
         row.remove.action = #selector(removeRowClicked(_:))
-        row.addSubview(row.focus); row.addSubview(row.minutes); row.addSubview(row.remove)
+        row.addSubview(row.focus); row.addSubview(row.tags); row.addSubview(row.minutes); row.addSubview(row.remove)
         rows.append(row)
         window.contentView!.addSubview(row)
     }
@@ -259,7 +266,8 @@ final class MultiFocusPrompt: NSObject {
                 NSSound.beep()
                 return
             }
-            out.append(Entry(focus: f, seconds: s))
+            let tags = r.tags.stringValue.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+            out.append(Entry(focus: f, seconds: s, tags: tags))
         }
         result = out.isEmpty ? nil : out
         NSApp.stopModal()
@@ -268,8 +276,8 @@ final class MultiFocusPrompt: NSObject {
     @objc private func cancel() { result = nil; NSApp.stopModal() }
 
     // Column geometry, shared by the header labels and every row so they line up.
-    private let removeW: CGFloat = 26, minutesW: CGFloat = 56, fieldGap: CGFloat = 8
-    private func focusW(_ rowWidth: CGFloat) -> CGFloat { rowWidth - removeW - minutesW - 2 * fieldGap }
+    private let removeW: CGFloat = 26, minutesW: CGFloat = 56, tagsW: CGFloat = 160, fieldGap: CGFloat = 8
+    private func focusW(_ rowWidth: CGFloat) -> CGFloat { rowWidth - removeW - minutesW - tagsW - 3 * fieldGap }
 
     private func columnHeader(_ text: String) -> NSTextField {
         let l = NSTextField(labelWithString: text)
@@ -300,7 +308,8 @@ final class MultiFocusPrompt: NSObject {
         // Header labels, aligned to the row columns below.
         topY -= headerH
         headerFocus.frame = NSRect(x: pad, y: topY, width: fW, height: headerH)
-        headerMinutes.frame = NSRect(x: pad + fW + fieldGap, y: topY, width: minutesW + fieldGap + removeW, height: headerH)
+        headerTags.frame = NSRect(x: pad + fW + fieldGap, y: topY, width: tagsW, height: headerH)
+        headerMinutes.frame = NSRect(x: pad + fW + tagsW + 2 * fieldGap, y: topY, width: minutesW + fieldGap + removeW, height: headerH)
         for row in rows {
             topY -= rowH
             row.frame = NSRect(x: pad, y: topY, width: rowWidth, height: rowH)
@@ -318,7 +327,8 @@ final class MultiFocusPrompt: NSObject {
     private func layoutRow(_ row: RowView, rowWidth: CGFloat) {
         let fW = focusW(rowWidth)
         row.focus.frame = NSRect(x: 0, y: 3, width: fW, height: 24)
-        row.minutes.frame = NSRect(x: fW + fieldGap, y: 3, width: minutesW, height: 24)
+        row.tags.frame = NSRect(x: fW + fieldGap, y: 3, width: tagsW, height: 24)
+        row.minutes.frame = NSRect(x: fW + tagsW + 2 * fieldGap, y: 3, width: minutesW, height: 24)
         row.remove.frame = NSRect(x: rowWidth - removeW, y: 3, width: removeW, height: 24)
     }
 }
@@ -861,8 +871,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
                 confirm: "Start", cancellable: !strictModeEnabled)
             if nextFocusNeedsRerender { continue }   // Settings changed → rebuild the chooser
             switch entry {
-            case .entered(let focus, let seconds, let openStart):
+            case .entered(let focus, let seconds, let openStart, let tags):
                 beginSession(reason: startReason, seconds: seconds, focus: focus, openSecondsStart: openStart)
+                applyTags(tags, toNewTask: taskId)
                 return
             case .cancelled:
                 return   // Close → idle (only reachable when not strict)
@@ -912,6 +923,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         // untouched) and can pull from the queue. Idle "Set focus" stays mandatory.
         var newFocus = "", newSeconds = 0
         var newOpenStart: Int? = nil
+        var newTags: [String] = []
         var resumeId: Int64? = nil
         var subtaskMode = false
         prompt: while true {
@@ -921,8 +933,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             switch entry {
             case .cancelled:
                 return
-            case .entered(let f, let s, let o):
-                newFocus = f; newSeconds = s; newOpenStart = o          // fresh task
+            case .entered(let f, let s, let o, let tags):
+                newFocus = f; newSeconds = s; newOpenStart = o; newTags = tags   // fresh task
                 break prompt
             case .queuePick:
                 if subtaskMode, let pid = parentId {
@@ -1000,6 +1012,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             beginSession(reason: preempting ? "preempt" : "manual", seconds: newSeconds, focus: newFocus,
                          resumeTaskId: resumeId, openSecondsStart: newOpenStart)
         }
+        if resumeId == nil { applyTags(newTags, toNewTask: taskId) }   // tags for a freshly-typed focus
         if preempting { db.recordPreempt(preemptedSessionId: preemptedInterval, newSessionId: intervalId) }
     }
 
@@ -1013,11 +1026,14 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         let entries = MultiFocusPrompt(
             title: "Add to front",
             info: "These go to the front of the queue — before whatever's queued next. Click + to add another.",
-            confirm: "Add to front").run() ?? []
+            confirm: "Add to front",
+            defaultTags: defaultNewTaskTags().joined(separator: ", ")).run() ?? []
         guard !entries.isEmpty else { return }
         // Insert as a block preserving order: enqueue in reverse (each to the front) so
         // row 1 ends up frontmost.
-        for e in entries.reversed() { db.enqueueTask(focus: e.focus, estimateSeconds: e.seconds, front: true) }
+        for e in entries.reversed() {
+            applyTags(e.tags, toNewTask: db.enqueueTask(focus: e.focus, estimateSeconds: e.seconds, front: true))
+        }
         db.recordPreempt(preemptedSessionId: nil, newSessionId: nil)
     }
 
@@ -1522,8 +1538,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         let entries = MultiFocusPrompt(
             title: "Add to queue",
             info: "Queue one or more focuses to run after the current one. Click + to add another.",
-            confirm: "Add to queue").run() ?? []
-        for e in entries { db.enqueueTask(focus: e.focus, estimateSeconds: e.seconds) }
+            confirm: "Add to queue",
+            defaultTags: defaultNewTaskTags().joined(separator: ", ")).run() ?? []
+        for e in entries {
+            applyTags(e.tags, toNewTask: db.enqueueTask(focus: e.focus, estimateSeconds: e.seconds))
+        }
     }
 
     /// A top-level task just finished. Normally roll on to the next focus — but in
@@ -1662,11 +1681,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         if response == differentIndex {
             // Start a different focus: leave the queued item where it is (still the front,
             // since we never removed it) and run an ad-hoc focus right now instead.
-            if case let .entered(focus, seconds, openStart) = askFocusAndMinutes(
+            if case let .entered(focus, seconds, openStart, tags) = askFocusAndMinutes(
                 title: "Start a new focus",
                 info: "This runs now; the queued focus stays next in line.",
                 confirm: "Start", cancellable: true) {
                 beginSession(reason: "preempt", seconds: seconds, focus: focus, openSecondsStart: openStart)
+                applyTags(tags, toNewTask: taskId)
                 // Nothing was underway → preempted_session_id is NULL.
                 db.recordPreempt(preemptedSessionId: nil, newSessionId: intervalId)
                 return .started
@@ -1787,9 +1807,24 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     @objc private func cancelPickModal() { NSApp.stopModal() }
 
     private enum FocusEntry {
-        case entered(focus: String, seconds: Int, openSeconds: Int)
+        case entered(focus: String, seconds: Int, openSeconds: Int, tags: [String])
         case queuePick            // user chose to pick an existing queued focus instead
         case cancelled
+    }
+
+    /// Tags a freshly-created task should default to — the active queue filter's tags, so a
+    /// new task shows up under the filter you're working within. Empty when no filter.
+    private func defaultNewTaskTags() -> [String] { queueFilterTags }
+
+    /// Split a comma-separated tags field into trimmed, non-empty names.
+    private func parseTagList(_ s: String) -> [String] {
+        s.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+    }
+
+    /// Set a freshly-created task's tags (no-op for an empty list or nil id).
+    private func applyTags(_ names: [String], toNewTask taskId: Int64?) {
+        guard let tid = taskId, !names.isEmpty else { return }
+        db.setTags(taskId: tid, names: names)
     }
 
     /// Editable "focus + minutes" modal. The field takes whole minutes, or a
@@ -1801,8 +1836,14 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
                                     extraTop: NSView? = nil) -> FocusEntry {
         NSApp.activate(ignoringOtherApps: true)
 
-        let focusField = NSTextField(frame: NSRect(x: 0, y: 34, width: 320, height: 24))
+        let focusField = NSTextField(frame: NSRect(x: 0, y: 64, width: 320, height: 24))
         focusField.placeholderString = "e.g. \(randomFocusSuggestion())"
+
+        let tagsLabel = NSTextField(labelWithString: "Tags:")
+        tagsLabel.frame = NSRect(x: 0, y: 34, width: 44, height: 24)
+        let tagsField = NSTextField(frame: NSRect(x: 48, y: 34, width: 272, height: 24))
+        tagsField.placeholderString = "comma-separated (optional)"
+        tagsField.stringValue = defaultNewTaskTags().joined(separator: ", ")
 
         let minutesLabel = NSTextField(labelWithString: "Minutes:")
         minutesLabel.frame = NSRect(x: 0, y: 2, width: 60, height: 24)
@@ -1810,12 +1851,15 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         minutesField.stringValue = String(defaultMinutes)
 
         let elapsed = NSTextField(labelWithString: "")
-        elapsed.frame = NSRect(x: 0, y: 62, width: 320, height: 18)
+        elapsed.frame = NSRect(x: 0, y: 92, width: 320, height: 18)
         elapsed.font = NSFont.systemFont(ofSize: 11)
         elapsed.textColor = .secondaryLabelColor
 
-        let accessory = NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 84))
+        let baseH: CGFloat = 114
+        let accessory = NSView(frame: NSRect(x: 0, y: 0, width: 320, height: baseH))
         accessory.addSubview(focusField)
+        accessory.addSubview(tagsLabel)
+        accessory.addSubview(tagsField)
         accessory.addSubview(minutesLabel)
         accessory.addSubview(minutesField)
         accessory.addSubview(elapsed)
@@ -1824,9 +1868,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             // content — otherwise wide radio/checkbox labels clip at the panel edge.
             let w = max(accessory.frame.width, extra.frame.width)
             focusField.setFrameSize(NSSize(width: w, height: focusField.frame.height))
+            tagsField.setFrameSize(NSSize(width: w - 48, height: tagsField.frame.height))
             elapsed.setFrameSize(NSSize(width: w, height: elapsed.frame.height))
-            extra.setFrameOrigin(NSPoint(x: 0, y: 90))
-            accessory.setFrameSize(NSSize(width: w, height: 90 + extra.frame.height))
+            extra.setFrameOrigin(NSPoint(x: 0, y: baseH + 6))
+            accessory.setFrameSize(NSSize(width: w, height: baseH + 6 + extra.frame.height))
             accessory.addSubview(extra)
         }
 
@@ -1854,7 +1899,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
 
             let answer = focusField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
             let seconds = parseDurationSeconds(minutesField.stringValue) ?? 0
-            if !answer.isEmpty && seconds > 0 { return .entered(focus: answer, seconds: seconds, openSeconds: openSeconds()) }
+            if !answer.isEmpty && seconds > 0 {
+                return .entered(focus: answer, seconds: seconds, openSeconds: openSeconds(),
+                                tags: parseTagList(tagsField.stringValue))
+            }
             // otherwise invalid: loop and ask again
         }
     }
@@ -1922,7 +1970,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         guard !showing, let parent = taskId else { return }
         showing = true
         defer { showing = false }
-        guard case let .entered(focus, seconds, openStart) = askFocusAndMinutes(
+        guard case let .entered(focus, seconds, openStart, tags) = askFocusAndMinutes(
             title: "Add subtask",
             info: "Runs under the current task. If it's longer than the parent's remaining time, the parent is auto-extended so they finish together.",
             confirm: "Start", cancellable: true) else { return }
@@ -1932,6 +1980,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         _ = parent
         startSubtaskUnderLeaf(reason: "subtask", seconds: seconds, focus: focus,
                               resumeId: nil, openStart: openStart)
+        applyTags(tags, toNewTask: taskId)   // the new subtask is now the leaf
     }
 
     // Resume an existing set-aside subtask of the current task: pick one from the
