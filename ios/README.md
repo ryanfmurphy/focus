@@ -1,3 +1,7 @@
+# WARNING - not tested, likely not functional
+
+The MacOS version of this app is tested and confirmed working. But this iOS version is not.
+
 # Focus — iPhone app
 
 SwiftUI + SwiftData app with a Live Activity (Dynamic Island + Lock Screen pill)
