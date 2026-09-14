@@ -2863,13 +2863,42 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         return queueRows.firstIndex(where: { $0.id == moved.id })     // new visible index of the moved item
     }
 
-    // Move the SELECTED queue row by one (⌘↑ / ⌘↓), keeping it selected so you can chain
-    // moves. No-op in strict mode (the queue is frozen).
+    // Move the SELECTED queue row(s) by one (⌘↑ / ⌘↓) — all selected rows shift together as a
+    // block, keeping their relative order and staying selected so you can chain moves. No-op
+    // in strict mode (the queue is frozen).
     private func moveSelectedQueueRow(by delta: Int) {
-        guard let table = queueTable, table.selectedRow >= 0 else { return }
-        if let landed = moveQueueRow(at: table.selectedRow, { $0 + delta }) {
-            table.selectRowIndexes(IndexSet(integer: landed), byExtendingSelection: false)
+        guard !strictModeEnabled, let table = queueTable else { return }
+        let sel = table.selectedRowIndexes.filter { $0 >= 0 && $0 < queueRows.count }.sorted()
+        guard let first = sel.first, let last = sel.last else { return }
+        // The block is already against the edge it's moving toward → nothing to do.
+        if delta < 0 && first == 0 { return }
+        if delta > 0 && last == queueRows.count - 1 { return }
+
+        let movedIds = Set(sel.map { queueRows[$0].id })
+        // Standard block move: shift each selected item past the adjacent UNselected item,
+        // among the VISIBLE rows. Top-to-bottom for up, bottom-to-top for down.
+        var ids = queueRows.map { $0.id }
+        var selSet = Set(sel)
+        if delta < 0 {
+            for i in 1..<ids.count where selSet.contains(i) && !selSet.contains(i - 1) {
+                ids.swapAt(i, i - 1); selSet.remove(i); selSet.insert(i - 1)
+            }
+        } else {
+            for i in stride(from: ids.count - 2, through: 0, by: -1) where selSet.contains(i) && !selSet.contains(i + 1) {
+                ids.swapAt(i, i + 1); selSet.remove(i); selSet.insert(i + 1)
+            }
         }
+        // Slot the reordered visible ids back into the visible positions of the FULL queue,
+        // leaving hidden (filtered-out) items in place.
+        let visibleSet = Set(queueRows.map { $0.id })
+        var it = ids.makeIterator()
+        let newFull = db.queueItems().map { $0.id }.map { visibleSet.contains($0) ? (it.next() ?? $0) : $0 }
+        db.reorderQueue(ids: newFull)
+        reloadQueueData()
+        table.reloadData()
+        // Re-select the moved rows at their new positions.
+        let newSel = IndexSet(queueRows.indices.filter { movedIds.contains(queueRows[$0].id) })
+        table.selectRowIndexes(newSel, byExtendingSelection: false)
     }
 
     // Remove the right-clicked queue row (menu), or the selected row (Delete key).
