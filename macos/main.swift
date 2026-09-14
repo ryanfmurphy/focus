@@ -1063,9 +1063,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         case .spent:
             if !applySpentDelta(seconds) { showSpentFloorError() }
         case .setSpent:
-            // Move the current spent to the target: delta = target − (prior + this interval).
-            let currentSpent = (spentBefore ?? 0) + elapsedFocusSeconds()
-            if !applySpentDelta(seconds - currentSpent) { showSpentFloorError() }
+            // Set the total spent directly to the target (re-syncs both spent clocks).
+            if !setSpentTo(seconds) { showSpentFloorError() }
         }
     }
 
@@ -1141,6 +1140,37 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             }
         }
         deadline = (deadline ?? Date()).addingTimeInterval(Double(-applied))   // remaining −applied
+        tick()
+        return true
+    }
+
+    /// Set the task's TOTAL spent time to `target` seconds (absolute). Unlike applySpentDelta
+    /// (a relative shift), this re-derives BOTH the interval clock (`intervalStart`) and the
+    /// deadline directly from `target`, so the two never drift — the elapsed-based spent and
+    /// the deadline-based "estimate − remaining" both land exactly on `target`. Can't go
+    /// below `spentBefore` (time already logged in earlier closed intervals); returns false
+    /// then so the caller can explain.
+    private func setSpentTo(_ target: Int) -> Bool {
+        guard let iid = intervalId, intervalStart != nil else { return false }
+        let before = spentBefore ?? 0
+        guard target >= before else { return false }   // can't erase earlier sessions' time
+        let ref = pausedAt ?? Date()                    // "now", frozen while paused
+        let pausesClosed = db.totalPausedSeconds(sessionId: iid)
+        // Want elapsedFocusSeconds() == target − before, i.e. ref − start − pausesClosed ==
+        // target − before  →  start = ref − pausesClosed − (target − before).
+        let newStart = ref.addingTimeInterval(-Double(pausesClosed + (target - before)))
+        intervalStart = newStart
+        let iso = isoParser.string(from: newStart)
+        db.setIntervalStartedAt(id: iid, iso: iso)
+        if let tid = taskId {   // keep created_at ≤ the (possibly earlier) interval start
+            for t in [db.task(id: tid)].compactMap({ $0 }) + db.ancestorTasks(of: tid) {
+                if let created = t.createdAt.flatMap(isoParser.date(from:)), newStart < created {
+                    db.setTaskCreatedAt(id: t.id, iso: iso)
+                }
+            }
+        }
+        // remaining = estimate − target  →  deadline = ref + (estimate − target).
+        deadline = ref.addingTimeInterval(Double((estimateSeconds ?? 0) - target))
         tick()
         return true
     }
