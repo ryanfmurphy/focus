@@ -1653,7 +1653,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             return .retry   // cancelled the picker → back to the chooser
         }
 
-        // Start (0), or the auto-proceed countdown fired → start the front item.
+        // Start (0), or the auto-proceed countdown fired → start the front item. If it's a
+        // subtask whose completed parent(s) would be re-opened, confirm first.
+        if let tid = item.taskId, !confirmReopenAncestors(of: tid) { return .retry }
         db.removeFromQueue(id: item.id)
         let queuedOpenStart = Int(Date().timeIntervalSince(confirmOpenedAt).rounded())
         beginSession(reason: "queue", seconds: item.seconds, focus: item.focus,
@@ -1843,6 +1845,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             // = false) when attaching under an already-live parent (subtask switch).
             if rebuildAncestors {
                 ancestors = db.ancestorTasks(of: tid).reversed().map { a in
+                    // An ancestor whose clock is ticking again can't be "completed" — reopen
+                    // its status so a finished parent doesn't stay marked done while running.
+                    db.reopenTask(id: a.id)
                     let spent = db.spentSeconds(taskId: a.id)
                     let rem = max(1, (a.estimateSeconds ?? 0) - spent)
                     let start = Date()
@@ -2191,17 +2196,44 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         for a in db.ancestorTasks(of: tid) { db.reopenTask(id: a.id) }
     }
 
+    /// Ancestors of `tid` that are already finished — the ones that would be re-opened by
+    /// starting it (nearest first).
+    private func finishedAncestors(of tid: Int64) -> [TaskRow] {
+        db.ancestorTasks(of: tid).filter { $0.status != nil }
+    }
+
+    /// If starting `tid` would re-open finished parent task(s), confirm first. Returns true
+    /// to proceed (or when there's nothing to warn about), false if the user cancels.
+    private func confirmReopenAncestors(of tid: Int64) -> Bool {
+        let finished = finishedAncestors(of: tid)
+        guard !finished.isEmpty else { return true }
+        let plural = finished.count == 1 ? "" : "s"
+        let list = finished.map { "• \($0.focus)" }.joined(separator: "\n")
+        let alert = makeAlert()
+        alert.messageText = "Re-open completed parent task\(plural)?"
+        alert.informativeText = "Working on this subtask will also re-open the following completed task\(plural):\n\n\(list)"
+        alert.addButton(withTitle: "Re-open & continue")   // 0
+        alert.addButton(withTitle: "Cancel")               // 1
+        alert.window.level = .floating
+        alert.window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        return runFloatingAlert(alert) == 0
+    }
+
     /// Start working on `tid` right now: reopen its chain (so a completed task and its
     /// ancestors go active again), pull it from the queue if parked there, suspend any
     /// running stack to the front so it isn't orphaned, then begin the session — rebuilding
     /// the ancestor stack for a subtask. Shared by See History "Resume task" and See Queue
-    /// "Work on now". Callers hold `showing` and refresh their own window afterward.
-    private func startWorkingOn(taskId tid: Int64, focus: String) {
+    /// "Work on now". Warns first if a completed parent would be re-opened; returns false if
+    /// the user cancels. Callers hold `showing` and refresh their own window afterward.
+    @discardableResult
+    private func startWorkingOn(taskId tid: Int64, focus: String) -> Bool {
+        guard confirmReopenAncestors(of: tid) else { return false }
         reopenTaskChain(tid)
         if let qid = db.queueItems().first(where: { $0.taskId == tid })?.id { db.removeFromQueue(id: qid) }
         if taskId != nil { suspendStack(toFront: true) }
         beginSession(reason: "resume", seconds: max(1, db.remainingSeconds(taskId: tid)),
                      focus: focus, resumeTaskId: tid)
+        return true
     }
 
     // "Resume task" from See History: pick the selected task back up and start working on
@@ -2219,8 +2251,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             guard let added = askResumeAddTime(focus: t.focus) else { return }
             db.addTimeToTask(id: t.id, seconds: added)
         }
-        startWorkingOn(taskId: t.id, focus: t.focus)
-        reloadHistory()
+        if startWorkingOn(taskId: t.id, focus: t.focus) { reloadHistory() }
     }
 
     /// Ask how much time to add to a completed task's estimate before reopening it
@@ -2268,7 +2299,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             alert.window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
             guard runFloatingAlert(alert) == 0 else { return }
         }
-        startWorkingOn(taskId: tid, focus: item.focus)
+        guard startWorkingOn(taskId: tid, focus: item.focus) else { return }
         queueWindow?.close()   // we're now working on it — close the queue
     }
 
