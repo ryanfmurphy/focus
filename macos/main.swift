@@ -83,9 +83,11 @@ final class CopyableOutlineView: NSOutlineView {
 final class HistoryNode {
     let task: TaskHistoryRow?
     let interval: IntervalHistoryRow?
+    let pause: PauseHistoryRow?
     var children: [HistoryNode]
-    init(task: TaskHistoryRow, children: [HistoryNode] = []) { self.task = task; self.interval = nil; self.children = children }
-    init(interval: IntervalHistoryRow) { self.task = nil; self.interval = interval; self.children = [] }
+    init(task: TaskHistoryRow, children: [HistoryNode] = []) { self.task = task; self.interval = nil; self.pause = nil; self.children = children }
+    init(interval: IntervalHistoryRow) { self.task = nil; self.interval = interval; self.pause = nil; self.children = [] }
+    init(pause: PauseHistoryRow) { self.task = nil; self.interval = nil; self.pause = pause; self.children = [] }
 }
 
 // An NSTableView that reports Delete / ⌦ key presses (to remove the selected item)
@@ -663,6 +665,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     private var historyTags: [Int64: [String]] = [:]     // task id → its tag names (for the Tags column)
     private var historyNodes: [HistoryNode] = []          // root nodes shown in the outline
     private var showIntervalsInTree = false               // nest each task's intervals as dim child rows
+    private var showPausesInTree = false                  // nest each task's pauses as colored child rows
     private var queueWindow: NSWindow?
     private var queueTable: NSTableView?
     private var queueFilterLabel: NSTextField?        // "Filter: work, urgent" in the See Queue top bar
@@ -2129,6 +2132,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             ivCheck.state = showIntervalsInTree ? .on : .off
             ivCheck.frame = NSRect(x: 12, y: container.bounds.height - 30, width: 140, height: 20)
             ivCheck.autoresizingMask = [.minYMargin, .maxXMargin]   // pin to top-left
+            // Nest each task's pauses as colored child rows.
+            let pauseCheck = NSButton(checkboxWithTitle: "Show pauses", target: self,
+                                      action: #selector(historyPausesToggled(_:)))
+            pauseCheck.state = showPausesInTree ? .on : .off
+            pauseCheck.frame = NSRect(x: 156, y: container.bounds.height - 30, width: 130, height: 20)
+            pauseCheck.autoresizingMask = [.minYMargin, .maxXMargin]
 
             let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: container.bounds.width,
                                                     height: container.bounds.height - 40))
@@ -2164,6 +2173,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             scroll.documentView = outline
             container.addSubview(scroll)
             container.addSubview(ivCheck)
+            container.addSubview(pauseCheck)
             window.contentView = container
 
             historyWindow = window
@@ -2177,6 +2187,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
 
     @objc private func historyIntervalsToggled(_ sender: NSButton) {
         showIntervalsInTree = sender.state == .on
+        reloadHistory()
+    }
+
+    @objc private func historyPausesToggled(_ sender: NSButton) {
+        showPausesInTree = sender.state == .on
         reloadHistory()
     }
 
@@ -2209,6 +2224,14 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
                 for iv in ivsByTask[tid] ?? [] { node.children.append(HistoryNode(interval: iv)) }
             }
         }
+        // Optionally attach each task's own pauses as child rows.
+        if showPausesInTree {
+            var pausesByTask: [Int64: [PauseHistoryRow]] = [:]
+            for p in db.pauseHistory() { pausesByTask[p.taskId, default: []].append(p) }
+            for (tid, node) in byId {
+                for p in pausesByTask[tid] ?? [] { node.children.append(HistoryNode(pause: p)) }
+            }
+        }
         // Nest subtasks under their parent (alongside any interval children).
         var roots: [HistoryNode] = []
         for r in historyRows {
@@ -2233,9 +2256,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
     }
 
     private func sortHistoryNodes(_ nodes: inout [HistoryNode], key: String, ascending: Bool, top: Bool) {
-        if !top && showIntervalsInTree {
-            // Interleave subtasks + intervals chronologically, following the sort direction
-            // (descending default → newest at top, matching the Intervals-off column view).
+        if !top && (showIntervalsInTree || showPausesInTree) {
+            // Interleave subtasks + intervals + pauses chronologically, following the sort
+            // direction (descending default → newest at top, matching the column view).
             nodes.sort { ascending ? nodeStart($0) < nodeStart($1) : nodeStart($0) > nodeStart($1) }
         } else {
             nodes.sort { a, b in
@@ -2246,7 +2269,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         for node in nodes { sortHistoryNodes(&node.children, key: key, ascending: ascending, top: false) }
     }
 
-    private func nodeStart(_ n: HistoryNode) -> String { n.task?.startedAt ?? n.interval?.startedAt ?? "" }
+    private func nodeStart(_ n: HistoryNode) -> String { n.task?.startedAt ?? n.interval?.startedAt ?? n.pause?.startedAt ?? "" }
 
     func outlineView(_ outlineView: NSOutlineView, sortDescriptorsDidChange oldDescriptors: [NSSortDescriptor]) {
         applyHistorySort()
@@ -2980,7 +3003,34 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             let c = intervalInTaskColumns(iv, id)
             return historyCell(outlineView, id: id, text: c.0, align: c.1, color: .secondaryLabelColor)
         }
+        if let p = node.pause {
+            // A pause is a child row in a distinct color.
+            let c = pauseInTaskColumns(p, id)
+            return historyCell(outlineView, id: id, text: c.0, align: c.1, color: Self.pauseColor)
+        }
         return nil
+    }
+
+    // A pause rendered under its task: "Pause: M:SS — reason", start/end/duration.
+    private func pauseInTaskColumns(_ p: PauseHistoryRow, _ id: String) -> (String, NSTextAlignment) {
+        switch id {
+        case "focus":
+            let dur = p.seconds < 60 ? "\(p.seconds)s" : "\(Int((Double(p.seconds) / 60).rounded()))m"
+            let label = "Pause: \(dur)"
+            return (p.reason.map { "\(label) — \($0)" } ?? label, .left)
+        case "when":   return (whenLabel(p.startedAt), .left)
+        case "ended":  return (p.endedAt.map(whenLabel) ?? "—", .left)
+        case "min":    return (mmss(p.seconds), .right)
+        default:       return ("", .left)
+        }
+    }
+
+    // A calm amber for pause rows — distinct from the dim intervals and green completions,
+    // theme-aware for light/dark.
+    private static let pauseColor = NSColor(name: nil) { appearance in
+        appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            ? NSColor(red: 0.95, green: 0.75, blue: 0.35, alpha: 1)
+            : NSColor(red: 0.72, green: 0.47, blue: 0.06, alpha: 1)
     }
 
     // An interval rendered under its task (Tasks mode): reason label + start/end/

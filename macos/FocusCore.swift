@@ -720,6 +720,27 @@ final class DB {
         return rows
     }
 
+    /// Pauses joined to the task they occurred under (via the interval), newest first — for
+    /// the "Show pauses" history view. `endedAt` is nil for a pause still open.
+    func pauseHistory(limit: Int = 2000) -> [PauseHistoryRow] {
+        let sql = """
+        SELECT iv.task_id, p.started_at, p.ended_at, p.seconds, p.reason
+        FROM pauses p JOIN intervals iv ON iv.id = p.session_id
+        ORDER BY p.started_at DESC, p.id DESC LIMIT ?;
+        """
+        var s: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &s, nil) == SQLITE_OK else { return [] }
+        defer { sqlite3_finalize(s) }
+        sqlite3_bind_int(s, 1, Int32(limit))
+        var rows: [PauseHistoryRow] = []
+        while sqlite3_step(s) == SQLITE_ROW {
+            rows.append(PauseHistoryRow(
+                taskId: sqlite3_column_int64(s, 0), startedAt: colText(s, 1) ?? "",
+                endedAt: colText(s, 2), seconds: colInt(s, 3) ?? 0, reason: colText(s, 4)))
+        }
+        return rows
+    }
+
     /// Delete individual intervals by id (Intervals-view delete — e.g. a bogus
     /// left-running chunk). The parent task's rollup shrinks accordingly.
     func deleteIntervals(ids: [Int64]) {
@@ -1038,6 +1059,15 @@ struct IntervalHistoryRow {
     let seconds: Int
     let reason: String?
     let rating: Int?
+}
+
+// One pause, joined to its task, for the History "Show pauses" view.
+struct PauseHistoryRow {
+    let taskId: Int64
+    let startedAt: String
+    let endedAt: String?
+    let seconds: Int
+    let reason: String?
 }
 
 // One row per task for the See History view: the task plus its rolled-up totals.
