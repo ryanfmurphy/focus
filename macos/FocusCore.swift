@@ -288,6 +288,18 @@ final class DB {
         sqlite3_step(stmt)
     }
 
+    /// Attach a reason to a session's currently-open pause row (the one with NULL ended_at).
+    /// Used by "Ask for reason when pausing": the pause starts first (timer stops now), then
+    /// the reason is filled in on submit.
+    func setOpenPauseReason(sessionId: Int64, reason: String) {
+        var s: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "UPDATE pauses SET reason=? WHERE session_id=? AND ended_at IS NULL;", -1, &s, nil) == SQLITE_OK else { return }
+        defer { sqlite3_finalize(s) }
+        sqlite3_bind_text(s, 1, reason, -1, SQLITE_TRANSIENT)
+        sqlite3_bind_int64(s, 2, sessionId)
+        sqlite3_step(s)
+    }
+
     /// The start time of a session's currently-open pause (process quit mid-pause), or
     /// nil if it isn't paused. Lets restart preserve the paused state instead of
     /// auto-resuming (folding the downtime into pause via closeOpenPause).

@@ -1240,35 +1240,43 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         guard !showing, let id = intervalId else { return }
         if pausedAt != nil {
             resumeStackIfPaused()   // shift every level's deadline, close each pause row
-        } else {
-            guard allowPauseEnabled else { return }   // pausing disabled in Settings
-            // Optionally require a reason before pausing (cancel → don't pause).
-            var reason: String? = nil
-            if askPauseReasonEnabled {
-                showing = true
-                let r = promptPauseReason()
-                showing = false
-                guard let r = r else { return }   // cancelled → stay running
-                reason = r
-            }
-            // Pause: freeze the whole stack. tick() stops all countdowns while paused.
-            pausedAt = Date()
-            db.startPause(sessionId: id, at: pausedAt!, reason: reason)
-            for f in ancestors { db.startPause(sessionId: f.intervalId, at: pausedAt!, reason: reason) }
+            tick()
+            return
         }
-        tick()   // repaint the pill (running ⇄ paused)
+        guard allowPauseEnabled else { return }   // pausing disabled in Settings
+        // Pause IMMEDIATELY (freeze the whole stack) so the countdown stops right now — even
+        // before a reason is entered.
+        pausedAt = Date()
+        db.startPause(sessionId: id, at: pausedAt!)
+        for f in ancestors { db.startPause(sessionId: f.intervalId, at: pausedAt!) }
+        tick()   // repaint as paused now
+        // Then optionally attach a reason to the (already-running) pause. Cancel → resume,
+        // so a pause that STAYS paused always has a reason.
+        if askPauseReasonEnabled {
+            showing = true
+            let r = promptPauseReason()
+            showing = false
+            if let r = r {
+                db.setOpenPauseReason(sessionId: id, reason: r)
+                for f in ancestors { db.setOpenPauseReason(sessionId: f.intervalId, reason: r) }
+            } else {
+                resumeStackIfPaused()   // cancelled → resume (the brief pause is folded in)
+                tick()
+            }
+        }
     }
 
-    /// Ask for a required non-empty reason before pausing. Loops until non-empty; returns
-    /// nil if cancelled (don't pause).
+    /// Ask for a required non-empty reason for the pause that just started. Loops until
+    /// non-empty; returns nil if cancelled (caller resumes). The timer stays frozen the whole
+    /// time (the pause is already running).
     private func promptPauseReason() -> String? {
         let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 320, height: 24))
         field.placeholderString = "e.g. meeting, break, interrupted…"
         while true {
             let alert = makeAlert()
-            alert.messageText = "Pausing — what's the reason?"
-            alert.informativeText = "Enter why you're pausing."
-            alert.addButton(withTitle: "Pause")    // 0
+            alert.messageText = "Paused — what's the reason?"
+            alert.informativeText = "The timer's stopped. Enter why you paused, or Cancel to resume."
+            alert.addButton(withTitle: "Save")     // 0
             alert.addButton(withTitle: "Cancel")   // 1
             alert.accessoryView = field
             alert.window.level = .floating
