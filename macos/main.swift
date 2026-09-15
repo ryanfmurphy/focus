@@ -1489,7 +1489,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             return true
         }
         if menuItem.action == #selector(changeFocus) {
-            menuItem.title = currentFocus != nil ? "Switch focus now" : "Set focus"
+            menuItem.title = currentFocus != nil ? "Switch focus now" : "Next focus"
             // Strict mode: no switching away from the running task. (Idle "Set focus"
             // stays enabled — it routes through the strict, front-of-queue chooser.)
             if strictModeEnabled && currentFocus != nil { return false }
