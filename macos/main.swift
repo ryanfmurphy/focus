@@ -2638,15 +2638,20 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
 
             // Top bar: tag filter control.
             let topBarH: CGFloat = 34
+            let barY = container.bounds.height - topBarH + 5
+            let addToQueueButton = NSButton(title: "+ Add to queue", target: self, action: #selector(addToQueueFromWindow))
+            addToQueueButton.bezelStyle = .rounded
+            addToQueueButton.frame = NSRect(x: 10, y: barY, width: 130, height: 24)
+            addToQueueButton.autoresizingMask = [.minYMargin]
             let filterButton = NSButton(title: "Filter by tags…", target: self, action: #selector(editQueueFilter))
             filterButton.bezelStyle = .rounded
-            filterButton.frame = NSRect(x: 10, y: container.bounds.height - topBarH + 5, width: 140, height: 24)
+            filterButton.frame = NSRect(x: 150, y: barY, width: 140, height: 24)
             filterButton.autoresizingMask = [.minYMargin]
             let filterLabel = NSTextField(labelWithString: "")
             filterLabel.font = NSFont.systemFont(ofSize: 11)
             filterLabel.textColor = .secondaryLabelColor
             filterLabel.lineBreakMode = .byTruncatingTail
-            filterLabel.frame = NSRect(x: 160, y: container.bounds.height - topBarH + 8, width: container.bounds.width - 160 - 120, height: 18)
+            filterLabel.frame = NSRect(x: 300, y: container.bounds.height - topBarH + 8, width: container.bounds.width - 300 - 100, height: 18)
             filterLabel.autoresizingMask = [.width, .minYMargin]
             let clearButton = NSButton(title: "Clear", target: self, action: #selector(clearQueueFilter))
             clearButton.bezelStyle = .rounded
@@ -2711,6 +2716,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             scroll.documentView = table
             container.addSubview(scroll)
             container.addSubview(hint)
+            container.addSubview(addToQueueButton)
             container.addSubview(filterButton)
             container.addSubview(filterLabel)
             container.addSubview(clearButton)
@@ -2786,6 +2792,15 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
 
     @objc func clearQueueFilter() {
         queueFilterTags = []
+        reloadQueueData()
+        queueTable?.reloadData()
+        updateQueueFilterUI()
+    }
+
+    // See Queue "+ Add to queue" button — same as the menu's Add to queue, then refresh the
+    // open window (which the menu action doesn't do on its own).
+    @objc func addToQueueFromWindow() {
+        addNextFocus()
         reloadQueueData()
         queueTable?.reloadData()
         updateQueueFilterUI()
