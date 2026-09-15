@@ -288,6 +288,16 @@ final class DB {
         sqlite3_step(stmt)
     }
 
+    /// Move a session's currently-open pause row's start time — used by "Add/subtract time
+    /// from current pause" to lengthen/shorten the pause underway (persisted so a restart
+    /// mid-pause reconstructs the adjusted length).
+    func setOpenPauseStart(sessionId: Int64, iso: String) {
+        var s: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "UPDATE pauses SET started_at=? WHERE session_id=? AND ended_at IS NULL;", -1, &s, nil) == SQLITE_OK else { return }
+        defer { sqlite3_finalize(s) }
+        sqlite3_bind_text(s, 1, iso, -1, SQLITE_TRANSIENT); sqlite3_bind_int64(s, 2, sessionId); sqlite3_step(s)
+    }
+
     /// Attach a reason to a session's currently-open pause row (the one with NULL ended_at).
     /// Used by "Ask for reason when pausing": the pause starts first (timer stops now), then
     /// the reason is filled in on submit.

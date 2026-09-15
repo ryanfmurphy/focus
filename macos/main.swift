@@ -1061,7 +1061,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         tick()   // apply immediately: re-show or hide the pill
     }
 
-    private enum AddTimeMode { case complete, spent, setSpent }
+    private enum AddTimeMode { case complete, spent, setSpent, pause }
 
     // Wired only while the Add/remove-time prompt is up, so the radios can reset the field's
     // default (0 for "set spent to", 5 for the add/remove modes).
@@ -1084,6 +1084,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         case .setSpent:
             // Set the total spent directly to the target (re-syncs both spent clocks).
             if !setSpentTo(seconds) { showSpentFloorError(setMode: true) }
+        case .pause:
+            applyPauseDelta(seconds)   // lengthen/shorten the pause underway
         }
     }
 
@@ -1100,18 +1102,30 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         let toComplete = NSButton(radioButtonWithTitle: "Add/subtract time to complete", target: self, action: #selector(addTimeModeChanged(_:)))
         let alreadySpent = NSButton(radioButtonWithTitle: "Add/subtract time already spent", target: self, action: #selector(addTimeModeChanged(_:)))
         let setSpent = NSButton(radioButtonWithTitle: "Set time spent to", target: self, action: #selector(addTimeModeChanged(_:)))
-        toComplete.state = .on   // default
-        toComplete.frame = NSRect(x: 0, y: 88, width: 260, height: 20)
-        alreadySpent.frame = NSRect(x: 0, y: 64, width: 260, height: 20)
-        setSpent.frame = NSRect(x: 0, y: 40, width: 260, height: 20)
+        // Only offer the pause option while a pause is underway; it sits at the top.
+        let pauseRadio: NSButton? = pausedAt != nil
+            ? NSButton(radioButtonWithTitle: "Add/subtract time from current pause", target: self, action: #selector(addTimeModeChanged(_:)))
+            : nil
+
+        var ordered: [(button: NSButton, mode: AddTimeMode)] = []
+        if let p = pauseRadio { ordered.append((p, .pause)) }
+        ordered += [(toComplete, .complete), (alreadySpent, .spent), (setSpent, .setSpent)]
+        toComplete.state = .on   // default (not the pause option)
+
+        // Stack the radios above the field: bottom radio at y=40, up by 24 each.
+        let n = ordered.count
+        for (k, entry) in ordered.enumerated() {
+            entry.button.frame = NSRect(x: 0, y: 40 + CGFloat(n - 1 - k) * 24, width: 320, height: 20)
+        }
         let field = NSTextField(frame: NSRect(x: 0, y: 4, width: 200, height: 24))
         field.placeholderString = "e.g. 15, 1:30, or -5"
         field.stringValue = "5"   // default for the add/remove modes
         addTimeField = field
         addTimeSetSpentRadio = setSpent
         defer { addTimeField = nil; addTimeSetSpentRadio = nil }
-        let accessory = NSView(frame: NSRect(x: 0, y: 0, width: 260, height: 112))
-        for v in [toComplete, alreadySpent, setSpent, field] { accessory.addSubview(v) }
+        let accessory = NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 64 + CGFloat(n - 1) * 24))
+        ordered.forEach { accessory.addSubview($0.button) }
+        accessory.addSubview(field)
         while true {
             let alert = makeAlert()
             alert.messageText = "Add/remove time"
@@ -1123,8 +1137,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             alert.window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
             alert.window.initialFirstResponder = field
             if alert.runModal() == .alertSecondButtonReturn { return nil }
-            let mode: AddTimeMode = setSpent.state == .on ? .setSpent
-                                  : (alreadySpent.state == .on ? .spent : .complete)
+            let mode = ordered.first { $0.button.state == .on }?.mode ?? .complete
             if mode == .setSpent {
                 // Absolute total; 0 is valid, negative is not.
                 if let secs = parseDurationSeconds(field.stringValue), secs >= 0 { return (mode, secs) }
@@ -1190,6 +1203,29 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         }
         // remaining = estimate − target  →  deadline = ref + (estimate − target).
         deadline = ref.addingTimeInterval(Double((estimateSeconds ?? 0) - target))
+        tick()
+        return true
+    }
+
+    /// Add (or subtract) `delta` seconds to the CURRENT pause underway. Done by moving the
+    /// pause's start earlier/later; the whole stack's deadlines shift with it so the frozen
+    /// remaining time is unchanged (only the pause's recorded length — and thus the deadline
+    /// pushed forward on resume — changes). The pause can't be shortened below zero. Returns
+    /// false when not paused.
+    @discardableResult
+    private func applyPauseDelta(_ delta: Int) -> Bool {
+        guard let iid = intervalId, let start = pausedAt else { return false }
+        let newStart = min(Date(), start.addingTimeInterval(Double(-delta)))   // earlier for +, later for −
+        let applied = Int(start.timeIntervalSince(newStart).rounded())
+        guard applied != 0 else { return true }
+        pausedAt = newStart
+        // Keep every level's frozen remaining constant (remaining = deadline − pausedAt).
+        deadline = deadline?.addingTimeInterval(Double(-applied))
+        for i in ancestors.indices { ancestors[i].deadline = ancestors[i].deadline.addingTimeInterval(Double(-applied)) }
+        // Persist the moved pause start on each level's open pause row.
+        let iso = isoParser.string(from: newStart)
+        db.setOpenPauseStart(sessionId: iid, iso: iso)
+        for f in ancestors { db.setOpenPauseStart(sessionId: f.intervalId, iso: iso) }
         tick()
         return true
     }
