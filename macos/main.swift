@@ -1242,12 +1242,41 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             resumeStackIfPaused()   // shift every level's deadline, close each pause row
         } else {
             guard allowPauseEnabled else { return }   // pausing disabled in Settings
+            // Optionally require a reason before pausing (cancel → don't pause).
+            var reason: String? = nil
+            if askPauseReasonEnabled {
+                showing = true
+                let r = promptPauseReason()
+                showing = false
+                guard let r = r else { return }   // cancelled → stay running
+                reason = r
+            }
             // Pause: freeze the whole stack. tick() stops all countdowns while paused.
             pausedAt = Date()
-            db.startPause(sessionId: id, at: pausedAt!)
-            for f in ancestors { db.startPause(sessionId: f.intervalId, at: pausedAt!) }
+            db.startPause(sessionId: id, at: pausedAt!, reason: reason)
+            for f in ancestors { db.startPause(sessionId: f.intervalId, at: pausedAt!, reason: reason) }
         }
         tick()   // repaint the pill (running ⇄ paused)
+    }
+
+    /// Ask for a required non-empty reason before pausing. Loops until non-empty; returns
+    /// nil if cancelled (don't pause).
+    private func promptPauseReason() -> String? {
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 320, height: 24))
+        field.placeholderString = "e.g. meeting, break, interrupted…"
+        while true {
+            let alert = makeAlert()
+            alert.messageText = "Pausing — what's the reason?"
+            alert.informativeText = "Enter why you're pausing."
+            alert.addButton(withTitle: "Pause")    // 0
+            alert.addButton(withTitle: "Cancel")   // 1
+            alert.accessoryView = field
+            alert.window.level = .floating
+            alert.window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+            if runFloatingAlert(alert, firstResponder: field) == 1 { return nil }
+            let r = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !r.isEmpty { return r }   // require non-empty → otherwise loop
+        }
     }
 
     /// Actual focus time in the CURRENT interval so far = wall-clock since the
@@ -3237,6 +3266,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         get { UserDefaults.standard.object(forKey: "allowPause") as? Bool ?? true }   // default on
         set { UserDefaults.standard.set(newValue, forKey: "allowPause") }
     }
+    private var askPauseReasonEnabled: Bool {
+        get { UserDefaults.standard.bool(forKey: "askPauseReason") }                  // default off
+        set { UserDefaults.standard.set(newValue, forKey: "askPauseReason") }
+    }
 
     // Settings can be temporarily locked (a commitment device): Settings is disabled
     // until this moment. Persisted (as a wall-clock instant) so it survives quit/relaunch
@@ -3255,7 +3288,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
 
     /// The global preference checkboxes, initialized from the stored values,
     /// for the Settings dialog.
-    private func preferenceCheckboxes() -> (sound: NSButton, pushover: NSButton, auto: NSButton, total: NSButton, spent: NSButton, oneTask: NSButton, strict: NSButton, allowPause: NSButton) {
+    private func preferenceCheckboxes() -> (sound: NSButton, pushover: NSButton, auto: NSButton, total: NSButton, spent: NSButton, oneTask: NSButton, strict: NSButton, allowPause: NSButton, pauseReason: NSButton) {
         let sound = NSButton(checkboxWithTitle: "Play sound when time's up", target: nil, action: nil)
         sound.state = playSoundEnabled ? .on : .off
         let pushover = NSButton(checkboxWithTitle: "Send Pushover notification at start and end of sessions", target: nil, action: nil)
@@ -3272,10 +3305,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         strict.state = strictModeEnabled ? .on : .off
         let allowPause = NSButton(checkboxWithTitle: "Allow pausing the current task", target: nil, action: nil)
         allowPause.state = allowPauseEnabled ? .on : .off
-        return (sound, pushover, auto, total, spent, oneTask, strict, allowPause)
+        let pauseReason = NSButton(checkboxWithTitle: "Ask for reason when pausing", target: nil, action: nil)
+        pauseReason.state = askPauseReasonEnabled ? .on : .off
+        return (sound, pushover, auto, total, spent, oneTask, strict, allowPause, pauseReason)
     }
 
-    private func persistPreferences(_ sound: NSButton, _ pushover: NSButton, _ auto: NSButton, _ total: NSButton, _ spent: NSButton, _ oneTask: NSButton, _ strict: NSButton, _ allowPause: NSButton) {
+    private func persistPreferences(_ sound: NSButton, _ pushover: NSButton, _ auto: NSButton, _ total: NSButton, _ spent: NSButton, _ oneTask: NSButton, _ strict: NSButton, _ allowPause: NSButton, _ pauseReason: NSButton) {
         playSoundEnabled = sound.state == .on
         pushoverEnabled = pushover.state == .on
         autoProceedEnabled = auto.state == .on
@@ -3284,6 +3319,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         oneTaskOnlyEnabled = oneTask.state == .on
         strictModeEnabled = strict.state == .on
         allowPauseEnabled = allowPause.state == .on
+        askPauseReasonEnabled = pauseReason.state == .on
     }
 
     // Standalone Settings dialog for the global preferences.
@@ -3298,16 +3334,17 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         defer { showing = wasShowing }
         NSApp.activate(ignoringOtherApps: true)
 
-        let (sound, pushover, auto, total, spent, oneTask, strict, allowPause) = preferenceCheckboxes()
-        total.frame = NSRect(x: 0, y: 182, width: 460, height: 20)
-        spent.frame = NSRect(x: 0, y: 156, width: 460, height: 20)
-        sound.frame = NSRect(x: 0, y: 130, width: 460, height: 20)
-        pushover.frame = NSRect(x: 0, y: 104, width: 460, height: 20)
-        auto.frame = NSRect(x: 0, y: 78, width: 460, height: 20)
-        oneTask.frame = NSRect(x: 0, y: 52, width: 460, height: 20)
-        strict.frame = NSRect(x: 0, y: 26, width: 460, height: 20)
-        allowPause.frame = NSRect(x: 0, y: 0, width: 460, height: 20)
-        let accessory = NSView(frame: NSRect(x: 0, y: 0, width: 460, height: 208))
+        let (sound, pushover, auto, total, spent, oneTask, strict, allowPause, pauseReason) = preferenceCheckboxes()
+        total.frame = NSRect(x: 0, y: 208, width: 460, height: 20)
+        spent.frame = NSRect(x: 0, y: 182, width: 460, height: 20)
+        sound.frame = NSRect(x: 0, y: 156, width: 460, height: 20)
+        pushover.frame = NSRect(x: 0, y: 130, width: 460, height: 20)
+        auto.frame = NSRect(x: 0, y: 104, width: 460, height: 20)
+        oneTask.frame = NSRect(x: 0, y: 78, width: 460, height: 20)
+        strict.frame = NSRect(x: 0, y: 52, width: 460, height: 20)
+        allowPause.frame = NSRect(x: 0, y: 26, width: 460, height: 20)
+        pauseReason.frame = NSRect(x: 0, y: 0, width: 460, height: 20)
+        let accessory = NSView(frame: NSRect(x: 0, y: 0, width: 460, height: 234))
         accessory.addSubview(total)
         accessory.addSubview(spent)
         accessory.addSubview(sound)
@@ -3316,6 +3353,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         accessory.addSubview(oneTask)
         accessory.addSubview(strict)
         accessory.addSubview(allowPause)
+        accessory.addSubview(pauseReason)
 
         let alert = makeAlert()
         alert.messageText = "Settings"
@@ -3328,7 +3366,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         let clicked = alert.runModal()
 
         // Persist whatever's set now — a lock keeps the settings you just chose.
-        persistPreferences(sound, pushover, auto, total, spent, oneTask, strict, allowPause)
+        persistPreferences(sound, pushover, auto, total, spent, oneTask, strict, allowPause, pauseReason)
         if clicked == .alertSecondButtonReturn, let secs = askLockDuration() {
             settingsLockedUntil = Date().addingTimeInterval(Double(secs))
         }

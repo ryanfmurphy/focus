@@ -162,7 +162,8 @@ final class DB {
             session_id INTEGER NOT NULL,
             started_at TEXT NOT NULL,
             ended_at   TEXT,
-            seconds    INTEGER
+            seconds    INTEGER,
+            reason     TEXT               -- optional "why paused" (v3; "Ask for reason when pausing")
         );
         """)
         // --- tasks + intervals (the core model) --------------------------------
@@ -218,7 +219,19 @@ final class DB {
         """)
         exec("CREATE INDEX IF NOT EXISTS idx_task_tags_tag ON task_tags(tag_id);")
 
-        exec("PRAGMA user_version = 2;")   // schema version; future migrations guard on this
+        // v3: pauses.reason. Fresh DBs get it from the CREATE above; a pre-v3 DB gets it via
+        // an idempotent ALTER (guarded on version so it runs once; a duplicate-column error
+        // on an already-migrated DB is harmless and swallowed by exec).
+        if userVersion() < 3 { exec("ALTER TABLE pauses ADD COLUMN reason TEXT;") }
+        exec("PRAGMA user_version = 3;")   // schema version; future migrations guard on this
+    }
+
+    /// The DB's PRAGMA user_version (migration marker).
+    private func userVersion() -> Int {
+        var s: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "PRAGMA user_version;", -1, &s, nil) == SQLITE_OK else { return 0 }
+        defer { sqlite3_finalize(s) }
+        return sqlite3_step(s) == SQLITE_ROW ? Int(sqlite3_column_int(s, 0)) : 0
     }
 
     private func exec(_ sql: String) { sqlite3_exec(db, sql, nil, nil, nil) }
@@ -240,12 +253,13 @@ final class DB {
 
 
     /// Open a pause (row with NULL ended_at) for a session.
-    func startPause(sessionId: Int64, at: Date) {
+    func startPause(sessionId: Int64, at: Date, reason: String? = nil) {
         var stmt: OpaquePointer?
-        guard sqlite3_prepare_v2(db, "INSERT INTO pauses (session_id, started_at) VALUES (?,?);", -1, &stmt, nil) == SQLITE_OK else { return }
+        guard sqlite3_prepare_v2(db, "INSERT INTO pauses (session_id, started_at, reason) VALUES (?,?,?);", -1, &stmt, nil) == SQLITE_OK else { return }
         defer { sqlite3_finalize(stmt) }
         sqlite3_bind_int64(stmt, 1, sessionId)
         sqlite3_bind_text(stmt, 2, isoParser.string(from: at), -1, SQLITE_TRANSIENT)
+        if let r = reason { sqlite3_bind_text(stmt, 3, r, -1, SQLITE_TRANSIENT) } else { sqlite3_bind_null(stmt, 3) }
         sqlite3_step(stmt)
     }
 
