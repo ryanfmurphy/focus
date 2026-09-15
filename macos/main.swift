@@ -2431,6 +2431,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         showing = true
         defer { showing = false }
         let (rating, note, _, _) = promptRating(focus: item.focus, title: "Rate this session")
+        // A never-started queued task has no intervals, so History's Ended (= MAX interval
+        // end) would be blank. Stamp a zero-length interval so completion has a real
+        // timestamp (Ended = now, Actual unchanged). Set-aside tasks keep their real intervals.
+        if db.intervals(forTask: tid).isEmpty, let iid = db.startInterval(taskId: tid, reason: "completed") {
+            db.endInterval(id: iid, elapsedSeconds: 0)
+        }
         db.finishTask(id: tid, status: "completed", rating: rating, note: note)
         db.removeFromQueue(id: item.id)
         reloadQueueData()
