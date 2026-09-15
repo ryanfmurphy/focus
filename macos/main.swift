@@ -1386,6 +1386,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         #selector(deleteHistoryItems), #selector(abandonHistoryTask),
         #selector(resumeHistoryTask), #selector(addHistoryTaskToQueue), #selector(editHistoryTaskTags),
         #selector(workOnQueueItemNow), #selector(deleteQueuedTaskPermanently), #selector(editQueueItemTags),
+        #selector(completeQueueItem),
     ]
 
     // Per-row queue mutations (right-click / Delete key) — frozen in strict mode.
@@ -1393,6 +1394,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         #selector(moveQueueItemUp), #selector(moveQueueItemDown),
         #selector(moveQueueItemToTop), #selector(moveQueueItemToBottom),
         #selector(deleteClickedQueueItem), #selector(deleteQueuedTaskPermanently),
+        #selector(completeQueueItem),
     ]
 
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
@@ -1513,9 +1515,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             let r = queueTable?.clickedRow ?? -1
             return r >= 0 && r < queueRows.count - 1
         }
-        if menuItem.action == #selector(deleteClickedQueueItem) {
+        if menuItem.action == #selector(deleteClickedQueueItem) || menuItem.action == #selector(completeQueueItem) {
             let r = queueTable?.clickedRow ?? -1
-            return r >= 0 && r < queueRows.count
+            return r >= 0 && r < queueRows.count   // (queueEditActions already froze these in strict mode)
         }
         // "Work on now": a valid clicked row, and not in strict mode (out-of-turn start).
         if menuItem.action == #selector(workOnQueueItemNow) {
@@ -2418,6 +2420,24 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
         }
     }
 
+    // "Complete task" from See Queue: mark the clicked queued task completed — rate it (the
+    // same rating flow as the menu's Complete task), then drop it from the queue. Used when
+    // you finished (or no longer need to actively work) a queued item.
+    @objc func completeQueueItem() {
+        let row = queueTable?.clickedRow ?? -1
+        guard !showing, row >= 0, row < queueRows.count else { return }
+        let item = queueRows[row]
+        guard let tid = item.taskId else { return }
+        showing = true
+        defer { showing = false }
+        let (rating, note, _, _) = promptRating(focus: item.focus, title: "Rate this session")
+        db.finishTask(id: tid, status: "completed", rating: rating, note: note)
+        db.removeFromQueue(id: item.id)
+        reloadQueueData()
+        queueTable?.reloadData()
+        updateQueueFilterUI()
+    }
+
     // "Add to queue" from See History: park the selected task(s) at the end of the queue
     // to work on later. Reopens completed ones (they become live pending tasks) and skips
     // any already queued, to avoid duplicates.
@@ -2684,6 +2704,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSTableViewDataSourc
             // Right-click a row to work on it now, re-order it within the queue, or remove it.
             let rowMenu = NSMenu()
             rowMenu.addItem(withTitle: "Work on now", action: #selector(workOnQueueItemNow), keyEquivalent: "")
+            rowMenu.addItem(withTitle: "Complete task", action: #selector(completeQueueItem), keyEquivalent: "")
             rowMenu.addItem(withTitle: "Edit tags…", action: #selector(editQueueItemTags), keyEquivalent: "")
             rowMenu.addItem(.separator())
             rowMenu.addItem(withTitle: "Move up", action: #selector(moveQueueItemUp), keyEquivalent: "")
